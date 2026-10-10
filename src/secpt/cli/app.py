@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 
 import typer
@@ -326,12 +327,37 @@ def findings_cmd(
         help="标记状态（false_positive/duplicate/ignored/resolved/risk_accepted）",
     ),
     classify: str | None = typer.Option(None, "--classify", help="LLM 分类 CWE 并写回该 finding"),
+    cvedupe: str | None = typer.Option(
+        None, "--cvedupe", help="已知 CVE 去重检查（防把 1day 当 0day 报）"
+    ),
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
 ) -> None:
     """漏洞发现库：跨 job 存活的分诊视图（确认纪律：inferred 只能经 verify 升级）。"""
     from secpt.findings.store import FindingStore
 
     store = FindingStore()
+    if cvedupe:
+        import asyncio
+
+        from secpt.findings.cve import dedup_known
+
+        f = store.get(cvedupe)
+        if f is None:
+            typer.echo(f"Error: finding {cvedupe} 不存在", err=True)
+            raise typer.Exit(2)
+        if os.environ.get("SECPT_FAKE_LLM"):
+            typer.echo("Error: CVE 去重需要真实 LLM（FakeLLM 无知识可判）", err=True)
+            raise typer.Exit(2)
+        cves = asyncio.run(dedup_known(f.title, f.description, f.vuln_class, model=model))
+        f.cve_candidates = cves
+        store.save(f)
+        if cves:
+            typer.echo(
+                f"⚠️ {f.id} 疑似已知漏洞复现：{'、'.join(cves)}（报告时将标注，别当 0day 报）"
+            )
+        else:
+            typer.echo(f"✅ {f.id} 未发现已知 CVE 对应——可以理直气壮报 0day")
+        return
     if classify:
         import asyncio
 

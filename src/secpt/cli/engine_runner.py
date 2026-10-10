@@ -33,6 +33,17 @@ def _api_key() -> str:
     return key
 
 
+def _prod_llm():
+    """生产 LLM 入口：SECPT_MODEL_POOL 设置时走多 provider 故障转移链。"""
+    if os.environ.get("SECPT_MODEL_POOL"):
+        from secpt.runtime.llm.pool import call_pooled
+
+        return call_pooled
+    from secpt.runtime.llm.client import call_llm
+
+    return call_llm
+
+
 def run_engine(
     *,
     objective: str,
@@ -65,9 +76,7 @@ def run_engine(
             llm = FakeLLM(n_steps=max(1, (max_steps or 100) - 1), job_id=job_id)
         else:
             _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
-            from secpt.runtime.llm.client import call_llm
-
-            llm = call_llm
+            llm = _prod_llm()
 
     jdir = jobs_dir() / job_id
     jdir.mkdir(parents=True, exist_ok=True)
@@ -258,9 +267,7 @@ def resume_engine(
             llm = FakeLLM(n_steps=max(1, max_steps - 1), job_id=job_id)
         else:
             _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
-            from secpt.runtime.llm.client import call_llm
-
-            llm = call_llm
+            llm = _prod_llm()
 
     store = job_store or JobStore()
     n, messages = load_latest_round(job_id, jobs_dir())

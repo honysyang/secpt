@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import ClassVar
 
 from secpt.core.orchestrator.frontier import Frontier, build_intent_objective, run_frontier
 
@@ -15,7 +16,7 @@ def _run(coro):
 class TestFrontier:
     def test_add_claim_settle(self, tmp_path):
         fr = Frontier(tmp_path / "f.db")
-        i1 = fr.add("打入口A", priority=5, depth=0)
+        fr.add("打入口A", priority=5, depth=0)
         i2 = fr.add("深入A1", priority=5, depth=1)
         i3 = fr.add("打入口B", priority=8, depth=0)
         # 认领顺序：priority DESC → depth DESC → 先创建先领
@@ -73,16 +74,17 @@ def _tool_resp(i):
         name, arguments = "bash", json.dumps({"command": "ls"})
 
     class _TC:
-        id = f"tc{i}"
-        function = _Fn()
+        def __init__(self):
+            self.id = f"tc{i}"
+            self.function = _Fn()
 
     class _Msg:
         content = f"step {i}"
-        tool_calls = [_TC()]
+        tool_calls: ClassVar[list] = [_TC()]
         reasoning_content = None
 
     class _Resp:
-        choices = [type("c", (), {"message": _Msg()})()]
+        choices: ClassVar[list] = [type("c", (), {"message": _Msg()})()]
 
     return _Resp()
 
@@ -90,11 +92,11 @@ def _tool_resp(i):
 def _answer_resp(flag):
     class _Msg:
         content = f"ANSWER: {flag}"
-        tool_calls = []
+        tool_calls: ClassVar[list] = []
         reasoning_content = None
 
     class _Resp:
-        choices = [type("c", (), {"message": _Msg()})()]
+        choices: ClassVar[list] = [type("c", (), {"message": _Msg()})()]
 
     return _Resp()
 
@@ -140,7 +142,7 @@ class TestRunFrontier:
 
     def test_intent_objective_shape(self, tmp_path):
         fr = Frontier(tmp_path / "f.db")
-        iid = fr.add("测试某接口", goal="拿到敏感数据", done_criteria="响应含 secret")
+        fr.add("测试某接口", goal="拿到敏感数据", done_criteria="响应含 secret")
         intent = fr.claim_next()
         assert intent is not None
         obj = build_intent_objective("总目标", intent, fr.recent_results())

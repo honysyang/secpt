@@ -112,7 +112,6 @@ def _heartbeat(store: JobStore, job_id: str, interval: float) -> None:
 
 def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     """执行 job，返回退出码。"""
-    from secpt.runtime.llm.client import call_llm
 
     jdir = jobs_dir() / job_id
     task_yaml = jdir / "task.yaml"
@@ -170,7 +169,9 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     # 兜底：engine 卡死/长 LLM 调用时到点强杀
     threading.Thread(target=_cancel_watcher, args=(pid_file,), daemon=True).start()
 
-    llm = call_llm
+    from secpt.cli.engine_runner import _prod_llm
+
+    llm = _prod_llm()
     if os.environ.get("SECPT_FAKE_LLM"):
         # 测试用假 LLM：n-1 次工具调用后输出 ANSWER flag（留 1 步收尾）
         from secpt.core.job.fakellm import FakeLLM
