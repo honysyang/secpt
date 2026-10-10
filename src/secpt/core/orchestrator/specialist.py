@@ -30,8 +30,8 @@ from secpt.core.job.resume import jobs_dir
 from secpt.core.job.store import JobStore
 from secpt.core.memory.warroom import Warroom
 from secpt.core.profile.loader import load_profile
+from secpt.core.profile.render import render_system_extra
 from secpt.core.watchdog import Watchdog
-from secpt.profiles import render_system_extra
 from secpt.runtime import engine as _engine
 
 # 每角色独立 round 基准：recon=0，exploit-i=1000*(i+1)。用于 events/checkpoint 区分

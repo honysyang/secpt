@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class AppConfig(BaseModel):
     name: str = "secpt"
     version: str = "0.1.0"
-    workdir: str = "./data/runs"
+    workdir: str = "./var/runs"
 
 
 class LLMConfig(BaseModel):
@@ -42,11 +42,11 @@ class GraphConfig(BaseModel):
     """
 
     backend: Literal["memory", "sqlite", "postgres"] = "memory"
-    sqlite_path: str = "./data/graphstore.sqlite"
+    sqlite_path: str = "./var/graphstore.sqlite"
     dsn: str = ""
 
     class SQLite(BaseModel):
-        path: str = "./data/graphstore.sqlite"
+        path: str = "./var/graphstore.sqlite"
         echo: bool = False
 
     class Postgres(BaseModel):
@@ -135,4 +135,4 @@ class PricingConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     enabled: bool = True
-    path: str = "./data/audit"
+    path: str = "./var/audit"

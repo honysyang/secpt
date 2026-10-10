@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-from secpt.profiles import load_prior, render_system_extra
+from secpt.core.profile.render import load_prior, render_system_extra
 from secpt.runtime.engine import DEFAULT_BASH_WHITELIST, DEFAULT_FLAG_REGEX, Engine, RunConfig
 from secpt.runtime.llm.client import call_llm
 

@@ -36,10 +36,10 @@ from secpt.core.job.models import JobRecord
 from secpt.core.job.resume import jobs_dir, make_run_config, read_task_snapshot
 from secpt.core.job.rounds import load_latest_round
 from secpt.core.job.store import JobStore
+from secpt.core.profile.render import load_prior as _load_prior
+from secpt.core.profile.render import render_system_extra as _rse
 from secpt.core.watchdog import Watchdog
 from secpt.governance.ratelimit import GlobalRateLimiter
-from secpt.profiles import load_prior as _load_prior
-from secpt.profiles import render_system_extra as _rse
 from secpt.runtime import engine as _engine
 
 HEARTBEAT_S = 10.0

@@ -31,7 +31,7 @@ _audit_logger: AuditLogger | None = None
 def _get_audit_logger() -> AuditLogger:
     global _audit_logger
     if _audit_logger is None:
-        audit_path = "./data/audit"
+        audit_path = "./var/audit"
         try:
             audit_cfg = getattr(get_settings(), "audit", None)
             if audit_cfg is not None:

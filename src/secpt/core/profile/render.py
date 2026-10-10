@@ -23,7 +23,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-_PRIORS_DIR = Path(__file__).resolve().parent / "knowledge" / "priors"
+_PRIORS_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "priors"
 
 DEFAULT_PROFILE = "ctf"
 

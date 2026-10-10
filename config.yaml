@@ -5,7 +5,7 @@
 app:
   name: secpt
   version: "0.1.0"
-  workdir: ./data/runs
+  workdir: ./var/runs
 
 llm:
   provider: deepseek
@@ -20,7 +20,7 @@ llm:
 graph:
   backend: memory                   # memory / sqlite / postgres（postgres 未实现）
   sqlite:
-    path: ./data/graphstore.sqlite
+    path: ./var/graphstore.sqlite
     echo: false
   postgres:
     dsn: ""
@@ -61,7 +61,7 @@ logging:
 
 audit:
   enabled: true
-  path: ./data/audit
+  path: ./var/audit
 
 pricing:
   input_per_1k: 0.002      # CNY / 1K input tokens（deepseek-chat 缓存未命中）

@@ -66,12 +66,8 @@ def make_run_config(job_id: str, spec: TaskSpec, run_config: dict) -> RunConfig:
         objective=spec.objective,
         system_extra="",  # resume 时首条 system 直接来自初始链，不需重建
         workspace=Path(run_config.get("workspace") or jobs_dir() / job_id),
-        max_steps=run_config["max_steps"]
-        if "max_steps" in run_config
-        else (spec.budget.steps or 100),  # noqa: SIM401
-        max_wall_s=run_config["max_wall_s"]
-        if "max_wall_s" in run_config
-        else (int(spec.budget.wall_s) or 900),
+        max_steps=run_config.get("max_steps", spec.budget.steps or 100),
+        max_wall_s=run_config.get("max_wall_s", int(spec.budget.wall_s) or 900),
         bash_timeout_s=run_config.get("bash_timeout_s", 60),
         bash_whitelist=frozenset(run_config.get("bash_whitelist"))
         if run_config.get("bash_whitelist")

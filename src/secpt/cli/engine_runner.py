@@ -22,7 +22,7 @@ from secpt.core.job.models import JobRecord, TaskSpec
 from secpt.core.job.resume import jobs_dir, make_run_config, read_task_snapshot, write_task_snapshot
 from secpt.core.job.rounds import load_latest_round
 from secpt.core.job.store import JobStore
-from secpt.profiles import DEFAULT_CONSTRAINTS, load_prior, render_system_extra
+from secpt.core.profile.render import DEFAULT_CONSTRAINTS, load_prior, render_system_extra
 from secpt.runtime import engine as _engine
 
 
@@ -247,7 +247,7 @@ def resume_engine(
     else:
         # 无存档 → 从头开始（重建 system，profile 数据驱动）
         from secpt.core.profile.loader import load_profile
-        from secpt.profiles import render_system_extra as _rse
+        from secpt.core.profile.render import render_system_extra as _rse
 
         _prof = load_profile(spec.task_type)
         _cons = list(_prof.constraints) or [DEFAULT_CONSTRAINTS]

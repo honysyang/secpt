@@ -73,7 +73,7 @@ class ChatSession:
 
         # 图存储
         if self.backend == "sqlite":
-            db_path = f"./data/sessions/{self.session_id}.db"
+            db_path = f"./var/sessions/{self.session_id}.db"
             graph_cfg = GraphConfig(backend="sqlite", sqlite_path=db_path)
         else:
             graph_cfg = GraphConfig(backend="memory")
@@ -108,7 +108,7 @@ class ChatSession:
         import tempfile
         from pathlib import Path as _P
 
-        from secpt.profiles import load_prior, render_system_extra
+        from secpt.core.profile.render import load_prior, render_system_extra
         from secpt.runtime import engine as _engine
         from secpt.runtime.llm.client import call_llm
 
