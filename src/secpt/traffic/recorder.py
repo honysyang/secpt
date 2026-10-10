@@ -10,6 +10,7 @@ SECPT_PROXY_CA 后，会自动给子进程注入 HTTP(S)_PROXY 与 CA 环境变�
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -143,7 +144,7 @@ class TrafficRecorder:
                     await master.run()
 
                 asyncio.run(runner())
-            except Exception as exc:
+            except BaseException as exc:  # 含 mitmproxy 端口占用时的 SystemExit
                 box["error"] = exc
                 ready.set()
 
@@ -196,9 +197,7 @@ class TrafficRecorder:
 
     @staticmethod
     def _abort(master: DumpMaster, thread: threading.Thread, store: TrafficStore) -> None:
-        try:
+        with contextlib.suppress(Exception):
             master.shutdown()
-        except Exception:
-            pass
         thread.join(timeout=5)
         store.close()

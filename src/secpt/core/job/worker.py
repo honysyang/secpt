@@ -186,6 +186,11 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     extra_tools, _step_box = maybe_attach(
         extra_tools, run_cfg.get("extra_tool_names") or [], job_id
     )
+    from secpt.intel.tools import maybe_attach_intel
+
+    extra_tools = maybe_attach_intel(
+        extra_tools, run_cfg.get("extra_tool_names") or [], job_id, box=_step_box
+    )
 
     exit_code = 3
     cancelled = False

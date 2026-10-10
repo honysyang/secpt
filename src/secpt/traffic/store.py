@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -45,7 +46,9 @@ def default_traffic_dir() -> Path:
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """打开（必要时创建）一个流量 SQLite，并建好 schema。"""
-    conn = sqlite3.connect(str(db_path))
+    # check_same_thread=False：连接由主线程建、mitmproxy addon 线程写，
+    # 每次 record 独立 commit，依赖 SQLite 串行化模式保证安全
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
@@ -187,10 +190,8 @@ class TrafficStore:
         return self._fts
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(sqlite3.Error):
             self._conn.close()
-        except sqlite3.Error:
-            pass
 
     def record(self, flow: dict[str, Any]) -> int | None:
         """落一条交换（flow 为拍平后的纯 dict）。"""

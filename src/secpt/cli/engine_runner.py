@@ -102,6 +102,9 @@ def run_engine(
     from secpt.findings.tool import maybe_attach
 
     extra_tools, _step_box = maybe_attach(extra_tools, stage_tools, job_id)
+    from secpt.intel.tools import maybe_attach_intel
+
+    extra_tools = maybe_attach_intel(extra_tools, stage_tools, job_id, box=_step_box)
     bash_extra = [t for t in bash_extra if t != "report_finding"]
 
     store = job_store or JobStore()
@@ -296,6 +299,11 @@ def resume_engine(
 
     extra_tools, _step_box = maybe_attach(
         extra_tools, run_cfg.get("extra_tool_names") or [], job_id
+    )
+    from secpt.intel.tools import maybe_attach_intel
+
+    extra_tools = maybe_attach_intel(
+        extra_tools, run_cfg.get("extra_tool_names") or [], job_id, box=_step_box
     )
 
     if "report_finding" in extra_tools:

@@ -393,6 +393,28 @@ def findings_cmd(
         typer.echo(f"{f.id:16s} {f.status:13s} {f.severity:8s}  {f.title[:40]}  @{f.target[:30]}")
 
 
+@app.command("coverage")
+def coverage_cmd(
+    asset_type: str = typer.Option(
+        "endpoint", "--type", "-t", help="资产类型（root_domain/subdomain/ip/service/app/endpoint）"
+    ),
+) -> None:
+    """资产覆盖度：哪些已触达、哪些未测（挖洞最怕自以为测完了）+ 未触达清单。"""
+    from secpt.intel.store import IntelStore
+
+    st = IntelStore()
+    cov = st.coverage()
+    typer.echo(f"{'类型':12s} {'总数':>6s} {'已触达':>8s} {'覆盖率':>8s}")
+    for t, d in sorted(cov.items()):
+        pct = (d["touched"] / d["total"] * 100) if d["total"] else 0.0
+        typer.echo(f"{t:12s} {d['total']:>6d} {d['touched']:>8d} {pct:>7.1f}%")
+    untested = st.untested_assets(atype=asset_type)
+    if untested:
+        typer.echo(f"\n未触达 {asset_type}（planner 待办原材料）：")
+        for a in untested[:30]:
+            typer.echo(f"  #{a['id']} {a['value'][:90]}")
+
+
 @app.command("report")
 def report_cmd(
     job_id: str | None = typer.Argument(None, help="任务 job_id（缺省=全部发现）"),
