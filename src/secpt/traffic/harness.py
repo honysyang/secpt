@@ -23,7 +23,7 @@ def traffic_scope(job_id: str, *, enabled: bool = False):
     try:
         from secpt.traffic.recorder import TrafficRecorder
 
-        handle = TrafficRecorder.start(job_id)
+        handle = TrafficRecorder().start(job_id)
         if handle is not None:
             handle.set_env()
             print(f"[traffic] 录制中: {handle.url}（job={job_id}）")
