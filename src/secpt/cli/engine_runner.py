@@ -205,6 +205,9 @@ def run_engine(
         from secpt.findings.tool import StepTracker
 
         hooks = StepTracker(hooks, _step_box)
+    from secpt.intel.scribe import GraphScribe
+
+    hooks = GraphScribe(hooks, job_id=job_id)
 
     # JobRecord
     rec = JobRecord(job_id=job_id, spec=spec, status="running")
@@ -322,6 +325,9 @@ def resume_engine(
 
     if "report_finding" in extra_tools:
         hooks = StepTracker(hooks, _step_box)
+    from secpt.intel.scribe import GraphScribe
+
+    hooks = GraphScribe(hooks, job_id=job_id)
     from secpt.core.profile.loader import load_profile as _load_profile
     from secpt.traffic.harness import traffic_scope
 

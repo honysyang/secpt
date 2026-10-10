@@ -98,14 +98,15 @@ def make_intel_tools(store: IntelStore | None = None, *, job_id: str, box: dict 
 
     async def recall(args: dict) -> str:
         try:
-            hits = st.recall(str(args.get("query") or ""), limit=8)
+            hits = st.recall_graph(str(args.get("query") or ""), limit=8)
         except Exception as e:
             return f"Error: {e}"
         if not hits:
             return "（无匹配记忆）"
         lines = []
-        for h in hits[:6]:
-            lines.append(f"#{h['id']} [{h['type']}] {h['content'][:160]}")
+        for h in hits[:8]:
+            tag = "🔗" if h.get("associated") else "#"
+            lines.append(f"{tag}{h['id']} [{h['type']}] {h['content'][:160]}")
         return "\n".join(lines)
 
     return {

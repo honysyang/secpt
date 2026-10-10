@@ -52,6 +52,9 @@ secpt solve challenges/rois-saml-sso
 # 3. 无 key 干跑（FakeLLM 全链路）
 SECPT_FAKE_LLM=1 secpt solve challenges/rois-saml-sso
 
+# 实时观察（另开终端）：逐步思考/工具调用/响应/发现/压缩
+secpt watch <job_id>
+
 # 4. 测试与规范
 make check                             # ruff check + ruff format --check + pytest（提交前必跑）
 make recheck REPORT=<report.json>      # 可选：复跑判据门禁

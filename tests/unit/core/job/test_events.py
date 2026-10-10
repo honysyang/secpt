@@ -90,5 +90,6 @@ def test_hooks_all_wired(tmp_path):
         "error",
         "compaction",
         "routed",
+        "step",
         "verdict",
     } == EVENT_TYPES

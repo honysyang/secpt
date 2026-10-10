@@ -561,6 +561,54 @@ def retest_cmd(
     typer.echo(f"{f.id}: verdict={last.get('verdict')}（复测不自动降级 confirmed，人工裁决）")
 
 
+@app.command("intel")
+def intel_cmd(
+    action: str = typer.Argument("maintain", help="maintain（冷节点压缩）/ search <词>"),
+    query: str | None = typer.Argument(None, help="search 的检索词"),
+    ttl_days: int = typer.Option(7, "--ttl-days", help="冷化时限（天）"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+) -> None:
+    """图记忆维护：冷节点压缩（图结构判决冷热，签名缓存省 LLM）。"""
+    import asyncio
+
+    from secpt.intel.store import COLD_TTL_S, IntelStore
+
+    if action == "search":
+        if not query:
+            typer.echo("Error: search 需要检索词")
+            raise typer.Exit(2)
+        hits = IntelStore().recall_graph(query, limit=8)
+        for h in hits:
+            tag = "🔗" if h.get("associated") else "#"
+            typer.echo(f"{tag}{h['id']} [{h['type']}] {h['content'][:140]}")
+        return
+    if action != "maintain":
+        typer.echo(f"Error: 只支持 maintain / search，收到 {action!r}")
+        raise typer.Exit(2)
+    if os.environ.get("SECPT_FAKE_LLM"):
+        typer.echo("Error: 冷压缩需要真实 LLM（FakeLLM 无摘要能力）")
+        raise typer.Exit(2)
+    from secpt.intel.maintain import maintain
+
+    r = asyncio.run(maintain(ttl_s=COLD_TTL_S / 7 * ttl_days, model=model))
+    typer.echo(
+        f"冷压缩: 候选 {r['candidates']} → 压缩 {r['compressed']} "
+        f"/ 签名缓存命中 {r['cached']} / 跳过 {r['skipped']}"
+    )
+
+
+@app.command("watch")
+def watch_entry(
+    job_id: str = typer.Argument(..., help="要观察的 job_id"),
+    tail: int = typer.Option(0, "--tail", "-n", help="先回看最近 N 条事件再跟随"),
+    raw: bool = typer.Option(False, "--raw", help="原始 JSONL（调试用）"),
+) -> None:
+    """实时交互日志：AI 逐步思考 / 工具调用 / 工具响应 / 发现 / 压缩。"""
+    from secpt.cli.watch import watch
+
+    watch(job_id, tail=tail, raw=raw)
+
+
 @app.command("learn")
 def learn_entry(
     job_id: str | None = typer.Argument(None, help="job_id（缺省=最近一个）"),

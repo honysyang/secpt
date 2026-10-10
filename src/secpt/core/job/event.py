@@ -29,6 +29,7 @@ EVENT_TYPES = {
     "error",
     "compaction",
     "routed",
+    "step",  # 步进心跳（watch 实时视图的分界）
     "verdict",  # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
 }
 
@@ -92,13 +93,15 @@ class EventSink:
     # ---------------- Engine hooks ----------------
 
     def on_step(self, idx: int, elapsed_s: float) -> None:
-        pass  # 步进事件可通过 events.jsonl 的 ts/seq 推演，不额外落盘
+        # 步进心跳：watch 实时视图的分界（一行，低成本）
+        self.write("step", {"n": idx, "elapsed_s": round(elapsed_s, 1)})
 
     def on_assistant(self, msg_dict: dict) -> None:
         self.write(
             "assistant",
             {
                 "content": (msg_dict.get("content") or "")[:2000],
+                "reasoning": (msg_dict.get("reasoning_content") or "")[:800],
                 "tool_calls": [
                     {
                         "id": tc.get("id", ""),

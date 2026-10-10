@@ -203,6 +203,7 @@ def solve(
     )
 
     print(f"[solve] job={job_id} profile={profile} prior={prior_name or '(profile 默认)'}")
+    print(f"[solve] 实时观察（另开终端）: secpt watch {job_id}")
     print(
         f"[solve] 入口 {len(entries)} 个，附件路径 {len(artifacts)} 个，"
         f"ground truth: {'有' if gt else '无'}"

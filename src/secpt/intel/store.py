@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     content TEXT NOT NULL,
     job_id TEXT DEFAULT '',
     step INTEGER DEFAULT 0,
+    cold INTEGER DEFAULT 0,          -- 1=已冷压缩（recall 默认排除）
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
@@ -61,7 +63,16 @@ CREATE TABLE IF NOT EXISTS anchors (
     UNIQUE(node_id, asset_id)
 );
 CREATE INDEX IF NOT EXISTS idx_anchors_asset ON anchors(asset_id);
+
+-- 冷压缩账本（图记忆派：内容签名缓存，签名不变不重压缩）
+CREATE TABLE IF NOT EXISTS cold_digests (
+    sig TEXT PRIMARY KEY,
+    summary_node_id INTEGER NOT NULL,
+    ts REAL NOT NULL
+);
 """
+
+COLD_TTL_S = 7 * 24 * 3600  # 默认冷化时限：7 天无连接
 
 _URL_RE = re.compile(r"https?://([^/?\s]+)([^?\s]*)")
 
@@ -105,12 +116,18 @@ class IntelStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._migrate(c)
             self._fts = _fts5_available(c)
             if self._fts:
                 c.execute(
                     """CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
                        USING fts5(content, node_id UNINDEXED)"""
                 )
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
+        """轻量迁移：老库补列（ALTER TABLE 容错——列已存在即跳过）。"""
+        with contextlib.suppress(sqlite3.Error):
+            c.execute("ALTER TABLE nodes ADD COLUMN cold INTEGER DEFAULT 0")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -207,6 +224,91 @@ class IntelStore:
             )
             return int(cur.lastrowid)
 
+    # ---------------- 联想召回（图记忆派核心） ----------------
+
+    def neighbors(self, node_id: int, *, hops: int = 1, limit: int = 20) -> list[dict]:
+        """1 跳（或多跳）血缘邻居——关键词命中后沿边联想扩召回。"""
+        seen = {node_id}
+        frontier = [node_id]
+        out: list[dict] = []
+        with self._conn() as c:
+            for _ in range(max(1, hops)):
+                nxt: list[int] = []
+                for nid in frontier:
+                    rows = c.execute(
+                        """SELECT n.*, e.kind AS edge_kind FROM edges e
+                           JOIN nodes n ON n.id = CASE WHEN e.src=? THEN e.dst ELSE e.src END
+                           WHERE e.src=? OR e.dst=? LIMIT ?""",
+                        (nid, nid, nid, limit),
+                    ).fetchall()
+                    for r in rows:
+                        d = dict(r)
+                        if d["id"] in seen:
+                            continue
+                        seen.add(d["id"])
+                        nxt.append(d["id"])
+                        out.append(d)
+                frontier = nxt
+                if not frontier:
+                    break
+        return out[:limit]
+
+    def recall_graph(self, query: str, *, limit: int = 8) -> list[dict]:
+        """联想召回：关键词命中（排除冷节点）→ 1 跳血缘邻居合并排序。
+
+        图记忆派的本质：记忆按**关联**取回，不是按字符串匹配——命中一个 fact，
+        与它综合得出过 finding 的其他 fact 一并带回（交叉点的原材料）。
+        """
+        hits = self.recall(query, limit=limit)
+        hits = [h for h in hits if not h.get("cold")]
+        merged: dict[int, dict] = {int(h["id"]): dict(h) for h in hits}
+        for h in hits[:4]:  # 只对前 4 个命中做联想，防爆炸
+            for nb in self.neighbors(int(h["id"]), hops=1, limit=8):
+                if nb.get("cold"):
+                    continue
+                nb["associated"] = True  # 联想带来源标记（排序降权）
+                merged.setdefault(int(nb["id"]), dict(nb))
+        return list(merged.values())[: limit * 2]
+
+    # ---------------- 冷压缩 ----------------
+
+    def cold_candidates(self, *, ttl_s: float = COLD_TTL_S, limit: int = 200) -> list[dict]:
+        """冷节点：超 TTL 且没有任何边连接到新节点的 fact/hint（结构上图已孤立）。"""
+        cutoff = time.time() - ttl_s
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT n.* FROM nodes n
+                   WHERE n.type IN ('fact','hint')
+                     AND n.ts < ? AND COALESCE(n.cold, 0) = 0
+                     AND NOT EXISTS (
+                         SELECT 1 FROM edges e
+                         WHERE (e.src = n.id OR e.dst = n.id)
+                           AND e.ts > ?)
+                   ORDER BY n.ts LIMIT ?""",
+                (cutoff, cutoff, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_cold(self, node_ids: list[int]) -> None:
+        if not node_ids:
+            return
+        with self._conn() as c:
+            c.executemany("UPDATE nodes SET cold=1 WHERE id=?", [(i,) for i in node_ids])
+
+    def digest_cached(self, sig: str) -> int | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT summary_node_id FROM cold_digests WHERE sig=?", (sig,)
+            ).fetchone()
+        return int(row["summary_node_id"]) if row else None
+
+    def record_digest(self, sig: str, summary_node_id: int) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO cold_digests (sig,summary_node_id,ts) VALUES (?,?,?)",
+                (sig, summary_node_id, time.time()),
+            )
+
     def recall(self, query: str, *, limit: int = 8) -> list[dict]:
         """全文/模糊检索 fact/finding/hint（agent 的过程级记忆检索）。
 
@@ -224,7 +326,8 @@ class IntelStore:
                     match = " AND ".join(f'"{t}"' for t in terms[:8])
                     rows = c.execute(
                         """SELECT n.* FROM facts_fts f JOIN nodes n ON n.id=f.node_id
-                           WHERE facts_fts MATCH ? ORDER BY n.ts DESC LIMIT ?""",
+                           WHERE facts_fts MATCH ? AND COALESCE(n.cold,0)=0
+                           ORDER BY n.ts DESC LIMIT ?""",
                         (match, limit),
                     ).fetchall()
                     out = [dict(r) for r in rows]
@@ -232,7 +335,7 @@ class IntelStore:
                     out = []
             if not out:
                 sql = """SELECT * FROM nodes WHERE type IN ('fact','finding','hint')
-                         AND (1=1"""
+                         AND COALESCE(cold,0)=0 AND (1=1"""
                 args: list = []
                 for t in terms[:6]:
                     sql += " AND content LIKE ?"
