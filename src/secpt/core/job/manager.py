@@ -16,6 +16,7 @@ stuck 检测：worker 每 10s 更新 jobs.updated_at；manager 发现某 worker
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -27,9 +28,9 @@ from secpt.core.job.models import JobRecord, TaskSpec
 from secpt.core.job.resume import jobs_dir, write_task_snapshot
 from secpt.core.job.store import JobStore
 
-STUCK_AFTER_S = 15 * 60      # 15min 无心跳 → stuck
+STUCK_AFTER_S = 15 * 60  # 15min 无心跳 → stuck
 REAP_INTERVAL_S = 5.0
-HEARTBEAT_GRACE_S = 30.0     # 启动头 30s 不算 stuck（worker 刚起来还没心跳）
+HEARTBEAT_GRACE_S = 30.0  # 启动头 30s 不算 stuck（worker 刚起来还没心跳）
 
 
 class JobManager:
@@ -48,7 +49,7 @@ class JobManager:
         self.db_path = Path(db_path)
         # job_id -> (Popen, started_at)
         self._procs: dict[str, tuple[subprocess.Popen, float]] = {}
-        self._queue: list[str] = []          # FIFO 排队中（jobs 表 status=queued）
+        self._queue: list[str] = []  # FIFO 排队中（jobs 表 status=queued）
         self._worker_python = worker_python or sys.executable
         self._worker_script = Path(worker_script) if worker_script else None
 
@@ -81,11 +82,10 @@ class JobManager:
             if rc is not None:
                 done.append(job_id)
                 rec = self.store.get_job(job_id)
-                if rec is not None and rec.status == "running":
+                if rec is not None and rec.status == "running" and rc != 0:
                     # 子进程自己会更新终态；这里只兜底（被 kill 等）
-                    if rc != 0 and rec.status == "running":
-                        rec.set_status("failed", error=f"worker exited rc={rc}")
-                        self.store.upsert_job(rec)
+                    rec.set_status("failed", error=f"worker exited rc={rc}")
+                    self.store.upsert_job(rec)
         for job_id in done:
             self._procs.pop(job_id, None)
 
@@ -104,8 +104,11 @@ class JobManager:
             cmd = [self._worker_python, str(self._worker_script), "--job-id", job_id]
         else:
             cmd = [
-                self._worker_python, "-m", "secpt.core.job.worker",
-                "--job-id", job_id,
+                self._worker_python,
+                "-m",
+                "secpt.core.job.worker",
+                "--job-id",
+                job_id,
             ]
         env = os.environ.copy()
         # 让 worker 用同一个 db
@@ -137,10 +140,8 @@ class JobManager:
             return False
         if job_id in self._procs:
             proc, _ = self._procs[job_id]
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 proc.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                pass
             rec.set_status("cancelled")
             self.store.upsert_job(rec)
             return True
@@ -186,6 +187,7 @@ class JobManager:
             try:
                 updated = rec.updated_at
                 from datetime import datetime
+
                 dt = datetime.fromisoformat(updated)
                 age = time.time() - dt.timestamp()
             except Exception:
@@ -194,10 +196,8 @@ class JobManager:
                 print(f"[manager] job {job_id} stuck (no heartbeat {age:.0f}s), SIGTERM")
                 rec.set_status("stuck")
                 self.store.upsert_job(rec)
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     proc.send_signal(signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
 
     # ---------------- 常驻循环 ----------------
 

@@ -34,6 +34,7 @@ _PRIOR_MAP = Path(__file__).resolve().parents[1] / "knowledge" / "prior_map.yaml
 # 自动化各步骤（独立容错：单步失败不阻断主流程）
 # ---------------------------------------------------------------------------
 
+
 def _find_doc(target: Path) -> Path:
     if target.is_file():
         return target
@@ -41,19 +42,19 @@ def _find_doc(target: Path) -> Path:
         cand = target / name
         if cand.is_file():
             return cand
-    raise FileNotFoundError(
-        f"{target} 下找不到题面文件（{_CHALLENGE_DOC_NAMES}）")
+    raise FileNotFoundError(f"{target} 下找不到题面文件（{_CHALLENGE_DOC_NAMES}）")
 
 
 def _extract_entries(objective: str) -> list[str]:
     """题面 → 入口列表（复用 Challenge 的多组正则）。"""
     try:
         from secpt.challenge.loader import Challenge
+
         # extract_targets 只依赖 description：绕过 dataclass 构造（避免 path 等必填字段）
         ch = object.__new__(Challenge)
         ch.description = objective
         return ch.extract_targets()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"[solve] 入口抽取失败（忽略，题面仍完整传入）: {e}")
         return []
 
@@ -63,6 +64,7 @@ def _prepare_attachments(challenge_dir: Path) -> list[str]:
     out_dir = challenge_dir / "attachments"
     out_dir.mkdir(exist_ok=True)
     from secpt.challenge.attachments import AttachmentHandler
+
     handler = AttachmentHandler(extract_dir=out_dir)
     found = []
     for dname in _ATTACH_DIR_NAMES:
@@ -70,12 +72,13 @@ def _prepare_attachments(challenge_dir: Path) -> list[str]:
         if not d.is_dir():
             continue
         for f in sorted(d.iterdir()):
-            if f.suffix.lower() in (".zip", ".tar", ".gz", ".tgz") or \
-                    "?" in f.name:        # 平台附件常带 ?attname= 查询串
+            if (
+                f.suffix.lower() in (".zip", ".tar", ".gz", ".tgz") or "?" in f.name
+            ):  # 平台附件常带 ?attname= 查询串
                 try:
                     handler.extract(f)
                     found.append(str(out_dir))
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     print(f"[solve] 附件解压失败 {f.name}（忽略）: {e}")
         # 已解压出的源码目录直接可用
         for sub in sorted(out_dir.iterdir()):
@@ -94,6 +97,7 @@ def _auto_prior(objective: str) -> str | None:
     """关键词表匹配先验；未命中返回 None（用 profile 默认）。"""
     try:
         import yaml
+
         if not _PRIOR_MAP.is_file():
             return None
         table = yaml.safe_load(_PRIOR_MAP.read_text(encoding="utf-8")) or {}
@@ -102,7 +106,7 @@ def _auto_prior(objective: str) -> str | None:
             for kw in keywords or []:
                 if str(kw).lower() in low:
                     return str(prior)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"[solve] 先验匹配失败（忽略）: {e}")
     return None
 
@@ -118,6 +122,7 @@ def _find_ground_truth(challenge_dir: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
+
 
 def solve(
     target: str,
@@ -162,8 +167,10 @@ def solve(
     )
 
     print(f"[solve] job={job_id} profile={profile} prior={prior_name or '(profile 默认)'}")
-    print(f"[solve] 入口 {len(entries)} 个，附件路径 {len(artifacts)} 个，"
-          f"ground truth: {'有' if gt else '无'}")
+    print(
+        f"[solve] 入口 {len(entries)} 个，附件路径 {len(artifacts)} 个，"
+        f"ground truth: {'有' if gt else '无'}"
+    )
 
     from secpt.core.job.store import JobStore
     from secpt.core.orchestrator import dag as _dag
@@ -173,38 +180,46 @@ def solve(
         prof = _load_profile(profile)
         if prof.stages:
             from secpt.core.orchestrator.stages import run_stages
-            return await run_stages(spec, prof, store=store,
-                                    model_primary=model, model_fallback=fallback)
-        return await _dag.run_task(spec, store=store, use_orchestrator=False,
-                                   model_primary=model, model_fallback=fallback)
+
+            return await run_stages(
+                spec, prof, store=store, model_primary=model, model_fallback=fallback
+            )
+        return await _dag.run_task(
+            spec, store=store, use_orchestrator=False, model_primary=model, model_fallback=fallback
+        )
 
     summary = asyncio.run(_run())
     flags = summary.get("flags") or []
     flag = flags[0] if flags else None
-    print(f"\n[solve] 运行结束：status={summary.get('mode')} wall={summary.get('wall_s')}s "
-          f"flag={flag or '未拿到'}")
+    print(
+        f"\n[solve] 运行结束：status={summary.get('mode')} wall={summary.get('wall_s')}s "
+        f"flag={flag or '未拿到'}"
+    )
 
     # 自动评判（best-effort，失败不阻断）
     verdict_ok = False
     if judge_enable:
         try:
             from secpt.evaluation.verdict import evaluate_job, render
-            verdict = asyncio.run(evaluate_job(
-                job_id, ground_truth_file=str(gt) if gt else None, model=model))
+
+            verdict = asyncio.run(
+                evaluate_job(job_id, ground_truth_file=str(gt) if gt else None, model=model)
+            )
             print("\n[solve] 评判结果：")
             print(render(verdict))
             verdict_ok = verdict.complete
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[solve] 评判失败（忽略）: {e}")
 
     # 自动学习（best-effort）
     if learn_enable:
         try:
             from secpt.learning.distill import distill_job
+
             exp = asyncio.run(distill_job(job_id, model=model))
             if exp:
                 print(f"[solve] 已沉淀经验：{exp.title}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[solve] 经验蒸馏失败（忽略）: {e}")
 
     return 0 if (flag or verdict_ok) else 1
@@ -212,12 +227,14 @@ def solve(
 
 def _load_profile(name: str):
     from secpt.core.profile.loader import load_profile
+
     return load_profile(name)
 
 
 # ---------------------------------------------------------------------------
 # typer 入口（app.py 注册）
 # ---------------------------------------------------------------------------
+
 
 def solve_cmd(
     target: str = typer.Argument(..., help="挑战目录或题面文件（test.md/题目.md）"),
@@ -234,9 +251,15 @@ def solve_cmd(
     """一键解题：入口抽取/附件就位/先验匹配/运行/评判/学习，全自动。"""
     code = solve(
         target,
-        profile=profile, prior=prior, model=model, fallback=fallback,
-        wall=wall, steps=steps,
-        judge_enable=not no_judge, learn_enable=not no_learn, verbose=verbose,
+        profile=profile,
+        prior=prior,
+        model=model,
+        fallback=fallback,
+        wall=wall,
+        steps=steps,
+        judge_enable=not no_judge,
+        learn_enable=not no_learn,
+        verbose=verbose,
     )
     raise typer.Exit(code)
 
@@ -246,8 +269,8 @@ def learn_cmd(
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
 ) -> None:
     """手动触发经验蒸馏（learning 闭环补漏）。"""
-    from secpt.learning.distill import distill_job
     from secpt.core.job.store import JobStore
+    from secpt.learning.distill import distill_job
 
     if job_id is None:
         rows = JobStore().list_jobs(limit=1)

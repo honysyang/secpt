@@ -13,6 +13,7 @@ scope 约束由 governance 层负责。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -23,17 +24,40 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from secpt.runtime.llm.client import call_llm
 from secpt.runtime.stuck import StuckDetector
 
-DEFAULT_BASH_WHITELIST = frozenset({
-    "curl", "python3", "base64", "xxd", "grep", "sed", "awk",
-    "cat", "ls", "file", "openssl", "nmap", "whatweb",
-    "find", "echo", "pwd",
-    # 通用分析/工程命令（只读或工作目录内，跨靶场可迁移）
-    "head", "tail", "wc", "sort", "uniq", "strings", "diff",
-    "sha256sum", "unzip", "zipinfo", "mkdir",
-})
+DEFAULT_BASH_WHITELIST = frozenset(
+    {
+        "curl",
+        "python3",
+        "base64",
+        "xxd",
+        "grep",
+        "sed",
+        "awk",
+        "cat",
+        "ls",
+        "file",
+        "openssl",
+        "nmap",
+        "whatweb",
+        "find",
+        "echo",
+        "pwd",
+        # 通用分析/工程命令（只读或工作目录内，跨靶场可迁移）
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "uniq",
+        "strings",
+        "diff",
+        "sha256sum",
+        "unzip",
+        "zipinfo",
+        "mkdir",
+    }
+)
 
 DEFAULT_FLAG_REGEX = r"[Ff][Ll][Aa][Gg]\{[^{}]{3,}\}"
 
@@ -45,7 +69,7 @@ MODEL_WINDOWS = {
 }
 
 BASH_MAX_OUT = 8000
-BASH_READ_CAP = BASH_MAX_OUT * 2   # 单命令 stdout+stderr 读取上限（防失控输出撑爆内存）
+BASH_READ_CAP = BASH_MAX_OUT * 2  # 单命令 stdout+stderr 读取上限（防失控输出撑爆内存）
 READ_MAX = 200 * 1024
 
 # shell 元字符：白名单命令默认以 argv 数组执行（禁 shell=True），出现这些字符说明
@@ -67,6 +91,7 @@ def _has_unquoted_shell_meta(command: str) -> bool:
         elif ch in _SHELL_META:
             return True
     return False
+
 
 # S3 发现启发式：凭据行 / URL（供 on_finding 上报，watchdog 据此判断是否空转）
 _CRED_RE = re.compile(
@@ -91,27 +116,27 @@ def _scan_findings(text: str, flag_re) -> list[tuple[str, str]]:
 @dataclass
 class RunConfig:
     job_id: str
-    objective: str              # 任务全文，原文传入，不摘要
-    system_extra: str           # profile 渲染出的先验+工具说明+约束
+    objective: str  # 任务全文，原文传入，不摘要
+    system_extra: str  # profile 渲染出的先验+工具说明+约束
     workspace: Path
-    max_steps: int = 100          # <=0 表示不限步数（7×24 长任务）
-    max_wall_s: int = 900         # <=0 表示不限墙钟（7×24 长任务）
+    max_steps: int = 100  # <=0 表示不限步数（7×24 长任务）
+    max_wall_s: int = 900  # <=0 表示不限墙钟（7×24 长任务）
     bash_timeout_s: int = 60
     bash_whitelist: frozenset[str] = DEFAULT_BASH_WHITELIST
-    flag_regex: str | None = None   # 已废弃：不再用于终止判定，仅兼容旧快照
+    flag_regex: str | None = None  # 已废弃：不再用于终止判定，仅兼容旧快照
     model_primary: str = "deepseek-chat"
     model_fallback: str = "deepseek-reasoner"
     stuck_threshold: int = 6
     stuck_increment: int = 2
-    initial_messages: list[dict] | None = None   # S1 resume：非空则直接作为初始链（含首条 system）
-    round_offset: int = 0                        # S1 resume：续跑后 round 编号继续，避免覆盖旧 checkpoint
-    ratelimit: object | None = None              # S2 全局限速器（.check(command)->list[str]，非空拦截）
-    context_window: int | None = None            # S3 上下文窗口（token）；None=按模型查表
-                                                 # （MODEL_WINDOWS），可用 SECPT_FAKE_WINDOW 覆盖
-    budget_cost_cny: float = 0.0                 # S3 成本上限（元），0 表示不限
-    budget_warn_pct: float = 0.8                 # S3 预算警告阈值
-    round_max_steps: int = 60                    # S3 回合最大步数（触发 rollover）
-    round_max_wall_s: int = 1500                 # S3 回合最大墙钟（秒，25min）
+    initial_messages: list[dict] | None = None  # S1 resume：非空则直接作为初始链（含首条 system）
+    round_offset: int = 0  # S1 resume：续跑后 round 编号继续，避免覆盖旧 checkpoint
+    ratelimit: object | None = None  # S2 全局限速器（.check(command)->list[str]，非空拦截）
+    context_window: int | None = None  # S3 上下文窗口（token）；None=按模型查表
+    # （MODEL_WINDOWS），可用 SECPT_FAKE_WINDOW 覆盖
+    budget_cost_cny: float = 0.0  # S3 成本上限（元），0 表示不限
+    budget_warn_pct: float = 0.8  # S3 预算警告阈值
+    round_max_steps: int = 60  # S3 回合最大步数（触发 rollover）
+    round_max_wall_s: int = 1500  # S3 回合最大墙钟（秒，25min）
 
     @property
     def work_dir(self) -> Path:
@@ -128,10 +153,10 @@ class RunResult:
     flag: str | None
     steps: int
     wall_s: float
-    status: str                 # success | step_exceeded | wallclock_exceeded
-                                # | budget_exceeded | failed | error
+    status: str  # success | step_exceeded | wallclock_exceeded
+    # | budget_exceeded | failed | error
     messages: list[dict] = field(default_factory=list)
-    cost_cny: float = 0.0       # S3 累计成本（CNY，由 BudgetTracker 记）
+    cost_cny: float = 0.0  # S3 累计成本（CNY，由 BudgetTracker 记）
 
 
 def build_tools_doc(cfg: RunConfig) -> str:
@@ -229,7 +254,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
         if rl_err:
             return rl_err
         try:
-            if isinstance(command, (list, tuple)):   # 模型误传数组时兜底拼接
+            if isinstance(command, (list, tuple)):  # 模型误传数组时兜底拼接
                 command = shlex.join(str(c) for c in command)
             parts = shlex.split(command)
         except (ValueError, AttributeError, TypeError) as e:
@@ -238,27 +263,35 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             return "Error: empty command"
         exe = parts[0]
         if exe not in cfg.bash_whitelist:
-            return (f"Error: '{exe}' 不在白名单。可用命令：{sorted(cfg.bash_whitelist)}。"
-                    f"bash 的工作目录已经是你的工作目录，不要用 cd；"
-                    f"遍历文件用 find 或 ls -R；复杂逻辑用 write_file 写脚本再执行。")
+            return (
+                f"Error: '{exe}' 不在白名单。可用命令：{sorted(cfg.bash_whitelist)}。"
+                f"bash 的工作目录已经是你的工作目录，不要用 cd；"
+                f"遍历文件用 find 或 ls -R；复杂逻辑用 write_file 写脚本再执行。"
+            )
         uses_shell = exe in _SHELL_EXES
         if not uses_shell and _has_unquoted_shell_meta(command):
-            return ("Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），"
-                    "但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；"
-                    "确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。")
+            return (
+                "Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），"
+                "但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；"
+                "确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。"
+            )
         argv: list[str] = [exe, "-c", command] if uses_shell else parts
 
         env = os.environ.copy()
         try:
             proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=str(work_dir), env=env,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                *argv,
+                cwd=str(work_dir),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         except Exception as e:
             return f"Error: 启动失败: {e}"
 
-        async def _read_capped(stream: asyncio.StreamReader | None,
-                               cap: int = BASH_READ_CAP) -> bytes:
+        async def _read_capped(
+            stream: asyncio.StreamReader | None, cap: int = BASH_READ_CAP
+        ) -> bytes:
             if stream is None:
                 return b""
             data = bytearray()
@@ -274,16 +307,13 @@ def make_tool_fns(cfg: RunConfig) -> dict:
 
         try:
             out_b, err_b = await asyncio.wait_for(
-                asyncio.gather(_read_capped(proc.stdout),
-                             _read_capped(proc.stderr)),
+                asyncio.gather(_read_capped(proc.stdout), _read_capped(proc.stderr)),
                 timeout=cfg.bash_timeout_s,
             )
             await proc.wait()
-        except asyncio.TimeoutError:
-            try:
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            except ProcessLookupError:
-                pass
             return f"Error: timeout {cfg.bash_timeout_s}s"
         out = out_b.decode(errors="replace")
         err = err_b.decode(errors="replace")
@@ -297,7 +327,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
     def read_file(path: str) -> str:
         p = Path(path)
         if not p.is_absolute():
-            p = work_dir / p                    # 与 bash cwd / write_file 一致
+            p = work_dir / p  # 与 bash cwd / write_file 一致
         try:
             sz = p.stat().st_size
             if sz > READ_MAX:
@@ -309,7 +339,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
     def list_dir(path: str) -> str:
         p = Path(path)
         if not p.is_absolute():
-            p = work_dir / p                    # 与 bash cwd / write_file 一致
+            p = work_dir / p  # 与 bash cwd / write_file 一致
         try:
             lines = []
             for e in sorted(p.iterdir()):
@@ -323,13 +353,15 @@ def make_tool_fns(cfg: RunConfig) -> dict:
     def write_file(path: str, content: str) -> str:
         p = Path(path)
         if not p.is_absolute():
-            p = work_dir / p                    # 相对路径一律落到工作目录
+            p = work_dir / p  # 相对路径一律落到工作目录
         try:
             pr = p.resolve()
             wr = work_dir.resolve()
             if not (str(pr) == str(wr) or str(pr).startswith(str(wr) + os.sep)):
-                return (f"Error: 只能写到 {wr}/ 下。你传的是 {path!r}；"
-                        f"直接给文件名（如 exploit.py）即可，会自动落到工作目录。")
+                return (
+                    f"Error: 只能写到 {wr}/ 下。你传的是 {path!r}；"
+                    f"直接给文件名（如 exploit.py）即可，会自动落到工作目录。"
+                )
         except Exception:
             return f"Error: bad path {path!r}"
         try:
@@ -358,9 +390,16 @@ class Engine:
     verbose: 打印步进详情（默认 False，仅关键行输出到 stderr）。
     """
 
-    def __init__(self, cfg: RunConfig, llm, tools: dict | None = None, hooks=None,
-                 summarizer=None, extra_tools: dict | None = None,
-                 verbose: bool = False) -> None:
+    def __init__(
+        self,
+        cfg: RunConfig,
+        llm,
+        tools: dict | None = None,
+        hooks=None,
+        summarizer=None,
+        extra_tools: dict | None = None,
+        verbose: bool = False,
+    ) -> None:
         self.cfg = cfg
         self.llm = llm
         self.tools = tools if tools is not None else make_tool_fns(cfg)
@@ -380,8 +419,7 @@ class Engine:
 
         # system prompt：system_extra 已含先验+工具说明+约束
         system = cfg.system_extra + (
-            "\n\n输出要求：先用一句话说明你的判断，再调用工具；"
-            "拿到 flag 后输出 ANSWER: <flag 内容>"
+            "\n\n输出要求：先用一句话说明你的判断，再调用工具；拿到 flag 后输出 ANSWER: <flag 内容>"
         )
         if cfg.initial_messages:
             # S1 resume：直接用已存档的链继续（含首条 system），保 prefix cache
@@ -390,45 +428,53 @@ class Engine:
             messages: list[dict] = [{"role": "system", "content": system}]
 
         tool_schemas = build_tool_schemas(cfg) + [
-            schema for schema, _fn in self.extra_tools.values()]
+            schema for schema, _fn in self.extra_tools.values()
+        ]
         flag_re = cfg.flag_re
 
         model = cfg.model_primary
         steps = 0
         t0 = time.time()
         flag_found = None
-        status = "failed"           # 默认值：循环条件不满足且未显式设置时兜底
+        status = "failed"  # 默认值：循环条件不满足且未显式设置时兜底
         last_tool_has_new_info = True
         detector = StuckDetector(cfg.stuck_threshold, cfg.stuck_increment)
 
         # ---------- S3 运行时四件套状态 ----------
         from secpt.core.context.estimator import effective_window, est_messages_tokens, est_tokens
-        from secpt.core.context.roundpool import should_rollover, build_new_chain
+        from secpt.core.context.roundpool import build_new_chain, should_rollover
+
         _base_window = cfg.context_window or MODEL_WINDOWS.get(model, 64_000)
         window = effective_window(_base_window)
         budget = None
         if cfg.budget_cost_cny > 0:
             from secpt.core.context.budget import BudgetTracker
+
             budget = BudgetTracker(cfg.budget_cost_cny, warn_pct=cfg.budget_warn_pct)
         if self.summarizer is None:
             from secpt.core.context.summarize import get_summarizer
+
             self.summarizer = get_summarizer(self.llm, model="deepseek-chat", api_key=api_key)
-        summary_k = 0                 # 压缩摘要编号
-        session_round = cfg.round_offset   # 会话轮次（resume 后接续）
+        summary_k = 0  # 压缩摘要编号
+        session_round = cfg.round_offset  # 会话轮次（resume 后接续）
         session_start_t = time.time()
         session_steps = 0
 
         _v = self.verbose
-        print(f"[engine] job={cfg.job_id} model={model}  max_steps={cfg.max_steps}  "
-              f"timeout={cfg.max_wall_s}s", file=sys.stderr)
+        print(
+            f"[engine] job={cfg.job_id} model={model}  max_steps={cfg.max_steps}  "
+            f"timeout={cfg.max_wall_s}s",
+            file=sys.stderr,
+        )
         print(f"[engine] workspace: {cfg.work_dir}", file=sys.stderr)
         if self.extra_tools:
             print(f"[engine] 插件工具: {sorted(self.extra_tools)}", file=sys.stderr)
 
         try:
             # max_steps/max_wall_s <= 0 表示不限（7×24 长任务）
-            while (cfg.max_steps <= 0 or steps < cfg.max_steps) and \
-                    (cfg.max_wall_s <= 0 or (time.time() - t0) < cfg.max_wall_s):
+            while (cfg.max_steps <= 0 or steps < cfg.max_steps) and (
+                cfg.max_wall_s <= 0 or (time.time() - t0) < cfg.max_wall_s
+            ):
                 steps += 1
                 session_steps += 1
                 elapsed = time.time() - t0
@@ -438,15 +484,21 @@ class Engine:
 
                 # 每 10 步打印进度行（常驻，不进 verbose 门控）
                 if steps % 10 == 0:
-                    print(f"[progress] 已用 {steps} 步 / 已过 {elapsed:.0f}s / 最近工具"
-                          f"{'有' if last_tool_has_new_info else '无'}新信息", file=sys.stderr)
+                    print(
+                        f"[progress] 已用 {steps} 步 / 已过 {elapsed:.0f}s / 最近工具"
+                        f"{'有' if last_tool_has_new_info else '无'}新信息",
+                        file=sys.stderr,
+                    )
 
                 if _v:
-                    print(f"\n--- step {steps}/{cfg.max_steps}  ({elapsed:.0f}s) ---", file=sys.stderr)
+                    print(
+                        f"\n--- step {steps}/{cfg.max_steps}  ({elapsed:.0f}s) ---", file=sys.stderr
+                    )
 
                 try:
                     # 发往 LLM 的副本剔除 reasoning_content（它只落盘审计）
                     from secpt.runtime.llm.client import sanitize_messages
+
                     req_messages = sanitize_messages(messages)
                     if hasattr(self.llm, "call"):
                         resp = await self.llm.call(req_messages, tool_schemas, model)
@@ -472,8 +524,10 @@ class Engine:
                         {
                             "id": tc.id,
                             "type": "function",
-                            "function": {"name": tc.function.name,
-                                         "arguments": tc.function.arguments},
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
                         }
                         for tc in msg.tool_calls
                     ]
@@ -498,9 +552,7 @@ class Engine:
                 else:
                     # fake/无 usage 时回退估算（本轮请求 + 本轮产出）
                     prompt_tokens = est_messages_tokens(req_messages)
-                    extra = "".join(
-                        (tc.function.arguments or "") for tc in (msg.tool_calls or [])
-                    )
+                    extra = "".join((tc.function.arguments or "") for tc in (msg.tool_calls or []))
                     completion_tokens = est_tokens((msg.content or "") + extra)
                 if budget is not None:
                     budget.add(prompt_tokens, completion_tokens)
@@ -510,13 +562,17 @@ class Engine:
                     bst = budget.check()
                     if bst == "exceeded":
                         # 100%：优雅收尾（先落 findings+report.md 再置状态），不抛异常
-                        print(f"[engine] budget 100%（{budget.cost_cny:.4f} CNY），优雅收尾", file=sys.stderr)
+                        print(
+                            f"[engine] budget 100%（{budget.cost_cny:.4f} CNY），优雅收尾",
+                            file=sys.stderr,
+                        )
                         if self.hooks and hasattr(self.hooks, "on_budget_exceeded"):
                             self.hooks.on_budget_exceeded(messages)
                         status = "budget_exceeded"
                         break
                     if bst == "warn":
                         from secpt.core.context.budget import WARN_80_MSG
+
                         print("[engine] budget 80%，注入引导消息", file=sys.stderr)
                         messages.append({"role": "user", "content": WARN_80_MSG})
                         if self.hooks and hasattr(self.hooks, "budget_warning"):
@@ -579,8 +635,7 @@ class Engine:
                         if self.hooks and hasattr(self.hooks, "on_finding"):
                             self.hooks.on_finding(kind, val, f"step {steps}: {fn_name}")
 
-                    messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "content": result})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
                 # 卡死切换器：必要时注入提醒（user 角色）
                 if detector.should_nudge():
@@ -598,8 +653,10 @@ class Engine:
                 # （删组把 est 拉回阈值下），轮转只在压缩救不回或步数/墙钟到时触发。
                 if window > 0 and summary_k < 999:
                     from secpt.core.context.compaction import compact_messages
+
                     messages, removed_n, summary = await compact_messages(
-                        messages, cfg.objective, self.summarizer, window, k=summary_k)
+                        messages, cfg.objective, self.summarizer, window, k=summary_k
+                    )
                     if removed_n:
                         summary_k += 1
                         print(f"[engine] compact #{summary_k}: 删 {removed_n} 条", file=sys.stderr)
@@ -628,7 +685,9 @@ class Engine:
                     messages = new_messages
                     session_steps = 0
                     session_start_t = time.time()
-                    print(f"[engine] rollover → session {session_round}（{reason}）", file=sys.stderr)
+                    print(
+                        f"[engine] rollover → session {session_round}（{reason}）", file=sys.stderr
+                    )
         except Exception as e:
             print(f"[engine] fatal error: {e}", file=sys.stderr)
             status = "error"
@@ -651,8 +710,10 @@ class Engine:
         print(f"Flag:   {flag_found or '未拿到'}")
         print(f"卡死切换器触发: {detector.trigger_count} 次")
         if budget is not None:
-            print(f"成本:   {cost:.4f} CNY  (prompt={budget.prompt_tokens}, "
-                  f"completion={budget.completion_tokens})")
+            print(
+                f"成本:   {cost:.4f} CNY  (prompt={budget.prompt_tokens}, "
+                f"completion={budget.completion_tokens})"
+            )
         print(f"会话轮次: {session_round}  压缩摘要数: {summary_k}")
 
         transcript_path = cfg.work_dir / "transcript.json"

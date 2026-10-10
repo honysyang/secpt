@@ -43,9 +43,7 @@ async def test_adapter_real() -> None:
     from secpt.core.llm import LLMMessage, get_llm
 
     llm = get_llm(get_settings().llm)  # fake=False
-    resp = await llm.acompletion(
-        [LLMMessage(role="user", content="用一句话解释端口扫描")]
-    )
+    resp = await llm.acompletion([LLMMessage(role="user", content="用一句话解释端口扫描")])
     assert resp.role == "assistant"
     assert resp.content.strip()
 

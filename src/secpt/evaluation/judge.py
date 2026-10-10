@@ -23,9 +23,9 @@ class JudgeUnavailable(Exception):
 @dataclass
 class JudgeVerdict:
     complete: bool
-    confidence: float                    # 0-1
+    confidence: float  # 0-1
     satisfied_conditions: list[str] = field(default_factory=list)
-    evidence_quote: str = ""             # 支撑判定的原文证据引用
+    evidence_quote: str = ""  # 支撑判定的原文证据引用
     reasoning: str = ""
 
 
@@ -68,7 +68,7 @@ def _extract_json(text: str) -> dict | None:
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start:end + 1])
+        return json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
 
@@ -80,8 +80,9 @@ class LLMJudge:
         self._llm = llm
         self._model = model
 
-    async def judge(self, rubric: Rubric, evidence: Evidence,
-                    anticheat: AntiCheatReport) -> JudgeVerdict:
+    async def judge(
+        self, rubric: Rubric, evidence: Evidence, anticheat: AntiCheatReport
+    ) -> JudgeVerdict:
         ac_lines = [f"- ANSWER 值出现在工具输出中: {anticheat.answer_in_outputs}"]
         ac_lines += [f"- {s}" for s in anticheat.suspicious]
         prompt = _PROMPT.format(
@@ -92,16 +93,17 @@ class LLMJudge:
         )
         text = ""
         last_err: Exception | None = None
-        for attempt in range(2):      # 网络类故障重试一次（评判不背单次抖动的锅）
+        for attempt in range(2):  # 网络类故障重试一次（评判不背单次抖动的锅）
             try:
-                text = await _acomplete(self._llm,
-                                        [{"role": "user", "content": prompt}],
-                                        self._model)
+                text = await _acomplete(
+                    self._llm, [{"role": "user", "content": prompt}], self._model
+                )
                 break
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 last_err = e
                 if attempt == 0:
                     import asyncio
+
                     await asyncio.sleep(1.0)
         if not text and last_err is not None:
             raise JudgeUnavailable(str(last_err)) from last_err

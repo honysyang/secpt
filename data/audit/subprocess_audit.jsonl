@@ -5404,3 +5404,43 @@
 {"ts": "2026-10-09T16:53:48.922190+00:00", "event": "subprocess.exec.done", "audit_id": "test-audit-2", "command": "echo audited", "returncode": 0, "duration_ms": 1.3224159993114881}
 {"ts": "2026-10-09T16:53:48.923408+00:00", "event": "subprocess.exec.start", "audit_id": "280669a3d92a", "command": "echo sync", "timeout": 30.0}
 {"ts": "2026-10-09T16:53:48.924869+00:00", "event": "subprocess.exec.done", "audit_id": "280669a3d92a", "command": "echo sync", "returncode": 0, "duration_ms": 1.3037600001553074}
+{"ts": "2026-10-10T03:05:54.450249+00:00", "event": "subprocess.exec.start", "audit_id": "fcd5bd29925c", "command": "echo hello", "timeout": 30.0}
+{"ts": "2026-10-10T03:05:54.453745+00:00", "event": "subprocess.exec.done", "audit_id": "fcd5bd29925c", "command": "echo hello", "returncode": 0, "duration_ms": 3.0027990001144644}
+{"ts": "2026-10-10T03:05:54.459827+00:00", "event": "subprocess.exec.start", "audit_id": "724e74b41e01", "command": "echo same", "timeout": 30.0}
+{"ts": "2026-10-10T03:05:54.463847+00:00", "event": "subprocess.exec.done", "audit_id": "724e74b41e01", "command": "echo same", "returncode": 0, "duration_ms": 3.684632999920723}
+{"ts": "2026-10-10T03:05:54.468962+00:00", "event": "subprocess.exec.start", "audit_id": "7d41824c235c", "command": "echo hello", "timeout": 30.0}
+{"ts": "2026-10-10T03:05:54.472004+00:00", "event": "subprocess.exec.done", "audit_id": "7d41824c235c", "command": "echo hello", "returncode": 0, "duration_ms": 2.6089600000887003}
+{"ts": "2026-10-10T03:05:54.515855+00:00", "event": "subprocess.exec.start", "audit_id": "f27d4de9eae7", "command": "whatweb http://127.0.0.1:1/", "timeout": 20.0}
+{"ts": "2026-10-10T03:06:04.672568+00:00", "event": "subprocess.exec.done", "audit_id": "f27d4de9eae7", "command": "whatweb http://127.0.0.1:1/", "returncode": 0, "duration_ms": 10156.200063000142}
+{"ts": "2026-10-10T03:06:04.680953+00:00", "event": "subprocess.exec.start", "audit_id": "647e2201ea89", "command": "nslookup localhost", "timeout": 15.0}
+{"ts": "2026-10-10T03:06:05.576163+00:00", "event": "subprocess.exec.done", "audit_id": "647e2201ea89", "command": "nslookup localhost", "returncode": 0, "duration_ms": 894.8889869998311}
+{"ts": "2026-10-10T03:06:05.580709+00:00", "event": "subprocess.exec.start", "audit_id": "d7b0da45eb0a", "command": "ping -c 1 127.0.0.1", "timeout": 15.0}
+{"ts": "2026-10-10T03:06:05.603692+00:00", "event": "subprocess.exec.done", "audit_id": "d7b0da45eb0a", "command": "ping -c 1 127.0.0.1", "returncode": 0, "duration_ms": 22.511926999868592}
+{"ts": "2026-10-10T03:06:05.611253+00:00", "event": "subprocess.exec.start", "audit_id": "545d6f3878ae", "command": "traceroute 127.0.0.1", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:05.640062+00:00", "event": "subprocess.exec.done", "audit_id": "545d6f3878ae", "command": "traceroute 127.0.0.1", "returncode": 0, "duration_ms": 28.472204000081547}
+{"ts": "2026-10-10T03:06:06.044105+00:00", "event": "subprocess.exec.start", "audit_id": "0dde02ee88aa", "command": "echo hello", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:06.048084+00:00", "event": "subprocess.exec.done", "audit_id": "0dde02ee88aa", "command": "echo hello", "returncode": 0, "duration_ms": 3.5859680001522065}
+{"ts": "2026-10-10T03:06:06.074302+00:00", "event": "subprocess.exec.start", "audit_id": "e53abf6e0cad", "command": "echo x", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:06.079368+00:00", "event": "subprocess.exec.done", "audit_id": "e53abf6e0cad", "command": "echo x", "returncode": 0, "duration_ms": 4.50106100015546}
+{"ts": "2026-10-10T03:06:06.081475+00:00", "event": "subprocess.exec.start", "audit_id": "0b5bde252a75", "command": "echo x", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:06.084480+00:00", "event": "subprocess.exec.done", "audit_id": "0b5bde252a75", "command": "echo x", "returncode": 0, "duration_ms": 2.5479969999651075}
+{"ts": "2026-10-10T03:06:06.085153+00:00", "event": "subprocess.exec.start", "audit_id": "bfdfa6da57b6", "command": "echo x", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:06.089183+00:00", "event": "subprocess.exec.done", "audit_id": "bfdfa6da57b6", "command": "echo x", "returncode": 0, "duration_ms": 3.809819000252901}
+{"ts": "2026-10-10T03:06:06.100486+00:00", "event": "subprocess.exec.start", "audit_id": "a77a48cf1f81", "command": "echo ping", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:06.105438+00:00", "event": "subprocess.exec.done", "audit_id": "a77a48cf1f81", "command": "echo ping", "returncode": 0, "duration_ms": 4.37584200017227}
+{"ts": "2026-10-10T03:06:06.111559+00:00", "event": "subprocess.exec.start", "audit_id": "d4d5955730bc", "command": "nmap -p 22,80 -T4 127.0.0.1", "timeout": 45.0}
+{"ts": "2026-10-10T03:06:06.788088+00:00", "event": "subprocess.exec.done", "audit_id": "d4d5955730bc", "command": "nmap -p 22,80 -T4 127.0.0.1", "returncode": 0, "duration_ms": 676.1364609997145}
+{"ts": "2026-10-10T03:06:06.793644+00:00", "event": "subprocess.exec.start", "audit_id": "ccaa797ba508", "command": "curl -sS -o /dev/null -w ''\"'\"'%{http_code}'\"'\"'' http://127.0.0.1:1/", "timeout": 15.0}
+{"ts": "2026-10-10T03:06:07.003977+00:00", "event": "subprocess.exec.done", "audit_id": "ccaa797ba508", "command": "curl -sS -o /dev/null -w ''\"'\"'%{http_code}'\"'\"'' http://127.0.0.1:1/", "returncode": 7, "duration_ms": 209.7306679997928}
+{"ts": "2026-10-10T03:06:07.009340+00:00", "event": "subprocess.exec.start", "audit_id": "3088212a2ac6", "command": "dig localhost A", "timeout": 10.0}
+{"ts": "2026-10-10T03:06:07.063281+00:00", "event": "subprocess.exec.done", "audit_id": "3088212a2ac6", "command": "dig localhost A", "returncode": 0, "duration_ms": 52.970431999710854}
+{"ts": "2026-10-10T03:06:07.143593+00:00", "event": "subprocess.exec.start", "audit_id": "6ad6801265b7", "command": "echo hi", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:07.146544+00:00", "event": "subprocess.exec.done", "audit_id": "6ad6801265b7", "command": "echo hi", "returncode": 0, "duration_ms": 2.55123899978571}
+{"ts": "2026-10-10T03:06:07.720037+00:00", "event": "subprocess.exec.start", "audit_id": "32c53793a060", "command": "echo hello", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:07.723424+00:00", "event": "subprocess.exec.done", "audit_id": "32c53793a060", "command": "echo hello", "returncode": 0, "duration_ms": 2.8272279996599536}
+{"ts": "2026-10-10T03:06:07.733432+00:00", "event": "subprocess.exec.start", "audit_id": "56471c671371", "command": "sleep 5", "timeout": 0.2}
+{"ts": "2026-10-10T03:06:07.936760+00:00", "event": "subprocess.exec.timeout", "audit_id": "56471c671371", "command": "sleep 5", "duration_ms": 202.8187609998895, "timeout": 0.2}
+{"ts": "2026-10-10T03:06:07.941052+00:00", "event": "subprocess.exec.start", "audit_id": "test-audit-2", "command": "echo audited", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:07.944534+00:00", "event": "subprocess.exec.done", "audit_id": "test-audit-2", "command": "echo audited", "returncode": 0, "duration_ms": 3.2384060000367754}
+{"ts": "2026-10-10T03:06:07.947372+00:00", "event": "subprocess.exec.start", "audit_id": "f6b16259c5d4", "command": "echo sync", "timeout": 30.0}
+{"ts": "2026-10-10T03:06:07.950632+00:00", "event": "subprocess.exec.done", "audit_id": "f6b16259c5d4", "command": "echo sync", "returncode": 0, "duration_ms": 2.8157520000604563}

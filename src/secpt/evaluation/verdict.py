@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from secpt.evaluation.anticheat import AntiCheatReport, check as anticheat_check
+from secpt.evaluation.anticheat import check as anticheat_check
 from secpt.evaluation.evidence import collect_evidence
 from secpt.evaluation.jev import JevGate
 from secpt.evaluation.judge import JudgeUnavailable, LLMJudge
@@ -30,8 +30,8 @@ from secpt.evaluation.rubric import Rubric, build_rubric, load_rubric_file
 class Verdict:
     job_id: str
     complete: bool
-    confidence: float                     # 0-1
-    method: str                           # anticheat | jev | llm_judge | heuristic
+    confidence: float  # 0-1
+    method: str  # anticheat | jev | llm_judge | heuristic
     satisfied_conditions: list[str] = field(default_factory=list)
     evidence_quote: str = ""
     reasoning: str = ""
@@ -55,8 +55,10 @@ class Verdict:
 def _default_llm():
     if os.environ.get("SECPT_FAKE_LLM"):
         from secpt.core.job.fakellm import FakeLLM
+
         return FakeLLM(n_steps=1, job_id="judge")
     from secpt.runtime.llm.client import call_llm
+
     return call_llm
 
 
@@ -83,17 +85,27 @@ async def evaluate_job(
         raise FileNotFoundError(f"job {job_id} 无 events.jsonl: {job_dir}")
 
     try:
-        return await _evaluate(job_id, jd, job_dir,
-                               rubric_file=rubric_file,
-                               ground_truth_file=ground_truth_file,
-                               llm=llm, model=model, jev=jev)
+        return await _evaluate(
+            job_id,
+            jd,
+            job_dir,
+            rubric_file=rubric_file,
+            ground_truth_file=ground_truth_file,
+            llm=llm,
+            model=model,
+            jev=jev,
+        )
     except FileNotFoundError:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"[verdict] 评判链异常，heuristic 兜底: {e}")
         verdict = Verdict(
-            job_id=job_id, complete=False, confidence=0.1, method="heuristic",
-            reasoning=f"评判链异常（{e}），结果不可信，需人工复核")
+            job_id=job_id,
+            complete=False,
+            confidence=0.1,
+            method="heuristic",
+            reasoning=f"评判链异常（{e}），结果不可信，需人工复核",
+        )
         _persist(verdict, job_dir)
         return verdict
 
@@ -127,17 +139,24 @@ async def _evaluate(
         if task_yaml.is_file():
             try:
                 import yaml
-                objective = str(yaml.safe_load(
-                    task_yaml.read_text(encoding="utf-8"))["spec"]["objective"])
-            except Exception:  # noqa: BLE001
+
+                objective = str(
+                    yaml.safe_load(task_yaml.read_text(encoding="utf-8"))["spec"]["objective"]
+                )
+            except Exception:
                 pass
         rubric = await build_rubric(objective, llm=None, ground_truth=ground_truth)
 
     # ① 硬作弊：确定性零分
     if ac.hard_fail:
         verdict = Verdict(
-            job_id=job_id, complete=False, confidence=1.0, method="anticheat",
-            reasoning="；".join(ac.suspicious), anticheat=ac.to_dict())
+            job_id=job_id,
+            complete=False,
+            confidence=1.0,
+            method="anticheat",
+            reasoning="；".join(ac.suspicious),
+            anticheat=ac.to_dict(),
+        )
         _persist(verdict, job_dir)
         return verdict
 
@@ -147,29 +166,36 @@ async def _evaluate(
         ans, gt = evidence.answer.strip(), rubric.ground_truth.strip()
         if ans and gt and (ans == gt or ans in gt or gt in ans):
             verdict = Verdict(
-                job_id=job_id, complete=True, confidence=0.95,
+                job_id=job_id,
+                complete=True,
+                confidence=0.95,
                 method="ground_truth_match",
                 reasoning="自报答案与出题方 ground truth 一致（确定性比对）",
                 evidence_quote=evidence.answer[:200],
-                anticheat=ac.to_dict())
+                anticheat=ac.to_dict(),
+            )
             _persist(verdict, job_dir)
             return verdict
 
     # ② Jev 高速门控
     gate = jev if jev is not None else JevGate()
-    ctx = (f"任务：{rubric.objective_summary}\n"
-           f"完成条件：{'；'.join(rubric.completion_conditions)}\n"
-           f"agent 自报答案：{evidence.answer or '（无）'}\n"
-           f"答案出现在工具输出中：{evidence.answer_in_outputs}\n"
-           f"轨迹末尾：\n{evidence.transcript_excerpt(1500)}")
-    decision = await gate.decide(
-        "根据给定轨迹证据，该任务是否已被真正完成？", ctx)
+    ctx = (
+        f"任务：{rubric.objective_summary}\n"
+        f"完成条件：{'；'.join(rubric.completion_conditions)}\n"
+        f"agent 自报答案：{evidence.answer or '（无）'}\n"
+        f"答案出现在工具输出中：{evidence.answer_in_outputs}\n"
+        f"轨迹末尾：\n{evidence.transcript_excerpt(1500)}"
+    )
+    decision = await gate.decide("根据给定轨迹证据，该任务是否已被真正完成？", ctx)
     if gate.accept(decision):
         verdict = Verdict(
-            job_id=job_id, complete=decision.answer, confidence=decision.probability,
+            job_id=job_id,
+            complete=decision.answer,
+            confidence=decision.probability,
             method="jev",
             reasoning=f"Jev typed decision（{decision.raw_model or 'system-one'}）高置信采信",
-            anticheat=ac.to_dict())
+            anticheat=ac.to_dict(),
+        )
         _persist(verdict, job_dir)
         return verdict
 
@@ -179,21 +205,28 @@ async def _evaluate(
     try:
         jv = await LLMJudge(llm, model=model).judge(rubric, evidence, ac)
         verdict = Verdict(
-            job_id=job_id, complete=jv.complete, confidence=jv.confidence,
+            job_id=job_id,
+            complete=jv.complete,
+            confidence=jv.confidence,
             method="llm_judge",
             satisfied_conditions=jv.satisfied_conditions,
-            evidence_quote=jv.evidence_quote, reasoning=jv.reasoning,
-            anticheat=ac.to_dict())
+            evidence_quote=jv.evidence_quote,
+            reasoning=jv.reasoning,
+            anticheat=ac.to_dict(),
+        )
     except JudgeUnavailable as e:
         # ④ heuristic 兜底：有自报答案且无明显作弊信号 → 低置信通过
         heuristic_complete = bool(evidence.answer) and not ac.local_answer_file_read
         verdict = Verdict(
-            job_id=job_id, complete=heuristic_complete, confidence=0.3,
+            job_id=job_id,
+            complete=heuristic_complete,
+            confidence=0.3,
             method="heuristic",
             reasoning=f"LLM judge 不可用（{e}），启发式兜底："
-                      f"自报答案={'有' if evidence.answer else '无'}，"
-                      f"答案在工具输出中={evidence.answer_in_outputs}；需真实 judge 复核",
-            anticheat=ac.to_dict())
+            f"自报答案={'有' if evidence.answer else '无'}，"
+            f"答案在工具输出中={evidence.answer_in_outputs}；需真实 judge 复核",
+            anticheat=ac.to_dict(),
+        )
         if evidence.answer and rubric.ground_truth:
             # 有 ground truth 但确定性比对未命中 → 判不完整（置信中等）
             verdict.complete = False
@@ -207,16 +240,28 @@ def _persist(verdict: Verdict, job_dir: Path) -> None:
     verdict.created_at = time.time()
     data = verdict.to_dict()
     (job_dir / "verdict.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     # events.jsonl 追加 verdict 事件（append-only，不影响既有事件序号语义）
     events_path = job_dir / "events.jsonl"
     try:
-        seq = sum(1 for _ in open(events_path, encoding="utf-8"))
+        with open(events_path, encoding="utf-8") as rf:
+            seq = sum(1 for _ in rf)
         with open(events_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "seq": seq + 1, "job_id": verdict.job_id, "ts": time.time(),
-                "round": 0, "type": "verdict", "payload": data,
-            }, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "seq": seq + 1,
+                        "job_id": verdict.job_id,
+                        "ts": time.time(),
+                        "round": 0,
+                        "type": "verdict",
+                        "payload": data,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     except OSError as e:
         print(f"[verdict] events append failed (ignored): {e}")
 
@@ -236,7 +281,8 @@ def render(verdict: Verdict) -> str:
     if ac:
         lines.append(
             f"反作弊:     答案在工具输出中={ac.get('answer_in_outputs')} "
-            f"本地答案直读={ac.get('local_answer_file_read')}")
+            f"本地答案直读={ac.get('local_answer_file_read')}"
+        )
         for s in ac.get("suspicious") or []:
             lines.append(f"  ⚠ {s}")
     if verdict.reasoning:

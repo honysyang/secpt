@@ -6,24 +6,76 @@
 
 from __future__ import annotations
 
+import contextlib
+
 # 优先级即列表顺序：ctf > redteam > codeaudit > assessment；都未命中 → pentest
 RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("ctf", (
-        "flag", "ctf", "rc{", "flag{", "ctf{", "解题", "题目", "挑战",
-        "writeup", "解题思路", "夺旗", "pwn", "misc", "crypto",
-    )),
-    ("redteam", (
-        "红队", "攻击链", "red team", "redteam", "横向移动", "权限维持",
-        "apt", "对抗演练", "攻防演练", "钓鱼",
-    )),
-    ("codeaudit", (
-        "审计", "源码", "代码", "code audit", "codeaudit", "源代码",
-        "静态", "sink", "危险函数", "漏洞分析", "代码审计", "审查代码",
-    )),
-    ("assessment", (
-        "合规", "评估", "基线", "检查清单", "等保", "assessment",
-        "compliance", "安全评估", "风险清单", "加固",
-    )),
+    (
+        "ctf",
+        (
+            "flag",
+            "ctf",
+            "rc{",
+            "flag{",
+            "ctf{",
+            "解题",
+            "题目",
+            "挑战",
+            "writeup",
+            "解题思路",
+            "夺旗",
+            "pwn",
+            "misc",
+            "crypto",
+        ),
+    ),
+    (
+        "redteam",
+        (
+            "红队",
+            "攻击链",
+            "red team",
+            "redteam",
+            "横向移动",
+            "权限维持",
+            "apt",
+            "对抗演练",
+            "攻防演练",
+            "钓鱼",
+        ),
+    ),
+    (
+        "codeaudit",
+        (
+            "审计",
+            "源码",
+            "代码",
+            "code audit",
+            "codeaudit",
+            "源代码",
+            "静态",
+            "sink",
+            "危险函数",
+            "漏洞分析",
+            "代码审计",
+            "审查代码",
+        ),
+    ),
+    (
+        "assessment",
+        (
+            "合规",
+            "评估",
+            "基线",
+            "检查清单",
+            "等保",
+            "assessment",
+            "compliance",
+            "安全评估",
+            "风险清单",
+            "加固",
+        ),
+    ),
 ]
 
 DEFAULT_PROFILE = "pentest"
@@ -75,18 +127,22 @@ async def route_objective(
     if len(matched) == 1:
         profile, via = matched[0], "rule"
     elif matched:
-        profile, via = matched[0], "rule"   # 多命中：取优先级最高
+        profile, via = matched[0], "rule"  # 多命中：取优先级最高
     elif llm is not None:
         profile, via = await _llm_classify(objective, llm, api_key), "llm"
     else:
         profile, via = DEFAULT_PROFILE, "default"
 
     if sink is not None:
-        try:
-            sink.write("routed", {
-                "profile": profile, "via": via, "matched": matched,
-                "objective_head": objective[:120],
-            }, round_=round_)
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            sink.write(
+                "routed",
+                {
+                    "profile": profile,
+                    "via": via,
+                    "matched": matched,
+                    "objective_head": objective[:120],
+                },
+                round_=round_,
+            )
     return profile

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from secpt.challenge.loader import Challenge, ChallengeLoader
 
-
 # ---------- 目标去重 ----------
+
 
 def _make_challenge(description: str) -> Challenge:
     """构造一个仅用于 extract_targets 的 Challenge。"""
@@ -24,9 +23,7 @@ def _make_challenge(description: str) -> Challenge:
 
 def test_dedup_http_and_bare_host() -> None:
     """http://host:port 与 host:port 视为同一目标。"""
-    c = _make_challenge(
-        "目标 http://10.30.15.1:54865 和 10.30.15.1:54865"
-    )
+    c = _make_challenge("目标 http://10.30.15.1:54865 和 10.30.15.1:54865")
     targets = c.extract_targets()
     assert len(targets) == 1
     assert targets[0] == "http://10.30.15.1:54865"  # http 形式优先
@@ -43,8 +40,7 @@ def test_dedup_bare_host_keeps_bare() -> None:
 def test_dedup_multiple_pairs() -> None:
     """多个目标对各自去重。"""
     c = _make_challenge(
-        "http://10.0.0.1:8080 和 10.0.0.1:8080\n"
-        "http://10.0.0.2:9090 和 10.0.0.2:9090"
+        "http://10.0.0.1:8080 和 10.0.0.1:8080\nhttp://10.0.0.2:9090 和 10.0.0.2:9090"
     )
     targets = c.extract_targets()
     assert len(targets) == 2
@@ -60,6 +56,7 @@ def test_dedup_no_duplicates() -> None:
 
 
 # ---------- 中文附件目录 ----------
+
 
 def test_chinese_attachment_dir(tmp_path: Path) -> None:
     """中文目录名「附件」应被识别。"""
@@ -115,20 +112,28 @@ def test_cli_run_file_and_task_mutex(tmp_path: Path) -> None:
     f = tmp_path / "task.txt"
     f.write_text("do something", encoding="utf-8")
 
-    result = runner.invoke(app, [
-        "run", "10.0.0.1",
-        "--mode", "tree",
-        "--file", str(f),
-        "--task", "other task",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "10.0.0.1",
+            "--mode",
+            "tree",
+            "--file",
+            str(f),
+            "--task",
+            "other task",
+        ],
+    )
     assert result.exit_code == 1
     assert "互斥" in result.output
 
 
 def test_cli_run_file_ok(tmp_path: Path) -> None:
     """secpt run --file 用文件内容作为 task。"""
+    from unittest.mock import MagicMock, patch
+
     from secpt.cli.app import app
-    from unittest.mock import patch, MagicMock
 
     f = tmp_path / "task.txt"
     f.write_text("scan the target", encoding="utf-8")
@@ -141,11 +146,17 @@ def test_cli_run_file_ok(tmp_path: Path) -> None:
     mock_result.trajectory = []
 
     with patch("secpt.runtime.runner.run_sync", return_value=mock_result) as mock_run:
-        result = runner.invoke(app, [
-            "run", "10.0.0.1",
-            "--mode", "tree",
-            "--file", str(f),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                "10.0.0.1",
+                "--mode",
+                "tree",
+                "--file",
+                str(f),
+            ],
+        )
     assert result.exit_code == 0
     mock_run.assert_called_once()
     _, kwargs = mock_run.call_args
@@ -159,11 +170,18 @@ def test_cli_engage_file_and_objective_mutex(tmp_path: Path) -> None:
     f = tmp_path / "obj.txt"
     f.write_text("engage objective", encoding="utf-8")
 
-    result = runner.invoke(app, [
-        "engage", "--target", "10.0.0.1",
-        "--file", str(f),
-        "--objective", "other",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "engage",
+            "--target",
+            "10.0.0.1",
+            "--file",
+            str(f),
+            "--objective",
+            "other",
+        ],
+    )
     assert result.exit_code == 1
     assert "已废弃" in result.output
 
@@ -175,11 +193,17 @@ def test_cli_engage_file_ok(tmp_path: Path) -> None:
     f = tmp_path / "obj.txt"
     f.write_text("penetrate the SAML SSO", encoding="utf-8")
 
-    result = runner.invoke(app, [
-        "engage", "--target", "10.0.0.1",
-        "--file", str(f),
-        "--fake",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "engage",
+            "--target",
+            "10.0.0.1",
+            "--file",
+            str(f),
+            "--fake",
+        ],
+    )
     assert result.exit_code == 1
     assert "已废弃" in result.output
 
@@ -188,9 +212,14 @@ def test_cli_engage_default_objective(tmp_path: Path) -> None:
     """不传 --file / --objective 时 engage 同样已废弃。"""
     from secpt.cli.app import app
 
-    result = runner.invoke(app, [
-        "engage", "--target", "10.0.0.1",
-        "--fake",
-    ])
+    result = runner.invoke(
+        app,
+        [
+            "engage",
+            "--target",
+            "10.0.0.1",
+            "--fake",
+        ],
+    )
     assert result.exit_code == 1
     assert "已废弃" in result.output

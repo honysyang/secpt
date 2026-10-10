@@ -23,11 +23,11 @@ class LearnedExperience:
     """一次运行沉淀出的经验。"""
 
     title: str
-    technique: str = ""                  # 技术分类（如 saml_xsw / sql_injection）
-    indicators: list[str] = field(default_factory=list)   # 匹配关键词
-    what_worked: str = ""                # 行之有效的做法
-    pitfalls: list[str] = field(default_factory=list)     # 踩过的坑/无效尝试
-    outcome: str = "partial"             # success | fail | partial
+    technique: str = ""  # 技术分类（如 saml_xsw / sql_injection）
+    indicators: list[str] = field(default_factory=list)  # 匹配关键词
+    what_worked: str = ""  # 行之有效的做法
+    pitfalls: list[str] = field(default_factory=list)  # 踩过的坑/无效尝试
+    outcome: str = "partial"  # success | fail | partial
     task_type: str = "generic"
     job_id: str = ""
     id: str = ""

@@ -12,7 +12,6 @@ challenges/
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,38 +44,38 @@ class Challenge:
         raw: list[str] = []
 
         # 完整 URL
-        for m in re.finditer(r'https?://[^\s,;]+', text):
+        for m in re.finditer(r"https?://[^\s,;]+", text):
             raw.append(m.group(0))
 
         # IP:PORT（标准格式）
-        for m in re.finditer(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})\b', text):
+        for m in re.finditer(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})\b", text):
             raw.append(f"{m.group(1)}:{m.group(2)}")
 
         # "http IP PORT" 格式（无 :// 分隔符）
-        for m in re.finditer(r'http\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(\d{1,5})', text):
+        for m in re.finditer(r"http\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(\d{1,5})", text):
             raw.append(f"http://{m.group(1)}:{m.group(2)}")
 
         # "IP PORT" 格式
-        for m in re.finditer(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(\d{3,5})\b', text):
+        for m in re.finditer(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(\d{3,5})\b", text):
             ip, port = m.group(1), m.group(2)
             raw.append(f"{ip}:{port}")
 
         # 内网地址 + 端口
-        for m in re.finditer(r'内网地址\s*[:：]\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', text):
+        for m in re.finditer(r"内网地址\s*[:：]\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", text):
             ip = m.group(1)
-            rest = text[m.end():]
-            for pm in re.finditer(rf'{re.escape(ip)}\s+(\d+)', rest):
+            rest = text[m.end() :]
+            for pm in re.finditer(rf"{re.escape(ip)}\s+(\d+)", rest):
                 raw.append(f"{ip}:{pm.group(1)}")
 
         # 归一化去重：http://host:port 与 host:port 视为同一目标
-        seen: dict[str, str] = {}   # normalized → 首选形式
+        seen: dict[str, str] = {}  # normalized → 首选形式
         result: list[str] = []
         for t in raw:
             norm = t
             if t.startswith("http://"):
-                norm = t[len("http://"):]
+                norm = t[len("http://") :]
             elif t.startswith("https://"):
-                norm = t[len("https://"):]
+                norm = t[len("https://") :]
             # 去掉尾部斜杠
             norm = norm.rstrip("/")
             if norm not in seen:
@@ -143,10 +142,7 @@ class ChallengeLoader:
                     id=challenge_id,
                     dir=attachments_dir.name,
                     count=len(attachments),
-                    files=[
-                        {"name": f.name, "size": f.stat().st_size}
-                        for f in attachments
-                    ],
+                    files=[{"name": f.name, "size": f.stat().st_size} for f in attachments],
                 )
             else:
                 logger.info(
@@ -184,8 +180,7 @@ class ChallengeLoader:
         if not self._base.exists():
             return []
         return sorted(
-            d.name for d in self._base.iterdir()
-            if d.is_dir() and (d / "test.md").exists()
+            d.name for d in self._base.iterdir() if d.is_dir() and (d / "test.md").exists()
         )
 
     def scaffold(self, challenge_id: str) -> Path:

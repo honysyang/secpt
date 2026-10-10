@@ -72,7 +72,17 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",   # 行宽由 formatter 控制
+    # 全角标点（；，。！？等）在中文 docstring/注释/字符串中是有意使用，非混淆错误
+    "RUF001", "RUF002", "RUF003",
+    # (str, Enum) 双继承是有意为之：保证 JSON 序列化/pydantic 兼容的跨版本稳定行为，
+    # 不迁移到 StrEnum（str() 输出语义不同，可能影响已落盘数据）
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]   # 测试里 assert True/False 是常规写法
 
 [tool.mypy]
 python_version = "3.12"

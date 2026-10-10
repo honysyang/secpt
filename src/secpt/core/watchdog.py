@@ -23,8 +23,9 @@ REDIRECT_HINT = (
 
 
 class Watchdog:
-    def __init__(self, inner, *, store=None, job_id: str = "",
-                 max_idle_rounds: int = MAX_IDLE_ROUNDS) -> None:
+    def __init__(
+        self, inner, *, store=None, job_id: str = "", max_idle_rounds: int = MAX_IDLE_ROUNDS
+    ) -> None:
         self._inner = inner
         self._store = store
         self._job_id = job_id
@@ -74,7 +75,7 @@ class Watchdog:
         if self._idle_rounds >= self._max_idle:
             hint = REDIRECT_HINT.format(n=self._idle_rounds)
             if not self._paused:
-                self._pause()   # 只标记一次（软暂停状态已足够），避免每回合重复刷事件
+                self._pause()  # 只标记一次（软暂停状态已足够），避免每回合重复刷事件
         return hint
 
     # ---------------- 内部 ----------------
@@ -94,7 +95,7 @@ class Watchdog:
                 if rec is not None:
                     rec.set_status("paused")
                     self._store.upsert_job(rec)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[watchdog] pause 落库失败(忽略): {e}")
 
     def _unpause(self) -> None:
@@ -105,5 +106,5 @@ class Watchdog:
                 if rec is not None and rec.status == "paused":
                     rec.set_status("running")
                     self._store.upsert_job(rec)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[watchdog] unpause 落库失败(忽略): {e}")

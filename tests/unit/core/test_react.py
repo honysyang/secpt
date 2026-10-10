@@ -8,7 +8,7 @@ import pytest
 
 from secpt.config.models import ToolsConfig
 from secpt.core.llm import FakeLLM, LLMMessage
-from secpt.core.react import DEFAULT_SYSTEM_PROMPT, ReactResult, run_react
+from secpt.core.react import ReactResult, run_react
 from secpt.core.tools.base import Registry
 from secpt.core.tools.demo import EchoTool
 from secpt.runtime import subprocess as sp

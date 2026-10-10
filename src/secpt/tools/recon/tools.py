@@ -30,6 +30,7 @@ def _get_tool_timeout(tool_name: str, default: float = 30.0) -> float:
     """从 settings.tools.tool_timeouts 读取逐工具超时。"""
     try:
         from secpt.config.settings import get_settings
+
         settings = get_settings()
         return settings.tools.tool_timeouts.get(tool_name, default)
     except Exception:
@@ -43,7 +44,9 @@ def _rewrite_nmap_args(args: str) -> tuple[str, str | None]:
     """
     if _FULL_PORT_RE.search(args):
         rewritten = _FULL_PORT_RE.sub("--top-ports 200", args)
-        note = f"[nmap 参数改写] 全端口扫描已自动改为 --top-ports 200（原参数: {args.strip()[:60]}）"
+        note = (
+            f"[nmap 参数改写] 全端口扫描已自动改为 --top-ports 200（原参数: {args.strip()[:60]}）"
+        )
         return rewritten, note
     return args, None
 
@@ -56,7 +59,9 @@ class NmapTool(Tool):
     """
 
     name = "nmap"
-    description = "nmap 端口扫描：参数如 '-p 1-1000 -T4 127.0.0.1'（全端口自动改为 --top-ports 200）"
+    description = (
+        "nmap 端口扫描：参数如 '-p 1-1000 -T4 127.0.0.1'（全端口自动改为 --top-ports 200）"
+    )
 
     async def run(self, args: str) -> str:
         try:
@@ -64,7 +69,7 @@ class NmapTool(Tool):
             argv = argv_str.split()
             timeout = _get_tool_timeout("nmap", 45.0)
             result = await run_whitelisted("nmap", argv, timeout=timeout)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():
@@ -89,7 +94,7 @@ class CurlTool(Tool):
             argv = args.split()
             timeout = _get_tool_timeout("curl", 15.0)
             result = await run_whitelisted("curl", argv, timeout=timeout)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():
@@ -111,7 +116,7 @@ class DigTool(Tool):
             argv = args.split()
             timeout = _get_tool_timeout("dig", 10.0)
             result = await run_whitelisted("dig", argv, timeout=timeout)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():

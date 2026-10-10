@@ -33,9 +33,7 @@ class PlaybookLibrary:
     """playbook 库：加载 + 匹配。"""
 
     def __init__(self, playbooks_dir: str | None = None) -> None:
-        self._dir = playbooks_dir or str(
-            Path(__file__).parent / "playbooks"
-        )
+        self._dir = playbooks_dir or str(Path(__file__).parent / "playbooks")
         self._playbooks: list[Playbook] = []
 
     def load(self) -> None:

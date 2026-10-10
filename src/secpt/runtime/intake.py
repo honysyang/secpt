@@ -14,7 +14,6 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import structlog
 
@@ -31,9 +30,9 @@ _ALLOWED_PREFIXES = ("/home/kali/challenges", "/home/kali/secpt", "/tmp")
 class IntakeResult:
     """intake 阶段输出。"""
 
-    objective: str = ""          # 带题面全文的 objective
+    objective: str = ""  # 带题面全文的 objective
     targets: list[str] = field(default_factory=list)  # 已验活的 targets
-    notes: list[str] = field(default_factory=list)    # 备注（含 internal_addr）
+    notes: list[str] = field(default_factory=list)  # 备注（含 internal_addr）
 
 
 # ---------------------------------------------------------------------------
@@ -129,13 +128,13 @@ _DOC_PATTERNS = (".md", ".txt", ".rst")
 def _looks_like_doc(filename: str) -> bool:
     """判断文件名是否像题面文件。"""
     lower = filename.lower()
-    if lower.endswith(_DOC_PATTERNS):
-        return True
-    if "readme" in lower:
-        return True
-    if "test" in lower or "题目" in filename or "challenge" in lower:
-        return True
-    return False
+    return (
+        lower.endswith(_DOC_PATTERNS)
+        or "readme" in lower
+        or "test" in lower
+        or "题目" in filename
+        or "challenge" in lower
+    )
 
 
 async def _find_and_read_docs(
@@ -223,10 +222,12 @@ async def _llm_extract(
         if isinstance(data, dict):
             return {
                 "access": data.get("access", []) if isinstance(data.get("access"), list) else [],
-                "internal_addr": data.get("internal_addr", []) if isinstance(data.get("internal_addr"), list) else [],
+                "internal_addr": data.get("internal_addr", [])
+                if isinstance(data.get("internal_addr"), list)
+                else [],
                 "attach": data.get("attach", []) if isinstance(data.get("attach"), list) else [],
             }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("intake.llm_extract_error", error=str(exc))
 
     return {"access": [], "internal_addr": [], "attach": []}
@@ -236,9 +237,9 @@ async def _llm_extract(
 # preflight 探活
 # ---------------------------------------------------------------------------
 
+
 async def _preflight(target: str) -> bool:
     """对 target 做 ≤5s 探活。返回是否 reachable。"""
-    import asyncio
 
     from secpt.runtime.subprocess import run_whitelisted
 
@@ -246,7 +247,11 @@ async def _preflight(target: str) -> bool:
     if target.startswith("http://") or target.startswith("https://"):
         # HTTP 探活：curl -I -m 5
         try:
-            result = await run_whitelisted("curl", ["-I", "-m", "5", "-sS", "-o", "/dev/null", "-w", "%{http_code}", target], timeout=8.0)
+            result = await run_whitelisted(
+                "curl",
+                ["-I", "-m", "5", "-sS", "-o", "/dev/null", "-w", "%{http_code}", target],
+                timeout=8.0,
+            )
             if result.returncode == 0:
                 code_str = result.stdout.strip()
                 if code_str and code_str != "000":
@@ -274,6 +279,7 @@ async def _preflight(target: str) -> bool:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+
 
 async def intake(
     objective: str,
@@ -361,9 +367,7 @@ async def intake(
         if t not in result.targets:
             result.targets.append(t)
     for t in candidates:
-        if t not in result.targets and not any(
-            addr in t for addr in internal_addrs_from_regex
-        ):
+        if t not in result.targets and not any(addr in t for addr in internal_addrs_from_regex):
             result.targets.append(t)
 
     # 过滤内网地址：绝不作为扫描目标

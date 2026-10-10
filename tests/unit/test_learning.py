@@ -14,7 +14,8 @@ def _mk_job(tmp_path: Path, job_id: str, transcript: list[dict]) -> Path:
     job_dir = tmp_path / job_id
     (job_dir / "ws").mkdir(parents=True)
     (job_dir / "ws" / "transcript.json").write_text(
-        json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
+        json.dumps(transcript, ensure_ascii=False), encoding="utf-8"
+    )
     (job_dir / "events.jsonl").write_text("", encoding="utf-8")
     return job_dir
 
@@ -31,32 +32,39 @@ class _DistillLLM:
         class _Resp:
             def __init__(self, c):
                 self.choices = [type("c", (), {"message": _Msg(c)})()]
+
         return _Resp(self._content)
 
 
-_GOOD = json.dumps({
-    "title": "SAML XSW 绕过签名",
-    "technique": "saml_xsw",
-    "indicators": ["saml", "sso", "签名"],
-    "what_worked": "注入无签名断言让 SP 取到伪造 NameID",
-    "pitfalls": ["直接改签名断言会失败"],
-    "outcome": "success",
-}, ensure_ascii=False)
+_GOOD = json.dumps(
+    {
+        "title": "SAML XSW 绕过签名",
+        "technique": "saml_xsw",
+        "indicators": ["saml", "sso", "签名"],
+        "what_worked": "注入无签名断言让 SP 取到伪造 NameID",
+        "pitfalls": ["直接改签名断言会失败"],
+        "outcome": "success",
+    },
+    ensure_ascii=False,
+)
 
 
 class TestJournal:
     def test_append_and_dedup(self, tmp_path):
         jr = ExperienceJournal(tmp_path / "exp.jsonl")
-        exp = LearnedExperience(title="t", technique="saml_xsw",
-                                what_worked="do x", outcome="success")
+        exp = LearnedExperience(
+            title="t", technique="saml_xsw", what_worked="do x", outcome="success"
+        )
         assert jr.append(exp) is True
-        assert jr.append(exp) is False          # 同指纹去重
+        assert jr.append(exp) is False  # 同指纹去重
         assert len(jr.load()) == 1
 
     def test_load_corrupt_line_skipped(self, tmp_path):
         p = tmp_path / "exp.jsonl"
-        p.write_text('{"bad json\n' + json.dumps(
-            LearnedExperience(title="ok").to_dict()) + "\n", encoding="utf-8")
+        p.write_text(
+            '{"bad json\n' + json.dumps(LearnedExperience(title="ok").to_dict()) + "\n",
+            encoding="utf-8",
+        )
         jr = ExperienceJournal(p)
         assert len(jr.load()) == 1
 
@@ -64,42 +72,72 @@ class TestJournal:
 class TestDistill:
     def test_distill_success(self, tmp_path):
         import asyncio
-        _mk_job(tmp_path, "j1", [
-            {"role": "assistant", "content": "尝试 XSW"},
-            {"role": "tool", "content": "200 ok"},
-        ])
+
+        _mk_job(
+            tmp_path,
+            "j1",
+            [
+                {"role": "assistant", "content": "尝试 XSW"},
+                {"role": "tool", "content": "200 ok"},
+            ],
+        )
         jr = ExperienceJournal(tmp_path / "exp.jsonl")
-        exp = asyncio.new_event_loop().run_until_complete(distill_job(
-            "j1", llm=_DistillLLM(_GOOD), jobs_dir=tmp_path, journal=jr))
+        exp = asyncio.new_event_loop().run_until_complete(
+            distill_job("j1", llm=_DistillLLM(_GOOD), jobs_dir=tmp_path, journal=jr)
+        )
         assert exp is not None and exp.technique == "saml_xsw"
         assert jr.load()[0].title == "SAML XSW 绕过签名"
 
     def test_distill_unparseable_returns_none(self, tmp_path):
         import asyncio
+
         _mk_job(tmp_path, "j2", [{"role": "assistant", "content": "x"}])
-        exp = asyncio.new_event_loop().run_until_complete(distill_job(
-            "j2", llm=_DistillLLM("不是 json"), jobs_dir=tmp_path,
-            journal=ExperienceJournal(tmp_path / "e.jsonl")))
+        exp = asyncio.new_event_loop().run_until_complete(
+            distill_job(
+                "j2",
+                llm=_DistillLLM("不是 json"),
+                jobs_dir=tmp_path,
+                journal=ExperienceJournal(tmp_path / "e.jsonl"),
+            )
+        )
         assert exp is None
 
     def test_distill_never_raises(self, tmp_path):
         import asyncio
-        exp = asyncio.new_event_loop().run_until_complete(distill_job(
-            "nonexistent", llm=None, jobs_dir=tmp_path,
-            journal=ExperienceJournal(tmp_path / "e.jsonl")))
+
+        exp = asyncio.new_event_loop().run_until_complete(
+            distill_job(
+                "nonexistent",
+                llm=None,
+                jobs_dir=tmp_path,
+                journal=ExperienceJournal(tmp_path / "e.jsonl"),
+            )
+        )
         assert exp is None
 
 
 class TestRetrieve:
     def _seed(self, tmp_path):
         jr = ExperienceJournal(tmp_path / "exp.jsonl")
-        jr.append(LearnedExperience(
-            title="SAML XSW 绕过签名", technique="saml_xsw",
-            indicators=["saml", "sso"],
-            what_worked="伪造断言", pitfalls=["别改签名"], outcome="success"))
-        jr.append(LearnedExperience(
-            title="SQL 注入拿数据", technique="sqli",
-            indicators=["sql"], what_worked="union select", outcome="success"))
+        jr.append(
+            LearnedExperience(
+                title="SAML XSW 绕过签名",
+                technique="saml_xsw",
+                indicators=["saml", "sso"],
+                what_worked="伪造断言",
+                pitfalls=["别改签名"],
+                outcome="success",
+            )
+        )
+        jr.append(
+            LearnedExperience(
+                title="SQL 注入拿数据",
+                technique="sqli",
+                indicators=["sql"],
+                what_worked="union select",
+                outcome="success",
+            )
+        )
         return jr
 
     def test_search_relevance(self, tmp_path):

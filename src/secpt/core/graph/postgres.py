@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -19,7 +19,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class PostgresGraphStore(GraphStore):
@@ -78,14 +78,20 @@ class PostgresGraphStore(GraphStore):
         props_json = json.dumps(props or {}, ensure_ascii=False)
         now = _utcnow()
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO entities (eid, etype, props, updated_at)
                 VALUES ($1, $2, $3::jsonb, $4)
                 ON CONFLICT(eid) DO UPDATE SET
                     etype = EXCLUDED.etype,
                     props = EXCLUDED.props,
                     updated_at = EXCLUDED.updated_at
-            """, eid, etype, props_json, now)
+            """,
+                eid,
+                etype,
+                props_json,
+                now,
+            )
         logger.debug("graph.postgres.entity.upsert", eid=eid, etype=etype)
 
     async def add_edge(
@@ -100,16 +106,27 @@ class PostgresGraphStore(GraphStore):
         async with pool.acquire() as conn:
             # 确保端点存在
             for eid in (src, dst):
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO entities (eid, etype, props, updated_at)
                     VALUES ($1, 'unknown', '{}', $2)
                     ON CONFLICT(eid) DO NOTHING
-                """, eid, now)
-            await conn.execute("""
+                """,
+                    eid,
+                    now,
+                )
+            await conn.execute(
+                """
                 INSERT INTO edges (src, dst, etype, confidence, created_at)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT(src, dst, etype) DO NOTHING
-            """, src, dst, etype, confidence, now)
+            """,
+                src,
+                dst,
+                etype,
+                confidence,
+                now,
+            )
         logger.debug("graph.postgres.edge.add", src=src, dst=dst, etype=etype)
 
     async def add_evidence(
@@ -123,32 +140,47 @@ class PostgresGraphStore(GraphStore):
         score = TRUST_SCORES[trust_tier]
         now = _utcnow()
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO evidences (evidence_id, eid, payload, trust_tier, trust_score, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6)
-            """, evidence_id, eid, payload, trust_tier, score, now)
+            """,
+                evidence_id,
+                eid,
+                payload,
+                trust_tier,
+                score,
+                now,
+            )
         logger.debug("graph.postgres.evidence.add", evidence_id=evidence_id, eid=eid)
         return evidence_id
 
     async def neighbors(self, eid: str) -> list[dict[str, Any]]:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT e.dst, e.etype AS edge_type, e.confidence,
                        ent.etype, ent.props
                 FROM edges e
                 JOIN entities ent ON e.dst = ent.eid
                 WHERE e.src = $1
-            """, eid)
+            """,
+                eid,
+            )
         results: list[dict[str, Any]] = []
         for row in rows:
-            results.append({
-                "eid": row["dst"],
-                "etype": row["etype"],
-                "props": json.loads(row["props"]) if isinstance(row["props"], str) else row["props"],
-                "edge_type": row["edge_type"],
-                "confidence": row["confidence"],
-            })
+            results.append(
+                {
+                    "eid": row["dst"],
+                    "etype": row["etype"],
+                    "props": json.loads(row["props"])
+                    if isinstance(row["props"], str)
+                    else row["props"],
+                    "edge_type": row["edge_type"],
+                    "confidence": row["confidence"],
+                }
+            )
         return results
 
     async def close(self) -> None:

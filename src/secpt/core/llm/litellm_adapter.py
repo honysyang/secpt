@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 
@@ -84,9 +83,9 @@ class LiteLLMAdapter(BaseLLM):
             raise LLMError(f"LLM rate limited: {exc}") from exc
         except litellm.APIError as exc:
             raise LLMError(f"LLM API error: {exc}") from exc
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise LLMError(f"LLM request timeout ({self._config.timeout_s}s)") from exc
-        except Exception as exc:  # noqa: BLE001 - 边界统一收敛
+        except Exception as exc:
             raise LLMError(f"LLM unexpected error: {exc}") from exc
 
         # litellm 响应与 OpenAI 兼容：choices[0].message

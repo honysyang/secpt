@@ -14,7 +14,7 @@ import asyncio
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class SQLiteGraphStore(GraphStore):
@@ -144,7 +144,13 @@ class SQLiteGraphStore(GraphStore):
                 (evidence_id, eid, payload, trust_tier, score, _utcnow()),
             )
             self._conn.commit()
-        logger.debug("graph.sqlite.evidence.add", evidence_id=evidence_id, eid=eid, trust_tier=trust_tier, result=result)
+        logger.debug(
+            "graph.sqlite.evidence.add",
+            evidence_id=evidence_id,
+            eid=eid,
+            trust_tier=trust_tier,
+            result=result,
+        )
         return evidence_id
 
     async def neighbors(self, eid: str) -> list[dict[str, Any]]:
@@ -160,13 +166,15 @@ class SQLiteGraphStore(GraphStore):
         )
         results: list[dict[str, Any]] = []
         for row in cursor.fetchall():
-            results.append({
-                "eid": row["dst"],
-                "etype": row["etype"],
-                "props": json.loads(row["props"]),
-                "edge_type": row["edge_type"],
-                "confidence": row["confidence"],
-            })
+            results.append(
+                {
+                    "eid": row["dst"],
+                    "etype": row["etype"],
+                    "props": json.loads(row["props"]),
+                    "edge_type": row["edge_type"],
+                    "confidence": row["confidence"],
+                }
+            )
         return results
 
     async def close(self) -> None:

@@ -12,20 +12,27 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from secpt.core.job.models import JobRecord, TaskSpec
 
 JOB_STATUSES = {
-    "queued", "running", "paused", "succeeded",
-    "failed", "budget_exceeded", "step_exceeded", "wallclock_exceeded",
-    "cancelled", "stuck",
+    "queued",
+    "running",
+    "paused",
+    "succeeded",
+    "failed",
+    "budget_exceeded",
+    "step_exceeded",
+    "wallclock_exceeded",
+    "cancelled",
+    "stuck",
 }
 
 
 def _ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(UTC).timestamp()
 
 
 class JobStore:
@@ -103,17 +110,21 @@ class JobStore:
                        cost_cny=excluded.cost_cny, updated_at=excluded.updated_at,
                        last_error=excluded.last_error""",
                 (
-                    rec.job_id, rec.spec.model_dump_json(),
-                    rec.status, rec.round, rec.steps, rec.cost_cny,
-                    rec.created_at, rec.updated_at, rec.last_error,
+                    rec.job_id,
+                    rec.spec.model_dump_json(),
+                    rec.status,
+                    rec.round,
+                    rec.steps,
+                    rec.cost_cny,
+                    rec.created_at,
+                    rec.updated_at,
+                    rec.last_error,
                 ),
             )
 
     def get_job(self, job_id: str) -> JobRecord | None:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_record(row)
@@ -141,9 +152,14 @@ class JobStore:
     def _row_to_record(row: sqlite3.Row) -> JobRecord:
         spec = TaskSpec.model_validate_json(row["spec_json"])
         return JobRecord(
-            job_id=row["job_id"], spec=spec, status=row["status"],
-            round=row["round"], steps=row["steps"], cost_cny=row["cost_cny"],
-            created_at=row["created_at"], updated_at=row["updated_at"],
+            job_id=row["job_id"],
+            spec=spec,
+            status=row["status"],
+            round=row["round"],
+            steps=row["steps"],
+            cost_cny=row["cost_cny"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
             last_error=row["last_error"],
         )
 
@@ -153,8 +169,7 @@ class JobStore:
         """返回 SQLite seq。payload 必须是 JSON 可序列化。"""
         with self._conn() as conn:
             cur = conn.execute(
-                "INSERT INTO events (job_id, ts, round, type, payload_json)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO events (job_id, ts, round, type, payload_json) VALUES (?,?,?,?,?)",
                 (job_id, _ts(), round_, etype, json.dumps(payload, ensure_ascii=False)),
             )
             return int(cur.lastrowid)
@@ -168,16 +183,28 @@ class JobStore:
             ).fetchall()
         out = []
         for r in reversed(rows):
-            out.append({
-                "seq": r["seq"], "ts": r["ts"], "round": r["round"],
-                "type": r["type"], "payload": json.loads(r["payload_json"]),
-            })
+            out.append(
+                {
+                    "seq": r["seq"],
+                    "ts": r["ts"],
+                    "round": r["round"],
+                    "type": r["type"],
+                    "payload": json.loads(r["payload_json"]),
+                }
+            )
         return out
 
     # ---------------- findings ----------------
 
-    def add_finding(self, job_id: str, fid: str, kind: str, value: str,
-                    evidence: str = "", verified: bool = False) -> None:
+    def add_finding(
+        self,
+        job_id: str,
+        fid: str,
+        kind: str,
+        value: str,
+        evidence: str = "",
+        verified: bool = False,
+    ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO findings (job_id, id, kind, value, evidence, verified, ts)
@@ -196,7 +223,13 @@ class JobStore:
                 (job_id,),
             ).fetchall()
         return [
-            {"id": r["id"], "kind": r["kind"], "value": r["value"],
-             "evidence": r["evidence"], "verified": bool(r["verified"]), "ts": r["ts"]}
+            {
+                "id": r["id"],
+                "kind": r["kind"],
+                "value": r["value"],
+                "evidence": r["evidence"],
+                "verified": bool(r["verified"]),
+                "ts": r["ts"],
+            }
             for r in rows
         ]

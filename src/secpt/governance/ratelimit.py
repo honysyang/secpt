@@ -29,9 +29,29 @@ _HOST_RE = re.compile(
 )
 # 常见文件扩展名，排除（x.py / readme.md 不是 host）
 _FILE_SUFFIXES = {
-    ".py", ".md", ".txt", ".sh", ".json", ".yaml", ".yml", ".html",
-    ".htm", ".js", ".css", ".xml", ".log", ".csv", ".conf", ".cfg",
-    ".c", ".h", ".go", ".rs", ".toml", ".ini", ".env",
+    ".py",
+    ".md",
+    ".txt",
+    ".sh",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".htm",
+    ".js",
+    ".css",
+    ".xml",
+    ".log",
+    ".csv",
+    ".conf",
+    ".cfg",
+    ".c",
+    ".h",
+    ".go",
+    ".rs",
+    ".toml",
+    ".ini",
+    ".env",
 }
 
 
@@ -89,8 +109,9 @@ class GlobalRateLimiter:
         blocked = limiter.check(command)   # 返回被拦截的 host 列表，空 = 放行
     """
 
-    def __init__(self, db_path: str | Path = "var/secpt.sqlite",
-                 max_rps: float = 10.0, window_s: float = 1.0) -> None:
+    def __init__(
+        self, db_path: str | Path = "var/secpt.sqlite", max_rps: float = 10.0, window_s: float = 1.0
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.max_rps = max(max_rps, 0.1)
@@ -150,4 +171,4 @@ class GlobalRateLimiter:
         return blocked
 
 
-__all__ = ["RateLimiter", "GlobalRateLimiter", "extract_hosts"]
+__all__ = ["GlobalRateLimiter", "RateLimiter", "extract_hosts"]

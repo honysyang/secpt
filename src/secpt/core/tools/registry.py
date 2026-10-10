@@ -58,8 +58,17 @@ def build_registry(
     # 默认：用内置默认列表
     if tool_names is None:
         tool_names = [
-            "read_file", "list_dir", "nmap", "curl", "dig", "whatweb", "whois",
-            "crawler", "http_analyze", "saml", "flag_extract",
+            "read_file",
+            "list_dir",
+            "nmap",
+            "curl",
+            "dig",
+            "whatweb",
+            "whois",
+            "crawler",
+            "http_analyze",
+            "saml",
+            "flag_extract",
         ]
 
     for name in tool_names:

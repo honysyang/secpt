@@ -23,8 +23,8 @@ class ToolCall:
     call_id: str
     name: str
     args: str
-    status: str = ""       # ok | empty | error（tool_result 分类）
-    preview: str = ""      # 工具输出预览（events 里截断 500 字符）
+    status: str = ""  # ok | empty | error（tool_result 分类）
+    preview: str = ""  # 工具输出预览（events 里截断 500 字符）
 
 
 @dataclass
@@ -32,8 +32,8 @@ class Evidence:
     job_id: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     findings: list[dict] = field(default_factory=list)
-    answer: str | None = None          # agent 自报的 ANSWER（无则 None）
-    answer_in_outputs: bool = False    # ANSWER 值是否出现在任一工具输出中
+    answer: str | None = None  # agent 自报的 ANSWER（无则 None）
+    answer_in_outputs: bool = False  # ANSWER 值是否出现在任一工具输出中
     n_assistant_msgs: int = 0
 
     def transcript_excerpt(self, max_chars: int = 4000) -> str:
@@ -65,8 +65,10 @@ def load_events(job_dir: Path) -> list[dict]:
 
 
 def _find_transcript(job_dir: Path) -> Path | None:
-    for cand in (Path(job_dir) / "ws" / "transcript.json",
-                 Path(job_dir) / "ws" / "ws" / "transcript.json"):
+    for cand in (
+        Path(job_dir) / "ws" / "transcript.json",
+        Path(job_dir) / "ws" / "ws" / "transcript.json",
+    ):
         if cand.is_file():
             return cand
     return None
@@ -81,7 +83,7 @@ def _extract_answer(events: list[dict], transcript: Path | None) -> str | None:
             for m in messages:
                 if m.get("role") == "assistant" and m.get("content"):
                     contents.append(str(m["content"]))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     for ev in events:
         if ev.get("type") == "assistant":
@@ -104,13 +106,12 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
     by_id: dict[str, ToolCall] = {}
     order: list[str] = []
     findings: list[dict] = []
-    pending_seq = 0               # 单调计数器（不能用 len(order)，pop 后会重复）
+    pending_seq = 0  # 单调计数器（不能用 len(order)，pop 后会重复）
     for ev in events:
         etype = ev.get("type")
         payload = ev.get("payload") or {}
         if etype == "tool_call":
-            tc = ToolCall(call_id="", name=payload.get("tool", ""),
-                          args=payload.get("args", ""))
+            tc = ToolCall(call_id="", name=payload.get("tool", ""), args=payload.get("args", ""))
             # 与后续 tool_result 配对：engine 的 on_result 顺序与 on_tool 一致，
             # 按出现顺序 FIFO 回填
             key = f"pending-{pending_seq}"
@@ -140,7 +141,7 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
                     if m.get("role") == "tool" and needle in str(m.get("content") or ""):
                         answer_in_outputs = True
                         break
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if not answer_in_outputs:
             for tc in by_id.values():

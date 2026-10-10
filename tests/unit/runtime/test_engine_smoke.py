@@ -30,8 +30,9 @@ class _TC:
 
 
 class _Msg:
-    def __init__(self, content: str, tool_calls: list | None = None,
-                 reasoning_content: str | None = None) -> None:
+    def __init__(
+        self, content: str, tool_calls: list | None = None, reasoning_content: str | None = None
+    ) -> None:
         self.content = content
         self.tool_calls = tool_calls or []
         self.reasoning_content = reasoning_content
@@ -57,11 +58,13 @@ class FakeLLM:
         if self.calls == 1:
             target = self.work_dir / "flag.txt"
             args = json.dumps({"path": str(target), "content": "FLAG{smoke_test_ok}"})
-            return _Resp(_Msg(
-                content="我来准备脚本。",
-                tool_calls=[_TC("call_1", "write_file", args)],
-                reasoning_content="审计用推理内容",
-            ))
+            return _Resp(
+                _Msg(
+                    content="我来准备脚本。",
+                    tool_calls=[_TC("call_1", "write_file", args)],
+                    reasoning_content="审计用推理内容",
+                )
+            )
         return _Resp(_Msg(content="ANSWER: FLAG{smoke_test_ok}"))
 
 
@@ -115,8 +118,7 @@ async def test_tool_output_flag_is_candidate_not_exit(tmp_path: Path) -> None:
     src = tmp_path / "src" / "app.py"
     src.parent.mkdir(parents=True)
     src.write_text(
-        'FLAG="{test_flag}"  # 默认占位\n'
-        "真实 FLAG{e946a54f-75cf-6d73-9163-ba0959c2dafc}\n",
+        'FLAG="{test_flag}"  # 默认占位\n真实 FLAG{e946a54f-75cf-6d73-9163-ba0959c2dafc}\n',
         encoding="utf-8",
     )
 
@@ -130,10 +132,12 @@ async def test_tool_output_flag_is_candidate_not_exit(tmp_path: Path) -> None:
                 assert "reasoning_content" not in m
             if self.calls == 1:
                 args = json.dumps({"path": str(src)})
-                return _Resp(_Msg(
-                    content="读一下源码。",
-                    tool_calls=[_TC("call_1", "read_file", args)],
-                ))
+                return _Resp(
+                    _Msg(
+                        content="读一下源码。",
+                        tool_calls=[_TC("call_1", "read_file", args)],
+                    )
+                )
             return _Resp(_Msg(content="ANSWER: FLAG{e946a54f-75cf-6d73-9163-ba0959c2dafc}"))
 
     llm = ToolFlagLLM()

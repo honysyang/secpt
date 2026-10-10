@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import structlog
 
@@ -23,8 +22,8 @@ class Experience:
     id: str
     title: str
     description: str
-    technique: str           # 技术分类（如 "web_fingerprint", "port_scan"）
-    indicators: list[str]    # 匹配指标关键词
+    technique: str  # 技术分类（如 "web_fingerprint", "port_scan"）
+    indicators: list[str]  # 匹配指标关键词
     severity: str = "medium"
     trust_tier: str = "heuristic"
     ts: str = ""
@@ -85,7 +84,7 @@ class ExperienceStore:
                 exp = Experience(**item)
                 self._experiences[exp.id] = exp
             logger.info("experience.loaded", count=len(self._experiences))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("experience.load_error", error=str(exc))
 
     def save(self) -> None:

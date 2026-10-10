@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 from secpt.core.tools.base import Tool
 
@@ -13,9 +14,18 @@ class ReadFileTool(Tool):
     name = "read_file"
     description = "读取本地文件，如题目描述 test.md"
 
-    # 后缀白名单：只允许文本类文件
-    ALLOWED_SUFFIXES = {".md", ".txt", ".yaml", ".yml", ".json", ".conf", ".py", ".log"}
-    MAX_FILE_SIZE = 200 * 1024  # 200KB
+    # 后缀白名单：只允许文本类文件（ClassVar：类级常量，非实例字段）
+    ALLOWED_SUFFIXES: ClassVar[set[str]] = {
+        ".md",
+        ".txt",
+        ".yaml",
+        ".yml",
+        ".json",
+        ".conf",
+        ".py",
+        ".log",
+    }
+    MAX_FILE_SIZE: ClassVar[int] = 200 * 1024  # 200KB
 
     async def run(self, args: str) -> str:
         path = args.strip()
@@ -59,7 +69,9 @@ class ListDirTool(Tool):
     """列出目录内容（深度 1 层），输出文件名 + 大小。"""
 
     name = "list_dir"
-    description = "列出目录内容（深度1层），输出文件名+大小，如 list_dir /home/kali/challenges/rois-saml-sso"
+    description = (
+        "列出目录内容（深度1层），输出文件名+大小，如 list_dir /home/kali/challenges/rois-saml-sso"
+    )
 
     MAX_OUTPUT = 3000
 
@@ -90,7 +102,7 @@ class ListDirTool(Tool):
 
             output = f"目录 {resolved} ({len(lines)} 项):\n" + "\n".join(lines)
             if len(output) > self.MAX_OUTPUT:
-                output = output[:self.MAX_OUTPUT] + "\n... [truncated]"
+                output = output[: self.MAX_OUTPUT] + "\n... [truncated]"
             return output
         except FileNotFoundError:
             return f"Error: 目录不存在: {path}"

@@ -26,7 +26,7 @@ from pathlib import Path
 
 def attempt_key(action: str, target: str) -> str:
     """尝试去重键：sha1(action + target) 十六进制。"""
-    return hashlib.sha1(f"{action}|{target}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{action}|{target}".encode()).hexdigest()
 
 
 class Warroom:
@@ -97,8 +97,14 @@ class Warroom:
 
     # ---------------- assets ----------------
 
-    def add_asset(self, host: str, port: int | None = None, service: str = "",
-                  tech: str = "", source_step: str = "") -> int:
+    def add_asset(
+        self,
+        host: str,
+        port: int | None = None,
+        service: str = "",
+        tech: str = "",
+        source_step: str = "",
+    ) -> int:
         """写入一条资产，返回 id。"""
         with self._conn() as conn:
             cur = conn.execute(
@@ -111,8 +117,7 @@ class Warroom:
     def list_assets(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, host, port, service, tech, source_step"
-                " FROM assets ORDER BY id"
+                "SELECT id, host, port, service, tech, source_step FROM assets ORDER BY id"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -123,8 +128,9 @@ class Warroom:
 
     # ---------------- credentials ----------------
 
-    def add_credential(self, kind: str, value: str, source_step: str = "",
-                       valid: bool = False) -> int:
+    def add_credential(
+        self, kind: str, value: str, source_step: str = "", valid: bool = False
+    ) -> int:
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO credentials (job_id, kind, value, source_step, valid)"
@@ -142,8 +148,15 @@ class Warroom:
 
     # ---------------- findings ----------------
 
-    def add_finding(self, fid: str, kind: str, title: str, evidence: str = "",
-                    severity: str = "info", verified: bool = False) -> None:
+    def add_finding(
+        self,
+        fid: str,
+        kind: str,
+        title: str,
+        evidence: str = "",
+        severity: str = "info",
+        verified: bool = False,
+    ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO findings (id, job_id, kind, title, evidence, severity, verified, ts)
@@ -152,15 +165,22 @@ class Warroom:
                        kind=excluded.kind, title=excluded.title,
                        evidence=excluded.evidence, severity=excluded.severity,
                        verified=CASE WHEN excluded.verified THEN 1 ELSE verified END""",
-                (fid, self.job_id, kind, title, evidence, severity, int(verified),
-                 __import__("time").time()),
+                (
+                    fid,
+                    self.job_id,
+                    kind,
+                    title,
+                    evidence,
+                    severity,
+                    int(verified),
+                    __import__("time").time(),
+                ),
             )
 
     def list_findings(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, kind, title, evidence, severity, verified, ts"
-                " FROM findings ORDER BY ts"
+                "SELECT id, kind, title, evidence, severity, verified, ts FROM findings ORDER BY ts"
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -173,15 +193,14 @@ class Warroom:
 
     def count_verified(self) -> int:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM findings WHERE verified=1"
-            ).fetchone()
+            row = conn.execute("SELECT COUNT(*) AS n FROM findings WHERE verified=1").fetchone()
         return int(row["n"])
 
     # ---------------- attempts（去重） ----------------
 
-    def add_attempt(self, action: str, target: str = "", result: str = "",
-                    reason: str = "") -> bool:
+    def add_attempt(
+        self, action: str, target: str = "", result: str = "", reason: str = ""
+    ) -> bool:
         """记录一次尝试。key = sha1(action + target)。
 
         返回 True 表示新增（之前未尝试过），False 表示重复命中被跳过。

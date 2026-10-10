@@ -14,20 +14,20 @@ from secpt.runtime.llm.client import sanitize_messages
 
 def test_should_rollover_triggers() -> None:
     # 步数触发
-    assert should_rollover(steps_in_round=60, wall_in_round=10, est_tokens=100,
-                           window=100_000)[0]
+    assert should_rollover(steps_in_round=60, wall_in_round=10, est_tokens=100, window=100_000)[0]
     # 墙钟触发
-    assert should_rollover(steps_in_round=10, wall_in_round=1500, est_tokens=100,
-                           window=100_000)[0]
+    assert should_rollover(steps_in_round=10, wall_in_round=1500, est_tokens=100, window=100_000)[0]
     # 窗口触发
-    assert should_rollover(steps_in_round=10, wall_in_round=10, est_tokens=100,
-                           window=100)[0]
+    assert should_rollover(steps_in_round=10, wall_in_round=10, est_tokens=100, window=100)[0]
     # 子目标完成
-    assert should_rollover(steps_in_round=1, wall_in_round=1, est_tokens=1,
-                           window=100_000, subtask_done=True)[0]
+    assert should_rollover(
+        steps_in_round=1, wall_in_round=1, est_tokens=1, window=100_000, subtask_done=True
+    )[0]
     # 都不触发
-    assert should_rollover(steps_in_round=10, wall_in_round=10, est_tokens=100,
-                           window=100_000)[0] is False
+    assert (
+        should_rollover(steps_in_round=10, wall_in_round=10, est_tokens=100, window=100_000)[0]
+        is False
+    )
 
 
 def test_build_new_chain_handoff_is_start_point(tmp_path: Path) -> None:
@@ -37,12 +37,18 @@ def test_build_new_chain_handoff_is_start_point(tmp_path: Path) -> None:
 
     assert len(new_chain) == 2
     assert new_chain[0]["role"] == "system"
-    assert new_chain[0]["content"] == system["content"]   # system 原样保留
+    assert new_chain[0]["content"] == system["content"]  # system 原样保留
     assert new_chain[1]["role"] == "user"
     assert new_chain[1]["content"].startswith("【上一回合交接】")
     # 六段齐全（含"已排除的尝试"，防重复踩坑）
-    for seg in ("1. 任务目标", "2. 已确认事实", "3. 已获取凭据",
-                "4. 已排除的尝试", "5. 当前进展", "6. 下一步候选"):
+    for seg in (
+        "1. 任务目标",
+        "2. 已确认事实",
+        "3. 已获取凭据",
+        "4. 已排除的尝试",
+        "5. 当前进展",
+        "6. 下一步候选",
+    ):
         assert seg in handoff
     # 作为新链起点：无孤立结构，模拟请求不报错
     sanitize_messages(new_chain)
@@ -60,11 +66,19 @@ class _RolloverLLM:
         if self.calls == 1:
             target = self.work_dir / "flag.txt"
             args = json.dumps({"path": str(target), "content": "FLAG{rollover_ok}"})
-            return _resp({
-                "role": "assistant", "content": "继续推进。",
-                "tool_calls": [{"id": "r1", "type": "function",
-                                "function": {"name": "write_file", "arguments": args}}],
-            })
+            return _resp(
+                {
+                    "role": "assistant",
+                    "content": "继续推进。",
+                    "tool_calls": [
+                        {
+                            "id": "r1",
+                            "type": "function",
+                            "function": {"name": "write_file", "arguments": args},
+                        }
+                    ],
+                }
+            )
         return _resp({"role": "assistant", "content": "ANSWER: FLAG{rollover_ok}"})
 
 
@@ -105,9 +119,7 @@ async def test_rollover_chain_continues(tmp_path: Path) -> None:
     )
     # 模拟"上一回合交接"作为初始链（首条 system + user handoff）
     handoff = await StubSummarizer()("目标：写 flag 文件", [])
-    cfg.initial_messages = build_new_chain(
-        {"role": "system", "content": "你是测试员。"}, handoff
-    )
+    cfg.initial_messages = build_new_chain({"role": "system", "content": "你是测试员。"}, handoff)
     result = await Engine(cfg, llm=llm).run()
     assert result.status == "success"
     assert result.flag == "FLAG{rollover_ok}"

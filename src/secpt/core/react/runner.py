@@ -43,7 +43,9 @@ class ReactResult:
     trajectory: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _parse_action(resp: LLMMessage) -> tuple[Literal["answer", "action", "none"], str | None, str | None]:
+def _parse_action(
+    resp: LLMMessage,
+) -> tuple[Literal["answer", "action", "none"], str | None, str | None]:
     """双轨解析：优先 tool_calls（结构化），兜底 ACTION/ANSWER 文本。
 
     :return: ``("answer", text, None)`` / ``("action", name, args_json_or_raw)`` / ``("none", None, None)``
@@ -76,9 +78,7 @@ def _parse_action(resp: LLMMessage) -> tuple[Literal["answer", "action", "none"]
 def _build_initial_messages(task: str, system_prompt: str, tools: Registry) -> list[LLMMessage]:
     tool_list = ", ".join(tools.names())
     user_content = (
-        f"任务：{task}\n"
-        f"可用工具：{tool_list}\n\n"
-        "请按系统提示的格式输出 ACTION 或 ANSWER。"
+        f"任务：{task}\n可用工具：{tool_list}\n\n请按系统提示的格式输出 ACTION 或 ANSWER。"
     )
     return [
         LLMMessage(role="system", content=system_prompt),
@@ -160,7 +160,9 @@ async def run_react(
             answer = (a1 or "").strip()
             trajectory.append({"type": "finish", "step": step_index, "answer": answer})
             logger.info("react.finish", step=step_index, answer=answer)
-            return ReactResult(answer=answer, steps=step_index, exhausted=False, trajectory=trajectory)
+            return ReactResult(
+                answer=answer, steps=step_index, exhausted=False, trajectory=trajectory
+            )
 
         if kind == "action":
             tool_name = a1 or ""
@@ -169,16 +171,20 @@ async def run_react(
 
             # ---- 图写入：action 实体 + performed 边（含反循环检查） ----
             if store is not None and task_eid is not None:
-                dup_obs = await _check_and_write_action(store, task_eid, action_eid, tool_name, tool_args)
+                dup_obs = await _check_and_write_action(
+                    store, task_eid, action_eid, tool_name, tool_args
+                )
                 if dup_obs is not None:
-                    trajectory.append({
-                        "type": "action",
-                        "step": step_index,
-                        "tool": tool_name,
-                        "args": tool_args,
-                        "observation": dup_obs,
-                        "deduplicated": True,
-                    })
+                    trajectory.append(
+                        {
+                            "type": "action",
+                            "step": step_index,
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "observation": dup_obs,
+                            "deduplicated": True,
+                        }
+                    )
                     messages.append(LLMMessage(role="user", content=f"观察：{dup_obs}"))
                     continue
 
@@ -200,7 +206,7 @@ async def run_react(
                 )
                 try:
                     observation = await tool.run(tool_args)
-                except Exception as exc:  # noqa: BLE001 - 防御
+                except Exception as exc:
                     observation = f"Error: {exc}"
                 logger.info(
                     "react.observation",
@@ -222,13 +228,15 @@ async def run_react(
                         trust_tier="deterministic",
                     )
 
-            trajectory.append({
-                "type": "action",
-                "step": step_index,
-                "tool": tool_name,
-                "args": tool_args,
-                "observation": observation,
-            })
+            trajectory.append(
+                {
+                    "type": "action",
+                    "step": step_index,
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "observation": observation,
+                }
+            )
             # 文本协议下以 user 角色回发 observation，规避 DeepSeek/OpenAI
             # 对 role="tool" 必须紧跟 tool_calls 的校验
             messages.append(LLMMessage(role="user", content=f"观察：{observation}"))
@@ -241,12 +249,14 @@ async def run_react(
             step=step_index,
             raw_content=content[:200],
         )
-        trajectory.append({
-            "type": "format_error",
-            "step": step_index,
-            "raw_content": content,
-            "observation": observation,
-        })
+        trajectory.append(
+            {
+                "type": "format_error",
+                "step": step_index,
+                "raw_content": content,
+                "observation": observation,
+            }
+        )
         messages.append(LLMMessage(role="user", content=f"观察：{observation}"))
 
     logger.warning("react.exhausted", max_steps=max_steps)

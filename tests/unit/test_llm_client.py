@@ -94,8 +94,7 @@ def _no_backoff(monkeypatch):
 
 
 def test_retry_on_connect_error(monkeypatch):
-    fake = _FlakyClient([httpx.ConnectError("conn refused"),
-                         httpx.ConnectTimeout("timeout")])
+    fake = _FlakyClient([httpx.ConnectError("conn refused"), httpx.ConnectTimeout("timeout")])
     monkeypatch.setattr(client_mod, "_get_client", lambda: fake)
     resp = _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk-test"))
     assert resp.choices[0].message.content == "ok"
@@ -103,8 +102,11 @@ def test_retry_on_connect_error(monkeypatch):
 
 
 def test_retry_on_429_then_success(monkeypatch):
-    err = httpx.HTTPStatusError("rate limited", request=None,
-                                response=httpx.Response(429, request=httpx.Request("POST", "http://x")))
+    err = httpx.HTTPStatusError(
+        "rate limited",
+        request=None,
+        response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
+    )
     fake = _FlakyClient([err])
     monkeypatch.setattr(client_mod, "_get_client", lambda: fake)
     resp = _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk-test"))
@@ -113,8 +115,11 @@ def test_retry_on_429_then_success(monkeypatch):
 
 
 def test_400_not_retried(monkeypatch):
-    err = httpx.HTTPStatusError("bad request", request=None,
-                                response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
+    err = httpx.HTTPStatusError(
+        "bad request",
+        request=None,
+        response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+    )
     fake = _FlakyClient([err, err, err, err, err])
     monkeypatch.setattr(client_mod, "_get_client", lambda: fake)
     with pytest.raises(httpx.HTTPStatusError):

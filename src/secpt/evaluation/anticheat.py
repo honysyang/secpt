@@ -25,7 +25,7 @@ _ANSWERISH_NAMES = {"flag", "flag.txt", "answer", "answer.txt", "proof", "proof.
 @dataclass
 class AntiCheatReport:
     answer_in_outputs: bool = False
-    local_answer_file_read: bool = False     # 直读本地答案文件且内容命中 ANSWER → 硬作弊
+    local_answer_file_read: bool = False  # 直读本地答案文件且内容命中 ANSWER → 硬作弊
     suspicious: list[str] = field(default_factory=list)
     hard_fail: bool = False
 
@@ -56,11 +56,9 @@ def check(evidence: Evidence, job_dir: Path | None = None) -> AntiCheatReport:
         hit = bool(evidence.answer) and evidence.answer in tc.preview
         if hit:
             rep.local_answer_file_read = True
-            rep.suspicious.append(
-                f"直读本地疑似答案文件 {path!r}，且内容命中 ANSWER")
+            rep.suspicious.append(f"直读本地疑似答案文件 {path!r}，且内容命中 ANSWER")
         else:
-            rep.suspicious.append(
-                f"读取了文件名像答案的文件 {path!r}（内容未命中，需 judge 复核）")
+            rep.suspicious.append(f"读取了文件名像答案的文件 {path!r}（内容未命中，需 judge 复核）")
 
     rep.hard_fail = rep.local_answer_file_read
     return rep

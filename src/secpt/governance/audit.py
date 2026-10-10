@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ class AuditLogger:
     def log(self, event: str, **kwargs: Any) -> None:
         """写入一条审计记录。"""
         record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "event": event,
             **kwargs,
         }
@@ -33,7 +34,7 @@ class AuditLogger:
         try:
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("audit.write_error", path=str(self._path), error=str(exc))
 
     def read_all(self) -> list[dict]:
@@ -45,10 +46,8 @@ class AuditLogger:
             for line in f:
                 line = line.strip()
                 if line:
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError):
                         records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
         return records
 
 

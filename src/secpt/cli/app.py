@@ -42,6 +42,7 @@ def doctor() -> None:
 
     # 打印实际注册的工具清单
     from secpt.core.tools.registry import build_registry
+
     reg = build_registry(
         whitelist=settings.tools.command_whitelist,
         tool_names=settings.tools.tool_names,
@@ -55,9 +56,12 @@ def doctor() -> None:
     reg_names = set(reg.names())
     missing = {"saml", "crawler"} - reg_names
     if missing:
-        typer.echo(f"⚠️  缺少 Web/SSO 工具: {', '.join(missing)}（Web/SSO 类题目需要 saml + crawler）")
+        typer.echo(
+            f"⚠️  缺少 Web/SSO 工具: {', '.join(missing)}（Web/SSO 类题目需要 saml + crawler）"
+        )
 
     import os
+
     key_env = settings.llm.api_key_env
     has_key = bool(os.environ.get(key_env))
     typer.echo(f"llm.api_key_env   = {key_env}  {'✓ set' if has_key else '✗ NOT SET'}")
@@ -94,16 +98,38 @@ def run_react_cmd(
     fake: bool = typer.Option(False, "--fake", "-f", help="用 FakeLLM dry-run（无需 API key）"),
     show_trajectory: bool = typer.Option(False, "--trajectory", help="打印 trajectory"),
     file: str | None = typer.Option(None, "--file", help="题面文件路径（与 --task 互斥）"),
-    objective_file: str | None = typer.Option(None, "--objective-file", help="题面文件路径（direct 模式）"),
+    objective_file: str | None = typer.Option(
+        None, "--objective-file", help="题面文件路径（direct 模式）"
+    ),
     attach_dir: str | None = typer.Option(None, "--attach-dir", help="附件目录（direct 模式）"),
-    profile: str = typer.Option("ctf", "--profile", "-p", help="先验 profile（对应 knowledge/priors/<name>.md）"),
-    prior: str | None = typer.Option(None, "--prior", help="覆盖先验文件（knowledge/priors/<name>.md），如 saml"),
-    mode: str = typer.Option("direct", "--mode", help="执行模式：direct=Engine 单链（默认），tree=原 engagement，dag=显式启用编排"),
-    model: str = typer.Option("deepseek-chat", "--model", "-m", help="主模型（支持 provider/model 形式，如 openai/gpt-4o）"),
+    profile: str = typer.Option(
+        "ctf", "--profile", "-p", help="先验 profile（对应 knowledge/priors/<name>.md）"
+    ),
+    prior: str | None = typer.Option(
+        None, "--prior", help="覆盖先验文件（knowledge/priors/<name>.md），如 saml"
+    ),
+    mode: str = typer.Option(
+        "direct",
+        "--mode",
+        help="执行模式：direct=Engine 单链（默认），tree=原 engagement，dag=显式启用编排",
+    ),
+    model: str = typer.Option(
+        "deepseek-chat",
+        "--model",
+        "-m",
+        help="主模型（支持 provider/model 形式，如 openai/gpt-4o）",
+    ),
     fallback: str = typer.Option("deepseek-reasoner", "--fallback", help="失败回退模型"),
-    wall: int = typer.Option(-1, "--wall", help="墙钟上限秒数：-1=用 profile 默认（缺省），0=不限（7×24 长任务），>0=该秒数"),
-    orchestrator: bool = typer.Option(False, "--orchestrator/--no-orchestrator",
-                                      help="多入口任务是否启用 DAG 编排（默认关闭，对照组结论；--orchestrator 或 --mode dag 显式开启）"),
+    wall: int = typer.Option(
+        -1,
+        "--wall",
+        help="墙钟上限秒数：-1=用 profile 默认（缺省），0=不限（7×24 长任务），>0=该秒数",
+    ),
+    orchestrator: bool = typer.Option(
+        False,
+        "--orchestrator/--no-orchestrator",
+        help="多入口任务是否启用 DAG 编排（默认关闭，对照组结论；--orchestrator 或 --mode dag 显式开启）",
+    ),
 ) -> None:
     """对 ``target`` 执行一次渗透任务。
 
@@ -119,6 +145,7 @@ def run_react_cmd(
 
     # ---- S5：--task 指向 TaskSpec yaml → orchestrator（DAG / 单链分流）----
     from pathlib import Path as _P
+
     if task and _P(task).is_file() and _P(task).suffix.lower() in (".yaml", ".yml"):
         import yaml as _yaml
 
@@ -133,12 +160,16 @@ def run_react_cmd(
         typer.echo(f"mode:      {summary['mode']}")
         typer.echo(f"entries:   {len(summary['entries'])} 个")
         typer.echo(f"wall_s:    {summary['wall_s']:.1f}")
-        typer.echo(f"assets:    {summary['warroom_assets']}  attempted={summary['warroom_attempts']}")
+        typer.echo(
+            f"assets:    {summary['warroom_assets']}  attempted={summary['warroom_attempts']}"
+        )
         typer.echo(f"findings:  {summary['findings']}  verified={summary['verified']}")
         typer.echo(f"flags:     {summary['flags'] or '未拿到'}")
         for c in summary["chains"]:
-            typer.echo(f"  chain:   {c['role']:<8s} entry={c['entry']} steps={c['steps']} "
-                       f"wall={c['wall_s']}s status={c['status']}")
+            typer.echo(
+                f"  chain:   {c['role']:<8s} entry={c['entry']} steps={c['steps']} "
+                f"wall={c['wall_s']}s status={c['status']}"
+            )
         if not summary["flags"]:
             raise typer.Exit(1)
         return
@@ -150,8 +181,15 @@ def run_react_cmd(
         if file or task:
             typer.echo("Error: --file / --task 与 direct 模式互斥（仅 tree 模式可用）")
             raise typer.Exit(1)
-        _run_engine(objective_file, attach_dir or "", profile, prior,
-                    model=model, fallback=fallback, wall=wall)
+        _run_engine(
+            objective_file,
+            attach_dir or "",
+            profile,
+            prior,
+            model=model,
+            fallback=fallback,
+            wall=wall,
+        )
         return
 
     # ---- tree 模式（原 engine，保留但不默认）----
@@ -179,9 +217,15 @@ def run_react_cmd(
             typer.echo(json.dumps(ev, ensure_ascii=False, default=str))
 
 
-def _run_engine(objective_file: str, attach_dir: str, profile: str, prior: str | None = None,
-                model: str = "deepseek-chat", fallback: str = "deepseek-reasoner",
-                wall: int = -1) -> None:
+def _run_engine(
+    objective_file: str,
+    attach_dir: str,
+    profile: str,
+    prior: str | None = None,
+    model: str = "deepseek-chat",
+    fallback: str = "deepseek-reasoner",
+    wall: int = -1,
+) -> None:
     """直接调用 Engine（不再走 subprocess），全程落盘到 var/jobs/。"""
     from pathlib import Path as _P
 
@@ -196,9 +240,14 @@ def _run_engine(objective_file: str, attach_dir: str, profile: str, prior: str |
                 if f.suffix in (".md", ".txt") and f.is_file():
                     challenge_text += f"\n\n--- {f} ---\n" + f.read_text(errors="replace")
 
-    result = run_engine(objective=challenge_text, profile=profile, prior=prior,
-                        model_primary=model, model_fallback=fallback,
-                        max_wall_s=None if wall < 0 else wall)
+    result = run_engine(
+        objective=challenge_text,
+        profile=profile,
+        prior=prior,
+        model_primary=model,
+        model_fallback=fallback,
+        max_wall_s=None if wall < 0 else wall,
+    )
 
     typer.echo("")
     typer.echo(f"job_id: {result.job_id}")
@@ -251,9 +300,15 @@ def solve_entry(
 
     code = solve(
         target,
-        profile=profile, prior=prior, model=model, fallback=fallback,
-        wall=wall, steps=steps,
-        judge_enable=not no_judge, learn_enable=not no_learn, verbose=verbose,
+        profile=profile,
+        prior=prior,
+        model=model,
+        fallback=fallback,
+        wall=wall,
+        steps=steps,
+        judge_enable=not no_judge,
+        learn_enable=not no_learn,
+        verbose=verbose,
     )
     raise typer.Exit(code)
 
@@ -266,8 +321,8 @@ def learn_entry(
     """手动触发经验蒸馏（learning 闭环补漏）。"""
     import asyncio
 
-    from secpt.learning.distill import distill_job
     from secpt.core.job.store import JobStore
+    from secpt.learning.distill import distill_job
 
     if job_id is None:
         rows = JobStore().list_jobs(limit=1)
@@ -286,9 +341,11 @@ def learn_entry(
 def judge_cmd(
     job_id: str = typer.Argument(..., help="要评判的 job_id（var/jobs/<job_id>/）"),
     ground_truth_file: str | None = typer.Option(
-        None, "--ground-truth", help="出题方标准答案/完成态文件（CTF 场景即 flag 原文）"),
+        None, "--ground-truth", help="出题方标准答案/完成态文件（CTF 场景即 flag 原文）"
+    ),
     rubric_file: str | None = typer.Option(
-        None, "--rubric", help="rubric 文件（YAML/JSON）；缺省由题面自动生成"),
+        None, "--rubric", help="rubric 文件（YAML/JSON）；缺省由题面自动生成"
+    ),
     model: str = typer.Option("deepseek-chat", "--model", "-m", help="终裁 judge 用的模型"),
 ) -> None:
     """AI 评判一次运行（不依赖 flag 正则）：反作弊 → Jev 门控 → LLM 终裁。
@@ -301,12 +358,14 @@ def judge_cmd(
     from secpt.evaluation.verdict import evaluate_job, render
 
     try:
-        verdict = asyncio.run(evaluate_job(
-            job_id,
-            rubric_file=rubric_file,
-            ground_truth_file=ground_truth_file,
-            model=model,
-        ))
+        verdict = asyncio.run(
+            evaluate_job(
+                job_id,
+                rubric_file=rubric_file,
+                ground_truth_file=ground_truth_file,
+                model=model,
+            )
+        )
     except FileNotFoundError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2) from e
@@ -339,14 +398,16 @@ def jobs_cmd(
 # S2 作业层 CLI
 # ---------------------------------------------------------------------------
 
+
 @app.command("submit")
 def submit_cmd(
     task: str = typer.Option(..., "--task", "-t", help="任务 yaml 文件路径"),
     max_parallel: int = typer.Option(4, "--max-parallel", "-j", help="并发上限"),
 ) -> None:
     """提交任务到作业队列（TaskSpec yaml）。"""
-    import yaml
     from pathlib import Path
+
+    import yaml
 
     from secpt.core.job.manager import JobManager
     from secpt.core.job.models import TaskSpec
@@ -466,7 +527,9 @@ def forever_cmd(
 
 @app.command("engage")
 def engage_cmd(
-    target: str | None = typer.Option(None, "--target", help="目标 host / url / domain（旧参数，已忽略）"),
+    target: str | None = typer.Option(
+        None, "--target", help="目标 host / url / domain（旧参数，已忽略）"
+    ),
     file: str | None = typer.Option(None, "--file", help="题面文件路径（旧参数，已忽略）"),
     objective: str | None = typer.Option(None, "--objective", help="目标描述（旧参数，已忽略）"),
     fake: bool = typer.Option(False, "--fake", help="FakeLLM 干跑（旧参数，已忽略）"),

@@ -25,9 +25,7 @@ def get_graph_store(cfg: GraphConfig) -> GraphStore:
         if not cfg.dsn:
             raise ValueError("postgres backend 需要 dsn（走环境变量，勿写配置）")
         return PostgresGraphStore(cfg.dsn)
-    raise NotImplementedError(
-        f"GraphStore backend '{cfg.backend}' 尚未实现"
-    )
+    raise NotImplementedError(f"GraphStore backend '{cfg.backend}' 尚未实现")
 
 
 __all__ = ["get_graph_store"]

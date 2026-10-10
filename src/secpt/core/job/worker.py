@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import contextlib
 import os
 import signal
 import sys
@@ -30,15 +31,16 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
 
-from secpt.core.job.event import EventSink  # noqa: E402
-from secpt.core.job.models import JobRecord  # noqa: E402
-from secpt.core.job.resume import jobs_dir, make_run_config, read_task_snapshot  # noqa: E402
-from secpt.core.job.rounds import load_latest_round  # noqa: E402
-from secpt.core.job.store import JobStore  # noqa: E402
-from secpt.core.watchdog import Watchdog  # noqa: E402
-from secpt.governance.ratelimit import GlobalRateLimiter  # noqa: E402
-from secpt.profiles import load_prior as _load_prior, render_system_extra as _rse  # noqa: E402
-from secpt.runtime import engine as _engine  # noqa: E402
+from secpt.core.job.event import EventSink
+from secpt.core.job.models import JobRecord
+from secpt.core.job.resume import jobs_dir, make_run_config, read_task_snapshot
+from secpt.core.job.rounds import load_latest_round
+from secpt.core.job.store import JobStore
+from secpt.core.watchdog import Watchdog
+from secpt.governance.ratelimit import GlobalRateLimiter
+from secpt.profiles import load_prior as _load_prior
+from secpt.profiles import render_system_extra as _rse
+from secpt.runtime import engine as _engine
 
 HEARTBEAT_S = 10.0
 # SIGTERM 后给 engine 的收尾窗口：覆盖最长 LLM 调用（180s）+ 落盘窗口，到点才强杀。
@@ -71,17 +73,15 @@ class _CancelHook:
         self._inner.on_step(steps, elapsed)
 
 
-def _handle_sigterm(signum, frame):  # noqa: ARG001
+def _handle_sigterm(signum, frame):
     """SIGTERM → 置 _stop：on_step 下次检查即中断 engine，watcher 兜底强杀。"""
     print("[worker] SIGTERM received, stopping...")
     _stop.set()
 
 
 def _safe_unlink(p: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         p.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _cancel_watcher(pid_file: Path) -> None:
@@ -106,7 +106,7 @@ def _heartbeat(store: JobStore, job_id: str, interval: float) -> None:
             if rec is not None:
                 rec.touch()
                 store.upsert_job(rec)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[worker] heartbeat failed: {e}")
 
 
@@ -170,16 +170,16 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     # 兜底：engine 卡死/长 LLM 调用时到点强杀
     threading.Thread(target=_cancel_watcher, args=(pid_file,), daemon=True).start()
 
-    from secpt.runtime.llm.client import call_llm
-
     llm = call_llm
     if os.environ.get("SECPT_FAKE_LLM"):
         # 测试用假 LLM：n-1 次工具调用后输出 ANSWER flag（留 1 步收尾）
         from secpt.core.job.fakellm import FakeLLM
+
         llm = FakeLLM(n_steps=max(1, cfg.max_steps - 1), job_id=job_id)
 
     # 快照里的插件工具重新装配（插件定义可能已更新）
     from secpt.tools.plugin_loader import engine_tools_for
+
     extra_tools = engine_tools_for(run_cfg.get("extra_tool_names") or [])
 
     exit_code = 3
@@ -188,11 +188,12 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         # S3：sink 外包 watchdog（空转检测 → paused + 换层提示），再包 cancel 钩子
         watchdog = Watchdog(sink, store=store, job_id=job_id)
         result = asyncio.run(
-            _engine.Engine(cfg, llm=llm, hooks=_CancelHook(watchdog),
-                           extra_tools=extra_tools or None).run()
+            _engine.Engine(
+                cfg, llm=llm, hooks=_CancelHook(watchdog), extra_tools=extra_tools or None
+            ).run()
         )
-        cancelled = _stop.is_set()   # 在 finally 置位前捕获取消标志
-    except Exception as e:  # noqa: BLE001
+        cancelled = _stop.is_set()  # 在 finally 置位前捕获取消标志
+    except Exception as e:
         print(f"[worker] engine fatal: {e}", file=sys.stderr)
         rec = store.get_job(job_id) or rec
         if _stop.is_set():

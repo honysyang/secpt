@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,7 +18,7 @@ from secpt.core.graph.base import TrustTier
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _gen_id(prefix: str) -> str:
@@ -132,8 +132,8 @@ class NarrowingSignals:
     """面收缩三机制的系统级信号，Scheduler 每轮开始前读取。"""
 
     excluding: list[DeathCertificate] = field(default_factory=list)
-    wakeable: list[str] = field(default_factory=list)      # 持有关键证据的节点 id
-    degraded: list[str] = field(default_factory=list)      # 被机制③降级的节点 id
+    wakeable: list[str] = field(default_factory=list)  # 持有关键证据的节点 id
+    degraded: list[str] = field(default_factory=list)  # 被机制③降级的节点 id
 
 
 __all__ = [

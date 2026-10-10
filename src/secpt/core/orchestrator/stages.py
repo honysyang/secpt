@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 from secpt.core.job.models import TaskSpec
 from secpt.core.job.store import JobStore
@@ -44,7 +43,8 @@ async def run_stages(
 
     entries = list(spec.entries or [])
     base_objective = spec.objective + (
-        "\n\n【目标入口】\n" + "\n".join(f"- {e}" for e in entries) if entries else "")
+        "\n\n【目标入口】\n" + "\n".join(f"- {e}" for e in entries) if entries else ""
+    )
 
     for idx, stage in enumerate(profile.stages):
         is_last = idx == len(profile.stages) - 1
@@ -54,15 +54,19 @@ async def run_stages(
         if stage.stop_condition:
             objective += f"\n阶段收尾要求：{stage.stop_condition}"
         if handoff:
-            objective += (f"\n\n【上一阶段（{profile.stages[idx-1].name}）结果】\n{handoff}\n"
-                          f"共享工作目录：{(base / 'ws').resolve()}（已有上一阶段产物）")
+            objective += (
+                f"\n\n【上一阶段（{profile.stages[idx - 1].name}）结果】\n{handoff}\n"
+                f"共享工作目录：{(base / 'ws').resolve()}（已有上一阶段产物）"
+            )
 
         # 阶段预算：0 值回退 profile 总预算
         max_steps = stage.budget.steps or profile.budget.steps
         max_wall_s = stage.budget.wall_s or profile.budget.wall_s
 
-        print(f"[stages] === stage {idx + 1}/{len(profile.stages)}: {stage.name} "
-              f"(job={stage_job_id}, steps<={max_steps}, wall<={max_wall_s}s) ===")
+        print(
+            f"[stages] === stage {idx + 1}/{len(profile.stages)}: {stage.name} "
+            f"(job={stage_job_id}, steps<={max_steps}, wall<={max_wall_s}s) ==="
+        )
         result = await asyncio.to_thread(
             run_engine,
             objective=objective,
@@ -80,11 +84,16 @@ async def run_stages(
         )
         final_result = result
         total_wall += result.wall_s
-        chains.append({
-            "role": stage.name, "entry": -1, "flag": result.flag,
-            "steps": result.steps, "wall_s": round(result.wall_s, 1),
-            "status": result.status,
-        })
+        chains.append(
+            {
+                "role": stage.name,
+                "entry": -1,
+                "flag": result.flag,
+                "steps": result.steps,
+                "wall_s": round(result.wall_s, 1),
+                "status": result.status,
+            }
+        )
 
         # 交接摘要：最后一条 assistant 正文（含该阶段 ANSWER 交付物）
         handoff = ""
@@ -101,8 +110,11 @@ async def run_stages(
         "job_id": spec.job_id,
         "mode": "stages",
         "entries": entries,
-        "recon_assets": 0, "warroom_assets": 0, "warroom_attempts": 0,
-        "findings": 0, "verified": 0,
+        "recon_assets": 0,
+        "warroom_assets": 0,
+        "warroom_attempts": 0,
+        "findings": 0,
+        "verified": 0,
         "flags": [final_result.flag] if final_result and final_result.flag else [],
         "chains": chains,
         "wall_s": round(total_wall, 1),

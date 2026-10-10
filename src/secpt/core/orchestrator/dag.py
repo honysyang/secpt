@@ -48,9 +48,14 @@ async def run_task(
     """
     use_dag = needs_orchestrator(spec, use_dag=use_orchestrator)
     if not use_dag:
-        return await run_single_chain(spec, store=store, llm=llm, db_path=db_path,
-                                      model_primary=model_primary,
-                                      model_fallback=model_fallback)
+        return await run_single_chain(
+            spec,
+            store=store,
+            llm=llm,
+            db_path=db_path,
+            model_primary=model_primary,
+            model_fallback=model_fallback,
+        )
 
     from .specialist import SpecialistOrchestrator
 
@@ -86,8 +91,9 @@ async def run_single_chain(
     if entries:
         objective += "\n\n【目标入口】\n" + "\n".join(f"- {e}" for e in entries)
     if spec.artifacts:
-        objective += ("\n\n【附件源码（已就位，用 read_file 读取）】\n"
-                      + "\n".join(f"- {a}" for a in spec.artifacts))
+        objective += "\n\n【附件源码（已就位，用 read_file 读取）】\n" + "\n".join(
+            f"- {a}" for a in spec.artifacts
+        )
 
     # spec.budget 权威：0=未指定用 profile，<0=不限（7×24）
     max_steps = spec.budget.steps if spec.budget.steps != 0 else None
@@ -111,18 +117,27 @@ async def run_single_chain(
         model_primary=model_primary,
         model_fallback=model_fallback,
     )
-    chains.append({
-        "role": "exploit", "entry": -1, "flag": result.flag,
-        "steps": result.steps, "wall_s": round(result.wall_s, 1),
-        "status": result.status,
-    })
+    chains.append(
+        {
+            "role": "exploit",
+            "entry": -1,
+            "flag": result.flag,
+            "steps": result.steps,
+            "wall_s": round(result.wall_s, 1),
+            "status": result.status,
+        }
+    )
     wall_s_total += result.wall_s
     if result.flag:
         flags.append(result.flag)
 
     # attempt-2：仅当第一轮未拿到 flag 且资源耗尽/失败时重试（新 job_id 防污染）
     if not result.flag and result.status in (
-            "budget_exceeded", "step_exceeded", "wallclock_exceeded", "failed"):
+        "budget_exceeded",
+        "step_exceeded",
+        "wallclock_exceeded",
+        "failed",
+    ):
         retry_note = (
             "\n\n【上一次尝试未成功】\n"
             f"上次用了 {result.steps} 步，最终状态 {result.status}。\n"
@@ -144,11 +159,16 @@ async def run_single_chain(
             model_primary=model_primary,
             model_fallback=model_fallback,
         )
-        chains.append({
-            "role": "exploit", "entry": -1, "flag": result2.flag,
-            "steps": result2.steps, "wall_s": round(result2.wall_s, 1),
-            "status": result2.status,
-        })
+        chains.append(
+            {
+                "role": "exploit",
+                "entry": -1,
+                "flag": result2.flag,
+                "steps": result2.steps,
+                "wall_s": round(result2.wall_s, 1),
+                "status": result2.status,
+            }
+        )
         wall_s_total += result2.wall_s
         if result2.flag:
             flags.append(result2.flag)

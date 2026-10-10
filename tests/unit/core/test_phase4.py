@@ -14,7 +14,6 @@ from secpt.governance import (
     ScopeValidator,
 )
 
-
 # ---- G1: Scope ----
 
 
@@ -56,6 +55,7 @@ async def test_rate_limiter_acquire() -> None:
         await rl.acquire()
     # 第 4 次应等待
     import time
+
     start = time.monotonic()
     await rl.acquire()
     elapsed = time.monotonic() - start

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 from secpt.core.job.models import TaskBudget, TaskSpec
 from secpt.core.orchestrator.stages import run_stages
@@ -26,6 +25,7 @@ def _profile(stage_defs: list[dict]) -> Profile:
 
 def _mk_llm(final_answer: str, per_stage_calls: int = 2):
     """每阶段 per_stage_calls 次工具调用后 ANSWER。"""
+
     class _Fn:
         def __init__(self, n, a):
             self.name, self.arguments = n, a
@@ -56,6 +56,7 @@ def _mk_llm(final_answer: str, per_stage_calls: int = 2):
             if self.calls % per_stage_calls == 0:
                 return _Resp(_Msg(f"ANSWER: {final_answer}", []))
             return _Resp(_Msg(f"step {self.calls}", [_TC(self.calls)]))
+
     return FakeLLM()
 
 
@@ -63,14 +64,20 @@ class TestStageRunner:
     def test_two_stages_run_in_order_with_shared_ws(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         llm = _mk_llm("SHELL_pwned_stage2", per_stage_calls=2)
-        prof = _profile([
-            {"name": "recon", "role": "侦察员", "stop_condition": "输出侦察摘要",
-             "budget": {"steps": 6, "wall_s": 60}},
-            {"name": "getshell", "role": "利用执行者",
-             "budget": {"steps": 6, "wall_s": 60}},
-        ])
-        spec = TaskSpec(job_id="ms1", task_type="multistage",
-                        objective="题目：拿下目标", budget=TaskBudget())
+        prof = _profile(
+            [
+                {
+                    "name": "recon",
+                    "role": "侦察员",
+                    "stop_condition": "输出侦察摘要",
+                    "budget": {"steps": 6, "wall_s": 60},
+                },
+                {"name": "getshell", "role": "利用执行者", "budget": {"steps": 6, "wall_s": 60}},
+            ]
+        )
+        spec = TaskSpec(
+            job_id="ms1", task_type="multistage", objective="题目：拿下目标", budget=TaskBudget()
+        )
         summary = _run(run_stages(spec, prof, llm=llm))
         assert summary["mode"] == "stages"
         assert [c["role"] for c in summary["chains"]] == ["recon", "getshell"]
@@ -84,12 +91,13 @@ class TestStageRunner:
     def test_handoff_injected_into_next_stage(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         llm = _mk_llm("done", per_stage_calls=1)
-        prof = _profile([
-            {"name": "recon", "role": "侦察"},
-            {"name": "getshell", "role": "利用"},
-        ])
-        spec = TaskSpec(job_id="ms2", task_type="multistage",
-                        objective="题", budget=TaskBudget())
+        prof = _profile(
+            [
+                {"name": "recon", "role": "侦察"},
+                {"name": "getshell", "role": "利用"},
+            ]
+        )
+        spec = TaskSpec(job_id="ms2", task_type="multistage", objective="题", budget=TaskBudget())
         _run(run_stages(spec, prof, llm=llm))
         second_stage_system = llm.stages_seen[1]
         assert "上一阶段" in second_stage_system
@@ -100,22 +108,22 @@ class TestStageRunner:
         只有最终阶段的 ANSWER 才是整体成果。"""
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         llm = _mk_llm("FLAG{from_final}", per_stage_calls=1)
-        prof = _profile([
-            {"name": "recon", "role": "侦察"},
-            {"name": "getshell", "role": "利用"},
-            {"name": "privesc", "role": "提权"},
-        ])
-        spec = TaskSpec(job_id="ms3", task_type="multistage",
-                        objective="题", budget=TaskBudget())
+        prof = _profile(
+            [
+                {"name": "recon", "role": "侦察"},
+                {"name": "getshell", "role": "利用"},
+                {"name": "privesc", "role": "提权"},
+            ]
+        )
+        spec = TaskSpec(job_id="ms3", task_type="multistage", objective="题", budget=TaskBudget())
         summary = _run(run_stages(spec, prof, llm=llm))
-        assert len(summary["chains"]) == 3          # 全部阶段执行
+        assert len(summary["chains"]) == 3  # 全部阶段执行
         assert summary["flags"] == ["FLAG{from_final}"]
 
     def test_stage_budget_fallback_to_profile(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         llm = _mk_llm("x", per_stage_calls=1)
-        prof = _profile([{"name": "only", "role": "r"}])   # 无阶段预算
-        spec = TaskSpec(job_id="ms4", task_type="multistage",
-                        objective="题", budget=TaskBudget())
+        prof = _profile([{"name": "only", "role": "r"}])  # 无阶段预算
+        spec = TaskSpec(job_id="ms4", task_type="multistage", objective="题", budget=TaskBudget())
         summary = _run(run_stages(spec, prof, llm=llm))
         assert summary["chains"][0]["status"] == "success"

@@ -11,8 +11,13 @@ import json
 
 
 class FakeLLM:
-    def __init__(self, n_steps: int = 4, job_id: str = "fake",
-                 step_delay_s: float = 0.3, content_len: int = 0) -> None:
+    def __init__(
+        self,
+        n_steps: int = 4,
+        job_id: str = "fake",
+        step_delay_s: float = 0.3,
+        content_len: int = 0,
+    ) -> None:
         self.n = max(1, n_steps)
         self.job_id = job_id
         self.calls = 0
@@ -24,23 +29,28 @@ class FakeLLM:
             await asyncio.sleep(self.step_delay_s)
         self.calls += 1
         if self.calls > self.n:
-            return _resp({
-                "role": "assistant",
-                "content": f"ANSWER: FLAG{{{self.job_id}_done}}",
-            })
+            return _resp(
+                {
+                    "role": "assistant",
+                    "content": f"ANSWER: FLAG{{{self.job_id}_done}}",
+                }
+            )
         body = f"fake step {self.calls}"
         if self.content_len > len(body):
             body += " x" * (self.content_len - len(body))
-        return _resp({
-            "role": "assistant",
-            "content": body,
-            "tool_calls": [{
-                "id": f"fake-{self.job_id}-{self.calls}",
-                "type": "function",
-                "function": {"name": "bash",
-                             "arguments": json.dumps({"command": "ls"})},
-            }],
-        })
+        return _resp(
+            {
+                "role": "assistant",
+                "content": body,
+                "tool_calls": [
+                    {
+                        "id": f"fake-{self.job_id}-{self.calls}",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": json.dumps({"command": "ls"})},
+                    }
+                ],
+            }
+        )
 
 
 def _resp(msg_dict: dict):

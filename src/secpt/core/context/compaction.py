@@ -24,8 +24,8 @@ from __future__ import annotations
 from secpt.core.context.estimator import est_messages_tokens
 
 COMPACT_THRESHOLD = 0.72
-COMPACT_TARGET = 0.5         # 批量删除目标：一次压到 0.5×window 以下（少次多删）
-PROTECT_LATEST = 6       # 尾部保护条数（12 时大输出场景保护尾本身超阈值，压缩永远压不下去）
+COMPACT_TARGET = 0.5  # 批量删除目标：一次压到 0.5×window 以下（少次多删）
+PROTECT_LATEST = 6  # 尾部保护条数（12 时大输出场景保护尾本身超阈值，压缩永远压不下去）
 MAX_GROUPS_PER_COMPACT = 200  # 单次压缩最多删组数（安全上限）
 
 
@@ -68,7 +68,7 @@ def _is_complete_group(messages: list[dict], start: int) -> bool:
     if not needed:
         return True
     have = 0
-    for x in messages[start + 1:]:
+    for x in messages[start + 1 :]:
         if x.get("role") == "tool" and x.get("tool_call_id") in needed:
             have += 1
     return have >= len(needed)
@@ -95,8 +95,15 @@ def _next_removable(messages: list[dict], lo: int, protected_tail: int) -> tuple
     return None
 
 
-async def compact_messages(messages: list[dict], objective: str, summarizer,
-                           window: int, *, k: int = 0, protected_tail: int = PROTECT_LATEST):
+async def compact_messages(
+    messages: list[dict],
+    objective: str,
+    summarizer,
+    window: int,
+    *,
+    k: int = 0,
+    protected_tail: int = PROTECT_LATEST,
+):
     """压缩一次：删最老整组直到 token 回落，原位插一条六段摘要。
 
     返回 (新 messages, 删除条数, 摘要文本)。removed==0 表示未发生压缩。
@@ -118,8 +125,8 @@ async def compact_messages(messages: list[dict], objective: str, summarizer,
         idx, end = hit
         if first_idx is None:
             first_idx = idx
-        removed_msgs += remaining[idx:end + 1]
-        del remaining[idx:end + 1]
+        removed_msgs += remaining[idx : end + 1]
+        del remaining[idx : end + 1]
         # lo 若落在被删区间之后，回退到被删位置继续向前找
         if lo > idx:
             lo = idx

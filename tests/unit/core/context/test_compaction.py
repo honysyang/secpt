@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 from secpt.core.context.compaction import compact_messages, should_compact
-from secpt.core.context.estimator import est_messages_tokens
 from secpt.core.context.summarize import StubSummarizer
 from secpt.runtime.llm.client import sanitize_messages
 
@@ -21,14 +20,16 @@ from secpt.runtime.llm.client import sanitize_messages
 def _group(i: int, n_calls: int = 1) -> list[dict]:
     """构造第 i 个完整组：assistant(带 tool_calls) + 全部 tool 结果。"""
     calls = [
-        {"id": f"c{i}-{j}", "type": "function",
-         "function": {"name": "bash", "arguments": json.dumps({"command": f"cmd {i}-{j}"})}}
+        {
+            "id": f"c{i}-{j}",
+            "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({"command": f"cmd {i}-{j}"})},
+        }
         for j in range(n_calls)
     ]
     msgs = [{"role": "assistant", "content": f"分析第 {i} 组", "tool_calls": calls}]
     for tc in calls:
-        msgs.append({"role": "tool", "tool_call_id": tc["id"],
-                     "content": "out " + "x" * 300})
+        msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": "out " + "x" * 300})
     return msgs
 
 
@@ -46,7 +47,7 @@ def _assert_no_orphan(messages: list[dict]) -> None:
             continue
         needed = {tc["id"] for tc in m["tool_calls"]}
         have = 0
-        for x in messages[i + 1:]:
+        for x in messages[i + 1 :]:
             if x.get("role") == "tool" and x.get("tool_call_id") in needed:
                 have += 1
         assert have >= len(needed), f"assistant@{i} 的 tool 结果缺失（孤立 tool_call）"
@@ -64,7 +65,7 @@ def test_compaction_removes_groups_and_keeps_chain_valid(tmp_path: Path) -> None
     window = 2000
     assert should_compact(chain, window)
     before = len(chain)
-    new, removed, summary = asyncio.run(
+    new, removed, _summary = asyncio.run(
         compact_messages(chain, "任务目标：找到 flag", StubSummarizer(), window)
     )
     assert removed > 0
@@ -83,8 +84,9 @@ def test_compaction_removes_groups_and_keeps_chain_valid(tmp_path: Path) -> None
     )
     # 摘要含"已排除"段落（StubSummarizer 保证）
     summary_msg = next(
-        m for m in new if m.get("role") == "user"
-        and str(m.get("content", "")).startswith("【历史摘要")
+        m
+        for m in new
+        if m.get("role") == "user" and str(m.get("content", "")).startswith("【历史摘要")
     )
     assert "已排除的尝试" in summary_msg["content"]
 
@@ -93,9 +95,7 @@ def test_compaction_protects_latest_messages(tmp_path: Path) -> None:
     chain = _chain()
     chain[-2]["content"] = "TAIL_MARKER_ASSISTANT"  # 最新一组标记
     window = 2000
-    new, _, _ = asyncio.run(
-        compact_messages(chain, "obj", StubSummarizer(), window)
-    )
+    new, _, _ = asyncio.run(compact_messages(chain, "obj", StubSummarizer(), window))
     joined = json.dumps(new, ensure_ascii=False)
     # 最新消息（尾组）未被删除
     assert "TAIL_MARKER_ASSISTANT" in joined
@@ -104,8 +104,8 @@ def test_compaction_protects_latest_messages(tmp_path: Path) -> None:
 def test_compaction_group_atomic_multi_toolcall(tmp_path: Path) -> None:
     """一个 assistant 带 2 个 tool_call：整组删除，绝不留下单个 tool 结果。"""
     chain = [{"role": "system", "content": "sys"}]
-    chain += _group(0, n_calls=2)   # A 有两个 tool 结果
-    chain += _group(1, n_calls=1)   # B 有一个
+    chain += _group(0, n_calls=2)  # A 有两个 tool 结果
+    chain += _group(1, n_calls=1)  # B 有一个
     window = 400
     # 保护尾部按 0：链很短，本测试专注"整组原子删除"语义
     new, removed, _ = asyncio.run(
@@ -122,5 +122,6 @@ def test_compaction_group_atomic_multi_toolcall(tmp_path: Path) -> None:
 
 def test_est_tokens_floor() -> None:
     from secpt.core.context.estimator import est_tokens
+
     assert est_tokens("") == 0
     assert est_tokens("x") >= 1

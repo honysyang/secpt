@@ -47,7 +47,8 @@ def resolve_model(model: str) -> tuple[str, str, str]:
         prefix, rest = _DEFAULT_PROVIDER, prefix
     prefix = prefix.upper().replace("-", "_")
     base_default, keyenv_default = _PROVIDERS.get(
-        prefix.lower(), (_PROVIDERS[_DEFAULT_PROVIDER][0], _PROVIDERS[_DEFAULT_PROVIDER][1]))
+        prefix.lower(), (_PROVIDERS[_DEFAULT_PROVIDER][0], _PROVIDERS[_DEFAULT_PROVIDER][1])
+    )
 
     base_url = os.environ.get(f"SECPT_MODEL_BASE_{prefix}", base_default)
     key_env = os.environ.get(f"SECPT_MODEL_KEYENV_{prefix}", keyenv_default)
@@ -55,7 +56,8 @@ def resolve_model(model: str) -> tuple[str, str, str]:
     if not api_key:
         raise RuntimeError(
             f"模型 {model!r}（provider {prefix.lower()}）缺少 API key："
-            f"请 export {key_env}=<key>，或设置 SECPT_MODEL_KEY_{prefix}")
+            f"请 export {key_env}=<key>，或设置 SECPT_MODEL_KEY_{prefix}"
+        )
     return base_url.rstrip("/"), api_key, rest
 
 
@@ -63,7 +65,7 @@ def resolve_model(model: str) -> tuple[str, str, str]:
 _clients: dict = {}
 
 
-def _get_client() -> "object":
+def _get_client() -> object:
     import httpx
 
     loop = asyncio.get_running_loop()
@@ -124,6 +126,7 @@ def _wrap_response(data: dict) -> object:
     resp.choices = [type("c", (), {"message": m})()]
     # S3：透传 usage，供 Engine 预算记账（无 usage 时 Engine 回退估算）
     if isinstance(data.get("usage"), dict):
+
         class _Usage:
             pass
 
@@ -134,8 +137,13 @@ def _wrap_response(data: dict) -> object:
     return resp
 
 
-async def call_llm(messages: list, tools: list, model: str, api_key: str | None = None,
-                   fallback_model: str | None = None) -> object:
+async def call_llm(
+    messages: list,
+    tools: list,
+    model: str,
+    api_key: str | None = None,
+    fallback_model: str | None = None,
+) -> object:
     """调 OpenAI 兼容 chat/completions。api_key 参数仅兼容旧签名，实际按模型解析。"""
     import httpx
 
@@ -155,8 +163,13 @@ async def call_llm(messages: list, tools: list, model: str, api_key: str | None 
     if is_reasoner and "deepseek" in base_url:
         payload["include_reasoning_content"] = True
 
-    retryable_exc = (httpx.ReadTimeout, httpx.ConnectError, httpx.ConnectTimeout,
-                     httpx.PoolTimeout, httpx.HTTPStatusError)
+    retryable_exc = (
+        httpx.ReadTimeout,
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+        httpx.HTTPStatusError,
+    )
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -172,7 +185,7 @@ async def call_llm(messages: list, tools: list, model: str, api_key: str | None 
             if not retryable or attempt == MAX_RETRIES:
                 raise
             last_exc = e
-            delay = _BACKOFF_BASE_S * (2 ** attempt) + random.random()
+            delay = _BACKOFF_BASE_S * (2**attempt) + random.random()
             await asyncio.sleep(delay)
     assert last_exc is not None
     raise last_exc

@@ -19,6 +19,6 @@ class EchoTool(Tool):
     async def run(self, args: str) -> str:
         try:
             result = await run_whitelisted("echo", [args.strip()])
-        except Exception as exc:  # noqa: BLE001 - 边界收敛
+        except Exception as exc:
             return f"Error: {exc}"
         return result.stdout.strip()

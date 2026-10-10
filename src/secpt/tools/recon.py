@@ -33,7 +33,7 @@ class NmapTool(Tool):
         try:
             argv = args.split()
             result = await run_whitelisted("nmap", argv, timeout=120.0)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():
@@ -55,7 +55,7 @@ class CurlTool(Tool):
         try:
             argv = args.split()
             result = await run_whitelisted("curl", argv, timeout=30.0)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():
@@ -76,7 +76,7 @@ class DigTool(Tool):
         try:
             argv = args.split()
             result = await run_whitelisted("dig", argv, timeout=15.0)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return f"Error: {exc}"
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         if result.returncode != 0 and not output.strip():

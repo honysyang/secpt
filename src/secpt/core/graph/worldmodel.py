@@ -53,7 +53,9 @@ class WorldModel:
         elif result == "ok" and source in classification["trust_tier_by_source"]:  # type: ignore[operator]
             trust_tier = classification["trust_tier_by_source"][source]  # type: ignore[index]
 
-        evidence_id = await self._store.add_evidence(eid, payload, trust_tier=trust_tier, result=result)
+        evidence_id = await self._store.add_evidence(
+            eid, payload, trust_tier=trust_tier, result=result
+        )
         ev = Evidence(
             id=evidence_id,
             payload=payload,
@@ -61,7 +63,13 @@ class WorldModel:
             trust_score=TRUST_SCORES[trust_tier],
             source=source,
         )
-        logger.debug("worldmodel.evidence", evidence_id=evidence_id, eid=eid, trust_tier=trust_tier, result=result)
+        logger.debug(
+            "worldmodel.evidence",
+            evidence_id=evidence_id,
+            eid=eid,
+            trust_tier=trust_tier,
+            result=result,
+        )
         return ev
 
     # ---- 实体（证据门控） ----
@@ -99,19 +107,26 @@ class WorldModel:
         # 信任传播：confidence = min(关联证据 trust)
         # 含推理成分的边（verified=False）封顶 0.5
         scores: list[float] = []
-        for eid in evidence_ids:
+        for _eid in evidence_ids:
             # 从 store 查 trust_score（简化：依赖 TRUST_SCORES 映射）
             # 实际实现中 evidence 存了 trust_score，这里用 TRUST_SCORES 反查
             scores.append(1.0)  # 默认最高，后续从 store 精确读取
 
-        confidence = confidence_override if confidence_override is not None else (min(scores) if scores else 1.0)
+        confidence = (
+            confidence_override
+            if confidence_override is not None
+            else (min(scores) if scores else 1.0)
+        )
         if not verified:
             confidence = min(confidence, 0.5)
 
         await self._store.add_edge(src, dst, etype, confidence=confidence)
         edge = Edge(
-            src=src, dst=dst, type=etype,
-            confidence=confidence, verified=verified,
+            src=src,
+            dst=dst,
+            type=etype,
+            confidence=confidence,
+            verified=verified,
             evidence_ids=list(evidence_ids),
         )
         logger.debug("worldmodel.edge", src=src, dst=dst, etype=etype, confidence=confidence)

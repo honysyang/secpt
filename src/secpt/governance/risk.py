@@ -14,10 +14,10 @@ logger = structlog.get_logger(__name__)
 
 
 class RiskLevel(str, Enum):
-    READONLY = "readonly"      # 只读，无副作用
-    LOW = "low"                # 轻微副作用（日志、缓存）
-    MEDIUM = "medium"          # 可能有副作用（扫描触发 IPS）
-    HIGH = "high"              # 显著副作用（爆破、枚举）
+    READONLY = "readonly"  # 只读，无副作用
+    LOW = "low"  # 轻微副作用（日志、缓存）
+    MEDIUM = "medium"  # 可能有副作用（扫描触发 IPS）
+    HIGH = "high"  # 显著副作用（爆破、枚举）
     DESTRUCTIVE = "destructive"  # 破坏性（删除、修改）
 
 
@@ -29,10 +29,10 @@ _TOOL_RISK: dict[str, RiskLevel] = {
     "nslookup": RiskLevel.READONLY,
     "whois": RiskLevel.READONLY,
     "traceroute": RiskLevel.READONLY,
-    "curl": RiskLevel.READONLY,       # GET 请求视为只读
-    "nmap": RiskLevel.MEDIUM,          # 扫描可能触发 IPS
+    "curl": RiskLevel.READONLY,  # GET 请求视为只读
+    "nmap": RiskLevel.MEDIUM,  # 扫描可能触发 IPS
     "whatweb": RiskLevel.MEDIUM,
-    "nikto": RiskLevel.HIGH,           # 主动漏洞扫描
+    "nikto": RiskLevel.HIGH,  # 主动漏洞扫描
 }
 
 # 需要人工确认的风险级别
@@ -60,8 +60,7 @@ class RiskManager:
         if risk in _CONFIRM_REQUIRED and not approved:
             logger.warning("risk.confirm_required", tool=tool_name, args=args[:60], risk=risk.value)
             raise ConfirmationRequired(
-                f"工具 {tool_name} 风险级别 {risk.value}，需要人工确认。"
-                f"参数：{args[:80]}"
+                f"工具 {tool_name} 风险级别 {risk.value}，需要人工确认。参数：{args[:80]}"
             )
         if approved:
             logger.info("risk.confirmed", tool=tool_name, args=args[:60], risk=risk.value)

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -74,10 +74,11 @@ async def test_question_branch_no_engagement(chat_session, capsys):
     fake_input = _make_input_sequence(["?扫到了什么", "/exit"])
 
     # patch run_task 检测是否被派发
-    with patch("secpt.cli.chat._make_input_fn", return_value=fake_input):
-        with patch("secpt.cli.chat.ChatSession.run_task",
-                   AsyncMock()) as mock_run:
-            await _run_repl(chat_session)
+    with (
+        patch("secpt.cli.chat._make_input_fn", return_value=fake_input),
+        patch("secpt.cli.chat.ChatSession.run_task", AsyncMock()) as mock_run,
+    ):
+        await _run_repl(chat_session)
 
     # run_task 不应被调用
     mock_run.assert_not_called()
@@ -100,10 +101,13 @@ async def test_task_dispatched_to_engine(chat_session, capsys):
         "flag": "FLAG{test123}",
     }
 
-    with patch("secpt.cli.chat._make_input_fn", return_value=fake_input):
-        with patch("secpt.cli.chat.ChatSession.run_task",
-                   AsyncMock(return_value=fake_result)) as mock_run:
-            await _run_repl(chat_session)
+    with (
+        patch("secpt.cli.chat._make_input_fn", return_value=fake_input),
+        patch(
+            "secpt.cli.chat.ChatSession.run_task", AsyncMock(return_value=fake_result)
+        ) as mock_run,
+    ):
+        await _run_repl(chat_session)
 
     mock_run.assert_called_once()
     captured = capsys.readouterr()
@@ -120,8 +124,11 @@ async def test_session_context_persists(chat_session):
     from secpt.runtime.engine import RunResult
 
     fake_result = RunResult(
-        flag="FLAG{ctx_test}", steps=1, wall_s=0.1,
-        status="success", messages=[],
+        flag="FLAG{ctx_test}",
+        steps=1,
+        wall_s=0.1,
+        status="success",
+        messages=[],
     )
 
     with patch("secpt.runtime.engine.Engine.run", AsyncMock(return_value=fake_result)):

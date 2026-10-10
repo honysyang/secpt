@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import json
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
@@ -51,32 +50,71 @@ class ToolForge:
 
     # 禁止的 AST 节点
     _BANNED_NODES = (
-        ast.Import,          # 禁止 import（除模板已含）
-        ast.ImportFrom,      # 禁止 from-import
-        ast.Exec,            # exec
-        ast.Eval,            # eval
-        ast.Global,          # global
-        ast.Nonlocal,        # nonlocal
-        ast.ClassDef,        # 嵌套类定义（只允许顶层一个）
-        ast.AsyncFunctionDef, # 嵌套 async def（只允许顶层 run）
-        ast.FunctionDef,     # 嵌套普通函数
-        ast.Lambda,          # lambda（可绕过检查）
-        ast.Yield,           # yield（生成器）
-        ast.YieldFrom,       # yield from
+        ast.Import,  # 禁止 import（除模板已含）
+        ast.ImportFrom,  # 禁止 from-import
+        ast.Exec,  # exec
+        ast.Eval,  # eval
+        ast.Global,  # global
+        ast.Nonlocal,  # nonlocal
+        ast.ClassDef,  # 嵌套类定义（只允许顶层一个）
+        ast.AsyncFunctionDef,  # 嵌套 async def（只允许顶层 run）
+        ast.FunctionDef,  # 嵌套普通函数
+        ast.Lambda,  # lambda（可绕过检查）
+        ast.Yield,  # yield（生成器）
+        ast.YieldFrom,  # yield from
     )
 
-    # 禁止的调用名
-    _BANNED_CALLS = {
-        "eval", "exec", "compile", "__import__", "open", "input",
-        "getattr", "setattr", "delattr", "globals", "locals", "vars",
-        "type", "isinstance", "issubclass", "super",
-        "breakpoint", "exit", "quit", "help", "dir",
-        "id", "hash", "repr", "str", "bytes", "int", "float",
-        "os.system", "subprocess", "system", "popen", "spawn",
-        "socket", "requests", "urllib", "httpx", "aiohttp",
-        "pickle", "marshal", "shelve", "dbm",
-        "pathlib", "Path", "os.path", "shutil",
-        "tempfile", "mkdtemp", "mktemp",
+    # 禁止的调用名（ClassVar：类级常量）
+    _BANNED_CALLS: ClassVar[set[str]] = {
+        "eval",
+        "exec",
+        "compile",
+        "__import__",
+        "open",
+        "input",
+        "getattr",
+        "setattr",
+        "delattr",
+        "globals",
+        "locals",
+        "vars",
+        "type",
+        "isinstance",
+        "issubclass",
+        "super",
+        "breakpoint",
+        "exit",
+        "quit",
+        "help",
+        "dir",
+        "id",
+        "hash",
+        "repr",
+        "str",
+        "bytes",
+        "int",
+        "float",
+        "os.system",
+        "subprocess",
+        "system",
+        "popen",
+        "spawn",
+        "socket",
+        "requests",
+        "urllib",
+        "httpx",
+        "aiohttp",
+        "pickle",
+        "marshal",
+        "shelve",
+        "dbm",
+        "pathlib",
+        "Path",
+        "os.path",
+        "shutil",
+        "tempfile",
+        "mkdtemp",
+        "mktemp",
     }
 
     def __init__(self, llm: BaseLLM, tools_dir: Path | None = None) -> None:
@@ -102,7 +140,7 @@ class ToolForge:
             raise ValueError("spec 必须包含 name / description / body")
 
         # 校验命名
-        if not re.match(r'^[a-z][a-z0-9_]*$', name):
+        if not re.match(r"^[a-z][a-z0-9_]*$", name):
             raise ValueError(f"工具名必须蛇形命名: {name}")
 
         # 构造完整代码
@@ -160,18 +198,14 @@ class ToolForge:
         # 检查节点
         for node in ast.walk(tree):
             if isinstance(node, self._BANNED_NODES):
-                raise ToolSecurityError(
-                    f"禁止的语法: {type(node).__name__} at line {node.lineno}"
-                )
+                raise ToolSecurityError(f"禁止的语法: {type(node).__name__} at line {node.lineno}")
 
             # 检查函数调用
             if isinstance(node, ast.Call):
                 func = node.func
                 # 直接调用
                 if isinstance(func, ast.Name) and func.id in self._BANNED_CALLS:
-                    raise ToolSecurityError(
-                        f"禁止的函数调用: {func.id} at line {node.lineno}"
-                    )
+                    raise ToolSecurityError(f"禁止的函数调用: {func.id} at line {node.lineno}")
                 # 属性调用（如 os.system）
                 if isinstance(func, ast.Attribute):
                     full_name = self._get_attr_name(func)
@@ -202,9 +236,7 @@ class ToolForge:
 
     def _load_from_file(self, path: Path, class_name: str) -> type[Tool]:
         """从文件动态加载工具类。"""
-        spec = importlib.util.spec_from_file_location(
-            f"secpt.generated.{path.stem}", str(path)
-        )
+        spec = importlib.util.spec_from_file_location(f"secpt.generated.{path.stem}", str(path))
         if spec is None or spec.loader is None:
             raise ImportError(f"无法加载: {path}")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import structlog
 
@@ -36,8 +37,8 @@ class TokenStats:
 class TokenTracker:
     """线程安全的 token 追踪器。"""
 
-    # DeepSeek 定价（每 1M tokens，2024-12 约）
-    _PRICE = {
+    # DeepSeek 定价（每 1M tokens，2024-12 约；ClassVar：类级常量）
+    _PRICE: ClassVar[dict[str, dict[str, float]]] = {
         "deepseek-chat": {"prompt": 0.14, "completion": 0.28},
         "deepseek-reasoner": {"prompt": 0.55, "completion": 2.19},
         "deepseek-v1-flash": {"prompt": 0.07, "completion": 0.14},
@@ -58,8 +59,9 @@ class TokenTracker:
         total = prompt_tokens + completion_tokens
         # 估算成本
         price = self._PRICE.get(model, {"prompt": 0.14, "completion": 0.28})
-        cost = (prompt_tokens / 1_000_000) * price["prompt"] + \
-               (completion_tokens / 1_000_000) * price["completion"]
+        cost = (prompt_tokens / 1_000_000) * price["prompt"] + (
+            completion_tokens / 1_000_000
+        ) * price["completion"]
 
         usage = TokenUsage(
             model=model,
@@ -127,4 +129,4 @@ class TokenTracker:
         }
 
 
-__all__ = ["TokenTracker", "TokenUsage", "TokenStats"]
+__all__ = ["TokenStats", "TokenTracker", "TokenUsage"]

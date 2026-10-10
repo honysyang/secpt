@@ -42,7 +42,7 @@ def _extract_json(text: str) -> dict | None:
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start:end + 1])
+        return json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
 
@@ -54,15 +54,16 @@ def _load_job_text(job_dir: Path, max_chars: int = 6000) -> tuple[str, str]:
     if task_yaml.is_file():
         try:
             import yaml
-            objective = str(yaml.safe_load(
-                task_yaml.read_text(encoding="utf-8"))["spec"]["objective"])
-        except Exception:  # noqa: BLE001
+
+            objective = str(
+                yaml.safe_load(task_yaml.read_text(encoding="utf-8"))["spec"]["objective"]
+            )
+        except Exception:
             pass
 
     traj_parts: list[str] = []
     transcript = None
-    for cand in (job_dir / "ws" / "transcript.json",
-                 job_dir / "ws" / "ws" / "transcript.json"):
+    for cand in (job_dir / "ws" / "transcript.json", job_dir / "ws" / "ws" / "transcript.json"):
         if cand.is_file():
             transcript = cand
             break
@@ -81,15 +82,19 @@ def _load_job_text(job_dir: Path, max_chars: int = 6000) -> tuple[str, str]:
                     traj_parts.append(f"< {content[:200]}")
                 elif content.strip():
                     traj_parts.append(f"{role}: {content[:300]}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     trajectory = "\n".join(traj_parts)[-max_chars:]
     return objective or job_dir.name, trajectory
 
 
-async def distill_job(job_id: str, llm=None, model: str = "deepseek-chat",
-                      jobs_dir: Path | None = None,
-                      journal: ExperienceJournal | None = None) -> LearnedExperience | None:
+async def distill_job(
+    job_id: str,
+    llm=None,
+    model: str = "deepseek-chat",
+    jobs_dir: Path | None = None,
+    journal: ExperienceJournal | None = None,
+) -> LearnedExperience | None:
     """蒸馏一个 job 的经验并入库。失败返回 None（绝不抛）。"""
     from secpt.core.job.resume import jobs_dir as _default_jobs_dir
 
@@ -102,14 +107,21 @@ async def distill_job(job_id: str, llm=None, model: str = "deepseek-chat",
 
         if llm is None:
             if os.environ.get("SECPT_FAKE_LLM"):
-                return None          # 假 LLM 不蒸馏（无真实经验可学）
+                return None  # 假 LLM 不蒸馏（无真实经验可学）
             from secpt.runtime.llm.client import call_llm
+
             llm = call_llm
 
-        text = await _acomplete(llm, [{"role": "user", "content":
-                                       _PROMPT.format(objective=objective[:1500],
-                                                      trajectory=trajectory)}],
-                                model)
+        text = await _acomplete(
+            llm,
+            [
+                {
+                    "role": "user",
+                    "content": _PROMPT.format(objective=objective[:1500], trajectory=trajectory),
+                }
+            ],
+            model,
+        )
         data = _extract_json(text)
         if not data or not data.get("title"):
             return None
@@ -119,9 +131,13 @@ async def distill_job(job_id: str, llm=None, model: str = "deepseek-chat",
         if task_yaml.is_file():
             try:
                 import yaml
-                task_type = str(yaml.safe_load(
-                    task_yaml.read_text(encoding="utf-8"))["spec"].get("task_type", "generic"))
-            except Exception:  # noqa: BLE001
+
+                task_type = str(
+                    yaml.safe_load(task_yaml.read_text(encoding="utf-8"))["spec"].get(
+                        "task_type", "generic"
+                    )
+                )
+            except Exception:
                 pass
 
         exp = LearnedExperience(
@@ -136,6 +152,6 @@ async def distill_job(job_id: str, llm=None, model: str = "deepseek-chat",
         )
         jr = journal or ExperienceJournal()
         return exp if jr.append(exp) else None
-    except Exception as e:  # noqa: BLE001 - 学习绝不影响主链路
+    except Exception as e:
         print(f"[learn] distill {job_id} failed (ignored): {e}")
         return None

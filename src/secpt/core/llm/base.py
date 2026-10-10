@@ -19,7 +19,7 @@ Role = Literal["system", "user", "assistant", "tool"]
 class LLMMessage:
     """一条 chat 消息（极简，Phase 1 不需要 pydantic 校验）。"""
 
-    __slots__ = ("role", "content", "tool_calls", "tool_call_id")
+    __slots__ = ("content", "role", "tool_call_id", "tool_calls")
 
     def __init__(
         self,

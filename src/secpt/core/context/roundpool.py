@@ -17,8 +17,6 @@
 
 from __future__ import annotations
 
-from secpt.core.context.estimator import est_messages_tokens
-
 COMPACT_THRESHOLD = 0.55
 
 

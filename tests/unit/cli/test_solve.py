@@ -7,8 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from secpt.cli.solve import (_auto_prior, _extract_entries, _find_doc,
-                             _find_ground_truth, _prepare_attachments)
+from secpt.cli.solve import (
+    _auto_prior,
+    _extract_entries,
+    _find_doc,
+    _find_ground_truth,
+    _prepare_attachments,
+)
 
 TEST_MD = """题目：ROIS 公司统一身份认证中心（SAML 单点登录）。
 内网地址 : 192.168.1.151

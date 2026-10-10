@@ -25,7 +25,6 @@ from secpt.runtime.subprocess import (
     run_whitelisted_sync,
 )
 
-
 WHITELIST = ToolsConfig(whitelist=["echo", "true", "sleep"], default_timeout=30.0)
 
 

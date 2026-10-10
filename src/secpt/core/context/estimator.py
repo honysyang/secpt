@@ -14,19 +14,19 @@ from __future__ import annotations
 import os
 
 SAFETY = 1.1
-CJK_PER_CHAR = 0.7          # 中文 1 字 ≈ 0.7 token
-ASCII_PER_CHAR = 0.25       # 1 token ≈ 4 字符
+CJK_PER_CHAR = 0.7  # 中文 1 字 ≈ 0.7 token
+ASCII_PER_CHAR = 0.25  # 1 token ≈ 4 字符
 CONSERVATIVE_PER_CHAR = 0.5  # 统一保守估计：len/2
-DEFAULT_WINDOW = 64_000     # 默认上下文窗口（token）
+DEFAULT_WINDOW = 64_000  # 默认上下文窗口（token）
 
 
 def _is_cjk(ch: str) -> bool:
     """粗略判断 CJK 字符（中日韩统一表意 + 全角标点）。"""
     return (
-        "\u4e00" <= ch <= "\u9fff" or     # 中日韩统一表意文字
-        "\u3000" <= ch <= "\u303f" or     # CJK 标点
-        "\uff00" <= ch <= "\uffef" or     # 全角字符
-        "\uac00" <= ch <= "\ud7af"        # 谚文
+        "\u4e00" <= ch <= "\u9fff"  # 中日韩统一表意文字
+        or "\u3000" <= ch <= "\u303f"  # CJK 标点
+        or "\uff00" <= ch <= "\uffef"  # 全角字符
+        or "\uac00" <= ch <= "\ud7af"  # 谚文
     )
 
 

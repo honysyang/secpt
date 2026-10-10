@@ -31,8 +31,9 @@ def _score(query: str, exp: LearnedExperience) -> float:
     return s
 
 
-def search_experiences(query: str, limit: int = _MAX_ITEMS,
-                       journal: ExperienceJournal | None = None) -> list[LearnedExperience]:
+def search_experiences(
+    query: str, limit: int = _MAX_ITEMS, journal: ExperienceJournal | None = None
+) -> list[LearnedExperience]:
     """按 objective 检索最相关的经验。"""
     if os.environ.get("SECPT_EXPERIENCE") == "0":
         return []
@@ -55,5 +56,5 @@ def experience_section(query: str, journal: ExperienceJournal | None = None) -> 
             item += f"：{e.what_worked[:_MAX_ITEM_CHARS]}"
         if e.pitfalls:
             item += "；已排除：" + "、".join(p[:40] for p in e.pitfalls[:3])
-        lines.append(item[:_MAX_ITEM_CHARS + 80])
+        lines.append(item[: _MAX_ITEM_CHARS + 80])
     return "\n".join(lines)

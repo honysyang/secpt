@@ -18,6 +18,7 @@ def _get_tool_timeout(tool_name: str, default: float = 30.0) -> float:
     """从 settings.tools.tool_timeouts 读取逐工具超时。"""
     try:
         from secpt.config.settings import get_settings
+
         settings = get_settings()
         return settings.tools.tool_timeouts.get(tool_name, default)
     except Exception:
@@ -33,15 +34,14 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
 def _run(cmd: str, argv: list[str], timeout: float = 30.0) -> str:
     """执行命令并规整输出。"""
     import asyncio
-    return asyncio.get_event_loop().run_until_complete(
-        _run_async(cmd, argv, timeout)
-    )
+
+    return asyncio.get_event_loop().run_until_complete(_run_async(cmd, argv, timeout))
 
 
 async def _run_async(cmd: str, argv: list[str], timeout: float) -> str:
     try:
         result = await run_whitelisted(cmd, argv, timeout=timeout)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return f"Error: {exc}"
     output = result.stdout + ("\n" + result.stderr if result.stderr else "")
     if result.returncode != 0 and not output.strip():

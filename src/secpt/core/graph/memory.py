@@ -64,7 +64,13 @@ class MemoryGraphStore(GraphStore):
             "trust_score": score,
             "result": result,
         }
-        logger.debug("graph.evidence.add", evidence_id=evidence_id, eid=eid, trust_tier=trust_tier, result=result)
+        logger.debug(
+            "graph.evidence.add",
+            evidence_id=evidence_id,
+            eid=eid,
+            trust_tier=trust_tier,
+            result=result,
+        )
         return evidence_id
 
     async def neighbors(self, eid: str) -> list[dict[str, Any]]:
@@ -72,13 +78,15 @@ class MemoryGraphStore(GraphStore):
         results: list[dict[str, Any]] = []
         for edge in self._edges.get(eid, []):
             dst_info = self._entities.get(edge["dst"], {})
-            results.append({
-                "eid": edge["dst"],
-                "etype": dst_info.get("etype", "unknown"),
-                "props": dst_info.get("props", {}),
-                "edge_type": edge["etype"],
-                "confidence": edge["confidence"],
-            })
+            results.append(
+                {
+                    "eid": edge["dst"],
+                    "etype": dst_info.get("etype", "unknown"),
+                    "props": dst_info.get("props", {}),
+                    "edge_type": edge["etype"],
+                    "confidence": edge["confidence"],
+                }
+            )
         return results
 
     async def close(self) -> None:
@@ -94,7 +102,4 @@ class MemoryGraphStore(GraphStore):
 
     def has_edge(self, src: str, dst: str, etype: str) -> bool:
         """检查是否存在指定类型的边。"""
-        return any(
-            e["dst"] == dst and e["etype"] == etype
-            for e in self._edges.get(src, [])
-        )
+        return any(e["dst"] == dst and e["etype"] == etype for e in self._edges.get(src, []))

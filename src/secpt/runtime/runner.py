@@ -51,7 +51,10 @@ async def run(
         llm = FakeLLM(
             script=[
                 LLMMessage(role="assistant", content="ACTION: nmap -p 22,80,443 -T4 " + target),
-                LLMMessage(role="assistant", content="ANSWER: 目标 " + target + " 扫描完成（FakeLLM dry-run）"),
+                LLMMessage(
+                    role="assistant",
+                    content="ANSWER: 目标 " + target + " 扫描完成（FakeLLM dry-run）",
+                ),
             ]
         )
     else:
@@ -69,7 +72,9 @@ async def run(
 
     # 5. 跑 ReAct
     steps = max_steps or settings.react.max_steps
-    logger.info("run.start", target=target, task=task[:100], fake=fake, graph_backend=settings.graph.backend)
+    logger.info(
+        "run.start", target=target, task=task[:100], fake=fake, graph_backend=settings.graph.backend
+    )
     try:
         result: ReactResult = await run_react(
             llm=llm,
@@ -81,7 +86,9 @@ async def run(
     finally:
         await store.close()
 
-    logger.info("run.done", answer=result.answer[:200], steps=result.steps, exhausted=result.exhausted)
+    logger.info(
+        "run.done", answer=result.answer[:200], steps=result.steps, exhausted=result.exhausted
+    )
     return RunResult(
         answer=result.answer,
         steps=result.steps,

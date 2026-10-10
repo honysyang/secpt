@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from secpt.config.models import GraphConfig
 from secpt.core.graph import (
-    GraphStore,
     MemoryGraphStore,
     get_graph_store,
 )
@@ -16,7 +15,6 @@ from secpt.core.react.runner import run_react
 from secpt.core.tools.base import Registry
 from secpt.core.tools.demo import EchoTool
 from secpt.runtime import subprocess as sp
-
 
 # ---- MemoryGraphStore 基础 ----
 
@@ -126,7 +124,8 @@ async def test_runner_with_store_writes_graph(echo_registry: Registry) -> None:
 
     # performed 边存在（task 根 → action）
     import hashlib
-    task_hash = hashlib.sha256("test task".encode("utf-8")).hexdigest()[:12]
+
+    task_hash = hashlib.sha256(b"test task").hexdigest()[:12]
     task_eid = f"task.{task_hash}"
     assert store.has_edge(task_eid, "act.1.echo", "performed") is True
 

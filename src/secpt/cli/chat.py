@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 # 会话对象
 # ---------------------------------------------------------------------------
+
 
 class ChatSession:
     """一次 chat 会话的完整状态。"""
@@ -83,6 +83,7 @@ class ChatSession:
         # LLM
         if self.fake:
             from secpt.core.llm import FakeLLM
+
             self.llm = FakeLLM(script=[])
         else:
             self.llm = get_llm(settings.llm)
@@ -166,7 +167,18 @@ class ChatSession:
         for entries in report.trajectory.values():
             for e in entries:
                 obs = e.observation
-                if any(kw in obs.lower() for kw in ("flag", "rce", "critical", "漏洞", "未授权", "password", "credential")):
+                if any(
+                    kw in obs.lower()
+                    for kw in (
+                        "flag",
+                        "rce",
+                        "critical",
+                        "漏洞",
+                        "未授权",
+                        "password",
+                        "credential",
+                    )
+                ):
                     key_obs.append(obs[:120])
         if key_obs:
             summary_parts.append("关键发现：" + "; ".join(key_obs[:3]))
@@ -200,7 +212,7 @@ class ChatSession:
             return "command"
 
         prompt = (
-            f"判断以下输入的意图，只输出 JSON：{{\"intent\":\"task\"|\"question\"|\"command\"}}\n"
+            f'判断以下输入的意图，只输出 JSON：{{"intent":"task"|"question"|"command"}}\n'
             f"- task: 要求执行渗透测试任务、扫描、攻击、解题\n"
             f"- question: 提问、询问信息、追问结果\n"
             f"- command: 系统命令（以 / 开头）\n"
@@ -221,7 +233,9 @@ class ChatSession:
             )
             content = (resp.content or "").strip()
             # 剥围栏
-            content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            content = (
+                content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            )
             data = _json.loads(content)
             intent = data.get("intent", "task")
             if intent in ("task", "question", "command"):
@@ -292,7 +306,9 @@ class ChatSession:
 
         if hasattr(store, "_entities"):
             result["entities"] = len(store._entities)
-            result["edges"] = sum(len(v) for v in store._edges.values()) if hasattr(store, "_edges") else 0
+            result["edges"] = (
+                sum(len(v) for v in store._edges.values()) if hasattr(store, "_edges") else 0
+            )
             result["evidences"] = len(store._evidences) if hasattr(store, "_evidences") else 0
             # top5（内存后端简化为前 5 个）
             for eid, ent in list(store._entities.items())[:5]:
@@ -300,12 +316,14 @@ class ChatSession:
 
         elif hasattr(store, "_conn") and store._conn is not None:
             try:
-                result["entities"] = store._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+                result["entities"] = store._conn.execute(
+                    "SELECT COUNT(*) FROM entities"
+                ).fetchone()[0]
                 result["edges"] = store._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-                result["evidences"] = store._conn.execute("SELECT COUNT(*) FROM evidences").fetchone()[0]
-                top = store._conn.execute(
-                    "SELECT eid, etype FROM entities LIMIT 5"
-                ).fetchall()
+                result["evidences"] = store._conn.execute(
+                    "SELECT COUNT(*) FROM evidences"
+                ).fetchone()[0]
+                top = store._conn.execute("SELECT eid, etype FROM entities LIMIT 5").fetchall()
                 for row in top:
                     result["top5"].append(f"  {row[0]} ({row[1]})")
             except Exception:
@@ -317,6 +335,7 @@ class ChatSession:
 # ---------------------------------------------------------------------------
 # REPL 输入（prompt_toolkit 可选）
 # ---------------------------------------------------------------------------
+
 
 def _make_input_fn():
     """返回异步输入函数。优先 prompt_toolkit，否则退化到 input()。"""
@@ -429,6 +448,7 @@ async def _cmd_report(session: ChatSession, args: list[str]) -> str:
 # 主循环
 # ---------------------------------------------------------------------------
 
+
 async def _run_repl(session: ChatSession) -> None:
     """主 REPL 循环。"""
     input_fn = _make_input_fn()
@@ -436,11 +456,11 @@ async def _run_repl(session: ChatSession) -> None:
     # 欢迎信息
     tool_count = len(session.tools.all())
     backend_str = session.backend
-    print(f"secpt chat 已启动")
+    print("secpt chat 已启动")
     print(f"  会话 ID:  {session.session_id}")
     print(f"  后端:     {backend_str}")
     print(f"  工具数:   {tool_count}")
-    print(f"  输入 /help 查看帮助，/exit 退出")
+    print("  输入 /help 查看帮助，/exit 退出")
     print()
 
     while True:
@@ -566,6 +586,7 @@ def _setup_fake_script(session: ChatSession, objective: str) -> None:
 # CLI 入口
 # ---------------------------------------------------------------------------
 
+
 def chat_cmd(
     backend: str = typer.Option("memory", "--backend", help="GraphStore 后端 (memory/sqlite)"),
     budget: float = typer.Option(50.0, "--budget", "-b", help="总预算"),
@@ -594,4 +615,4 @@ def chat_cmd(
     asyncio.run(_main())
 
 
-__all__ = ["chat_cmd", "ChatSession"]
+__all__ = ["ChatSession", "chat_cmd"]

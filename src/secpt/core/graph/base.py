@@ -105,9 +105,9 @@ class GraphStore(ABC):
 
 
 __all__ = [
-    "EvidenceRecord",
-    "GraphStore",
     "RESULT_CLASSIFICATION",
     "TRUST_SCORES",
+    "EvidenceRecord",
+    "GraphStore",
     "TrustTier",
 ]

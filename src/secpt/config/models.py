@@ -75,21 +75,34 @@ class ToolsConfig(BaseModel):
     model_config = {"populate_by_name": True}
 
     command_whitelist: list[str] = Field(default_factory=list, alias="whitelist")
-    tool_names: list[str] = Field(default_factory=lambda: [
-        "read_file", "list_dir", "nmap", "curl", "dig", "whatweb", "whois",
-        "crawler", "http_analyze", "saml", "flag_extract",
-    ])
+    tool_names: list[str] = Field(
+        default_factory=lambda: [
+            "read_file",
+            "list_dir",
+            "nmap",
+            "curl",
+            "dig",
+            "whatweb",
+            "whois",
+            "crawler",
+            "http_analyze",
+            "saml",
+            "flag_extract",
+        ]
+    )
     default_timeout: float = 30.0
     exec_timeout_s: int = 120
     # 逐工具超时覆盖（秒）
-    tool_timeouts: dict[str, float] = Field(default_factory=lambda: {
-        "nmap": 45.0,
-        "whatweb": 20.0,
-        "crawler": 30.0,
-        "curl": 15.0,
-        "whois": 10.0,
-        "dig": 10.0,
-    })
+    tool_timeouts: dict[str, float] = Field(
+        default_factory=lambda: {
+            "nmap": 45.0,
+            "whatweb": 20.0,
+            "crawler": 30.0,
+            "curl": 15.0,
+            "whois": 10.0,
+            "dig": 10.0,
+        }
+    )
     sandbox_enabled: bool = False
     sandbox_backend: str | None = None
 
@@ -116,8 +129,8 @@ class LoggingConfig(BaseModel):
 class PricingConfig(BaseModel):
     """模型单价（CNY / 1K token）。S3 BudgetTracker 从这里读，不写死。"""
 
-    input_per_1k: float = 0.002      # deepseek-chat 输入（缓存未命中）单价
-    output_per_1k: float = 0.008     # deepseek-chat 输出单价
+    input_per_1k: float = 0.002  # deepseek-chat 输入（缓存未命中）单价
+    output_per_1k: float = 0.008  # deepseek-chat 输出单价
 
 
 class AuditConfig(BaseModel):

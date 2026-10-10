@@ -42,10 +42,10 @@ class Stage(BaseModel):
 
     name: str
     role: str = ""
-    prior: str = ""                    # 留空继承 profile.prior
-    tools: list[str] = Field(default_factory=list)   # 插件工具名（已装插件）
-    stop_condition: str = ""           # 该阶段收尾方式（注入约束）
-    budget: Budget = Field(default_factory=Budget)   # steps/wall_s=0 用 profile.budget
+    prior: str = ""  # 留空继承 profile.prior
+    tools: list[str] = Field(default_factory=list)  # 插件工具名（已装插件）
+    stop_condition: str = ""  # 该阶段收尾方式（注入约束）
+    budget: Budget = Field(default_factory=Budget)  # steps/wall_s=0 用 profile.budget
 
 
 class Profile(BaseModel):
@@ -53,10 +53,10 @@ class Profile(BaseModel):
     role: str = DEFAULT_ROLE
     tools: list[str] = Field(default_factory=lambda: list(CORE_TOOLS))
     bash_whitelist_extra: list[str] = Field(default_factory=list)
-    prior: str = "generic.md"          # knowledge/priors/<prior>，相对文件名
+    prior: str = "generic.md"  # knowledge/priors/<prior>，相对文件名
     terminator: Terminator = Field(default_factory=Terminator)
     budget: Budget = Field(default_factory=Budget)
-    stages: list[Stage] = Field(default_factory=list)   # 非空 → 多阶段编排
+    stages: list[Stage] = Field(default_factory=list)  # 非空 → 多阶段编排
     constraints: list[str] = Field(default_factory=list)
     note: str = ""
 

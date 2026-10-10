@@ -7,10 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from secpt.tools.plugin_loader import (PluginError, engine_tools_for,
-                                       load_yaml_plugin, make_plugin_fn)
-
 from secpt.runtime.engine import Engine, RunConfig
+from secpt.tools.plugin_loader import (
+    PluginError,
+    engine_tools_for,
+    load_yaml_plugin,
+    make_plugin_fn,
+)
 
 
 def _run(coro):
@@ -46,25 +49,24 @@ class TestLoadValidate:
             load_yaml_plugin(_mk_plugin(tmp_path, VALID.replace("getshell", "Bad Name", 1)))
 
     def test_template_param_not_in_schema(self, tmp_path):
-        bad = VALID.replace("run: \"echo got {target}\"", "run: \"echo {nope}\"")
+        bad = VALID.replace('run: "echo got {target}"', 'run: "echo {nope}"')
         with pytest.raises(PluginError, match="未在 schema"):
             load_yaml_plugin(_mk_plugin(tmp_path, bad))
 
     def test_required_not_in_template_allowed(self, tmp_path):
         # required 参数不必出现在命令模板（可为上下文信息；调用时仍必填校验）
-        ok = VALID.replace("run: \"echo got {target}\"", "run: \"echo hi\"")
+        ok = VALID.replace('run: "echo got {target}"', 'run: "echo hi"')
         p = load_yaml_plugin(_mk_plugin(tmp_path, ok))
         assert p.command == "echo hi"
 
     def test_missing_run(self, tmp_path):
         with pytest.raises(PluginError, match="run"):
-            load_yaml_plugin(_mk_plugin(tmp_path, VALID.replace(
-                "run: \"echo got {target}\"", "")))
+            load_yaml_plugin(_mk_plugin(tmp_path, VALID.replace('run: "echo got {target}"', "")))
 
 
 class TestPluginFn:
     def _fn(self, tmp_path, run_line="printf 'shell:%s' {target}", timeout_s=30):
-        text = VALID.replace("run: \"echo got {target}\"", f"run: \"{run_line}\"")
+        text = VALID.replace('run: "echo got {target}"', f'run: "{run_line}"')
         text = text.replace("timeout_s: 30", f"timeout_s: {timeout_s}")
         return make_plugin_fn(load_yaml_plugin(_mk_plugin(tmp_path, text)))
 
@@ -99,10 +101,18 @@ class TestPluginFn:
 class TestEngineIntegration:
     def test_extra_tool_available(self, tmp_path):
         """插件工具通过 extra_tools 进入 Engine 并出现在 schema。"""
-        schema = {"type": "function", "function": {
-            "name": "getshell", "description": "d",
-            "parameters": {"type": "object", "properties": {"target": {"type": "string"}},
-                           "required": ["target"]}}}
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "getshell",
+                "description": "d",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
+                },
+            },
+        }
         calls = []
 
         async def fn(args):
@@ -112,8 +122,9 @@ class TestEngineIntegration:
         cfg = RunConfig(job_id="t", objective="o", system_extra="x", workspace=tmp_path)
         engine = Engine(cfg, llm=None, extra_tools={"getshell": (schema, fn)})
         assert "getshell" in engine.tools
-        assert any(s["function"]["name"] == "getshell"
-                   for s in engine.extra_tools.values() for s in [s[0]])
+        assert any(
+            s["function"]["name"] == "getshell" for s in engine.extra_tools.values() for s in [s[0]]
+        )
 
     def test_engine_tools_for_uses_installed_plugin(self, tmp_path):
         """engine_tools_for 只装配已安装插件；未安装名字静默跳过。"""
@@ -121,6 +132,7 @@ class TestEngineIntegration:
         plug_dir.mkdir()
         _mk_plugin(plug_dir, VALID, "getshell.yaml")
         from secpt.tools.plugin_loader import discover_plugins
+
         yp, _ = discover_plugins([plug_dir])
         assert "getshell" in yp
         tools = engine_tools_for(["getshell", "nosuch"], dirs=[plug_dir])

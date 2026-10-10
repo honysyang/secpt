@@ -27,20 +27,27 @@ TIMEOUT_S = 15.0
 
 @dataclass
 class JevDecision:
-    answer: bool          # yes/no
-    probability: float    # 校准概率 [0,1]
+    answer: bool  # yes/no
+    probability: float  # 校准概率 [0,1]
     raw_model: str = ""
 
 
 class JevGate:
     """typed decision 门控；任何故障都降级为 None（不阻断评判链）。"""
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None,
-                 min_confidence: float | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        min_confidence: float | None = None,
+    ) -> None:
         self._api_key = api_key if api_key is not None else os.environ.get("JEV_API_KEY", "")
         self._base_url = (base_url or os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-        self._min_confidence = (min_confidence if min_confidence is not None
-                                else float(os.environ.get("JEV_MIN_CONFIDENCE", DEFAULT_MIN_CONFIDENCE)))
+        self._min_confidence = (
+            min_confidence
+            if min_confidence is not None
+            else float(os.environ.get("JEV_MIN_CONFIDENCE", DEFAULT_MIN_CONFIDENCE))
+        )
 
     @property
     def min_confidence(self) -> float:
@@ -54,6 +61,7 @@ class JevGate:
         if not self.available():
             return None
         import httpx
+
         payload = {
             "question": question,
             "type": "choice",
@@ -65,8 +73,10 @@ class JevGate:
                 r = await client.post(
                     f"{self._base_url}/v1/decide",
                     json=payload,
-                    headers={"Authorization": f"Bearer {self._api_key}",
-                             "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
                 )
                 r.raise_for_status()
                 data = r.json()
@@ -74,9 +84,10 @@ class JevGate:
             if ans not in ("yes", "no"):
                 return None
             prob = float(data.get("probability", 0.0) or 0.0)
-            return JevDecision(answer=(ans == "yes"), probability=prob,
-                               raw_model=str(data.get("model", "")))
-        except Exception as e:  # noqa: BLE001 - 门控故障不阻断评判
+            return JevDecision(
+                answer=(ans == "yes"), probability=prob, raw_model=str(data.get("model", ""))
+            )
+        except Exception as e:
             print(f"[jev] decision failed, 降级 LLM judge: {e}")
             return None
 

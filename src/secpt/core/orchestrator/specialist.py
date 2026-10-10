@@ -20,7 +20,6 @@ import asyncio
 import json
 import os
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -92,7 +91,7 @@ class WarroomHooks:
         self._pending.append((action, target))
         try:
             self._warroom.add_attempt(action, target=target)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[warroom] add_attempt failed (ignored): {e}")
         inner = getattr(self._inner, "on_tool", None)
         if inner is not None:
@@ -104,7 +103,7 @@ class WarroomHooks:
             # 补记结果（attempts 行已存在，只更新 result）
             try:
                 self._warroom.add_attempt(action, target=target, result=out[:1000])
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[warroom] update attempt failed (ignored): {e}")
         inner = getattr(self._inner, "on_result", None)
         if inner is not None:
@@ -117,8 +116,11 @@ class WarroomHooks:
             if kind == "credential":
                 self._warroom.add_credential("regex", value, source_step=evidence)
                 self._warroom.add_finding(
-                    f"cred-{self._warroom.count_attempts() + 1}", "credential", value,
-                    evidence=evidence, severity="medium",
+                    f"cred-{self._warroom.count_attempts() + 1}",
+                    "credential",
+                    value,
+                    evidence=evidence,
+                    severity="medium",
                 )
             elif kind == "asset":
                 host, port, service = _parse_asset_url(value)
@@ -126,10 +128,13 @@ class WarroomHooks:
                     self._warroom.add_asset(host, port, service, "", source_step=evidence)
             elif kind == "flag":
                 self._warroom.add_finding(
-                    f"flag-{self._warroom.count_attempts() + 1}", "flag", value,
-                    evidence=evidence, severity="critical",
+                    f"flag-{self._warroom.count_attempts() + 1}",
+                    "flag",
+                    value,
+                    evidence=evidence,
+                    severity="critical",
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[warroom] on_finding failed (ignored): {e}")
         inner = getattr(self._inner, "on_finding", None)
         if inner is not None:
@@ -203,8 +208,10 @@ class SpecialistOrchestrator:
             return llm
         if os.environ.get("SECPT_FAKE_LLM"):
             from secpt.core.job.fakellm import FakeLLM
+
             return FakeLLM(n_steps=3, job_id=self.job_id)
         from secpt.runtime.llm.client import call_llm
+
         return call_llm
 
     def _make_cfg(
@@ -222,7 +229,7 @@ class SpecialistOrchestrator:
         cfg = _engine.RunConfig(
             job_id=self.job_id,
             objective=objective,
-            system_extra="",   # 下面渲染
+            system_extra="",  # 下面渲染
             workspace=self.jdir / "agents" / ws_name,
             model_primary="deepseek-chat",
             model_fallback="deepseek-reasoner",
@@ -297,7 +304,7 @@ class SpecialistOrchestrator:
                     tech=str(a.get("tech", "")),
                     source_step="recon assets.json",
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[warroom] recon asset failed (ignored): {e}")
         print(f"[orchestrator] recon 完成: steps={result.steps} 资产={len(assets)} 条")
         return assets
@@ -311,7 +318,7 @@ class SpecialistOrchestrator:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[orchestrator] 解析 assets.json 失败(忽略): {e}")
             return []
 
@@ -386,14 +393,17 @@ class SpecialistOrchestrator:
         assets = await asyncio.to_thread(self.run_recon)
         if not assets:
             # recon 没产出 → 回退：入口本身作为资产上下文
-            assets = [{"host": e, "port": None, "service": "", "tech": ""}
-                      for e in self.spec.entries]
+            assets = [
+                {"host": e, "port": None, "service": "", "tech": ""} for e in self.spec.entries
+            ]
 
         # 并行 exploit/analyze 链（进程内 asyncio 并行；bash 阻塞由 LLM await 交错）
-        chains = await asyncio.gather(*[
-            asyncio.to_thread(self.run_chain, i, e, assets)
-            for i, e in enumerate(self.spec.entries)
-        ])
+        chains = await asyncio.gather(
+            *[
+                asyncio.to_thread(self.run_chain, i, e, assets)
+                for i, e in enumerate(self.spec.entries)
+            ]
+        )
 
         verified = self.run_verify()
 
@@ -407,10 +417,13 @@ class SpecialistOrchestrator:
                 self.sink.finding("flag", "flag", fl, "orchestrator")
                 # S5 占位：链自宣告的 flag 登记为 finding，交给 verify 乐观确认
                 self.warroom.add_finding(
-                    f"flag-chain-{i}", "flag", fl,
-                    evidence=f"exploit entry#{i} 链自宣告", severity="critical",
+                    f"flag-chain-{i}",
+                    "flag",
+                    fl,
+                    evidence=f"exploit entry#{i} 链自宣告",
+                    severity="critical",
                 )
-            verified = self.run_verify()   # 新登记的 flag 也纳入乐观确认
+            verified = self.run_verify()  # 新登记的 flag 也纳入乐观确认
         else:
             rec.set_status("failed")
         self.store.upsert_job(rec)
@@ -427,13 +440,21 @@ class SpecialistOrchestrator:
             "verified": verified,
             "flags": flags,
             "chains": [
-                {"role": c.role, "entry": c.entry_index, "flag": c.flag,
-                 "steps": c.steps, "wall_s": round(c.wall_s, 1), "status": c.status}
+                {
+                    "role": c.role,
+                    "entry": c.entry_index,
+                    "flag": c.flag,
+                    "steps": c.steps,
+                    "wall_s": round(c.wall_s, 1),
+                    "status": c.status,
+                }
                 for c in chains
             ],
             "wall_s": round(wall, 1),
         }
-        print(f"\n[orchestrator] 完成 job={self.job_id} wall={wall:.1f}s "
-              f"assets={summary['warroom_assets']} attempts={summary['warroom_attempts']} "
-              f"verified={verified} flags={flags}")
+        print(
+            f"\n[orchestrator] 完成 job={self.job_id} wall={wall:.1f}s "
+            f"assets={summary['warroom_assets']} attempts={summary['warroom_attempts']} "
+            f"verified={verified} flags={flags}"
+        )
         return summary

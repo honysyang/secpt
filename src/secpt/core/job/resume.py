@@ -16,11 +16,11 @@ resume 流程：
 
 from __future__ import annotations
 
-import yaml
 from pathlib import Path
 
+import yaml
+
 from secpt.core.job.models import TaskSpec
-from secpt.core.job.rounds import load_latest_round
 from secpt.runtime.engine import RunConfig
 
 # jobs 目录：默认项目根 var/jobs，可被环境变量 SECPT_VAR 覆盖
@@ -29,6 +29,7 @@ DEFAULT_JOBS_DIR = Path("var") / "jobs"
 
 def jobs_dir() -> Path:
     import os
+
     return Path(os.environ.get("SECPT_VAR", "var")) / "jobs"
 
 
@@ -59,15 +60,22 @@ def read_task_snapshot(job_dir: Path) -> tuple[TaskSpec, dict]:
 def make_run_config(job_id: str, spec: TaskSpec, run_config: dict) -> RunConfig:
     """由快照重建 RunConfig（resume 用）。"""
     from secpt.runtime.engine import DEFAULT_BASH_WHITELIST
+
     cfg = RunConfig(
         job_id=job_id,
         objective=spec.objective,
         system_extra="",  # resume 时首条 system 直接来自初始链，不需重建
         workspace=Path(run_config.get("workspace") or jobs_dir() / job_id),
-        max_steps=run_config["max_steps"] if "max_steps" in run_config else (spec.budget.steps or 100),
-        max_wall_s=run_config["max_wall_s"] if "max_wall_s" in run_config else (int(spec.budget.wall_s) or 900),
+        max_steps=run_config["max_steps"]
+        if "max_steps" in run_config
+        else (spec.budget.steps or 100),  # noqa: SIM401
+        max_wall_s=run_config["max_wall_s"]
+        if "max_wall_s" in run_config
+        else (int(spec.budget.wall_s) or 900),
         bash_timeout_s=run_config.get("bash_timeout_s", 60),
-        bash_whitelist=frozenset(run_config.get("bash_whitelist")) if run_config.get("bash_whitelist") else DEFAULT_BASH_WHITELIST,
+        bash_whitelist=frozenset(run_config.get("bash_whitelist"))
+        if run_config.get("bash_whitelist")
+        else DEFAULT_BASH_WHITELIST,
         flag_regex=run_config.get("flag_regex"),
         model_primary=run_config.get("model_primary", "deepseek-chat"),
         model_fallback=run_config.get("model_fallback", "deepseek-reasoner"),

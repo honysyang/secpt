@@ -18,10 +18,18 @@ from pathlib import Path
 from secpt.core.job.store import JobStore
 
 EVENT_TYPES = {
-    "assistant", "tool_call", "tool_result", "finding", "round_end",
-    "budget_warning", "rollover", "status_change", "error", "compaction",
+    "assistant",
+    "tool_call",
+    "tool_result",
+    "finding",
+    "round_end",
+    "budget_warning",
+    "rollover",
+    "status_change",
+    "error",
+    "compaction",
     "routed",
-    "verdict",   # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
+    "verdict",  # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
 }
 
 
@@ -55,7 +63,7 @@ class EventSink:
     def _count_lines(self) -> int:
         if not self.events_path.exists():
             return 0
-        with open(self.events_path, "r", encoding="utf-8") as f:
+        with open(self.events_path, encoding="utf-8") as f:
             return sum(1 for _ in f)
 
     def write(self, etype: str, payload: dict, round_: int = 0) -> int:
@@ -77,7 +85,7 @@ class EventSink:
         if self.store is not None:
             try:
                 self.store.add_event(self.job_id, etype, payload, round_)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[sink] sqlite event failed (ignored): {e}")
         return self._seq
 
@@ -87,43 +95,57 @@ class EventSink:
         pass  # 步进事件可通过 events.jsonl 的 ts/seq 推演，不额外落盘
 
     def on_assistant(self, msg_dict: dict) -> None:
-        self.write("assistant", {
-            "content": (msg_dict.get("content") or "")[:2000],
-            "tool_calls": [
-                {
-                    "id": tc.get("id", ""),
-                    "name": (tc.get("function") or {}).get("name", ""),
-                    "arguments": ((tc.get("function") or {}).get("arguments", "") or "")[:500],
-                }
-                for tc in msg_dict.get("tool_calls") or []
-            ],
-        })
+        self.write(
+            "assistant",
+            {
+                "content": (msg_dict.get("content") or "")[:2000],
+                "tool_calls": [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": (tc.get("function") or {}).get("name", ""),
+                        "arguments": ((tc.get("function") or {}).get("arguments", "") or "")[:500],
+                    }
+                    for tc in msg_dict.get("tool_calls") or []
+                ],
+            },
+        )
 
     def on_tool(self, name: str, args: dict) -> None:
-        self.write("tool_call", {
-            "tool": name,
-            "args": json.dumps(args, ensure_ascii=False)[:500],
-        })
+        self.write(
+            "tool_call",
+            {
+                "tool": name,
+                "args": json.dumps(args, ensure_ascii=False)[:500],
+            },
+        )
 
     def on_result(self, call_id: str, out: str) -> None:
-        self.write("tool_result", {
-            "call_id": call_id,
-            "status": _classify_output(out),
-            "bytes": len(str(out or "")),
-            "preview": str(out or "")[:500],
-        })
+        self.write(
+            "tool_result",
+            {
+                "call_id": call_id,
+                "status": _classify_output(out),
+                "bytes": len(str(out or "")),
+                "preview": str(out or "")[:500],
+            },
+        )
 
     def on_round_end(self, round_: int, messages: list[dict]) -> None:
         # 落盘 rounds/NNN.messages.json（resume 的 checkpoint 来源）
         try:
             from secpt.core.job.rounds import save_round
+
             save_round(self.job_id, self.jobs_dir, round_, messages)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[sink] save_round failed (ignored): {e}")
-        self.write("round_end", {
-            "round": round_,
-            "n_messages": len(messages),
-        }, round_=round_)
+        self.write(
+            "round_end",
+            {
+                "round": round_,
+                "n_messages": len(messages),
+            },
+            round_=round_,
+        )
 
     def status_change(self, status: str, *, round_: int = 0, error: str = "") -> None:
         payload = {"status": status}
@@ -132,9 +154,15 @@ class EventSink:
         self.write("status_change", payload, round_=round_)
 
     def finding(self, fid: str, kind: str, value: str, evidence: str = "") -> None:
-        self.write("finding", {
-            "id": fid, "kind": kind, "value": value[:500], "evidence": evidence[:500],
-        })
+        self.write(
+            "finding",
+            {
+                "id": fid,
+                "kind": kind,
+                "value": value[:500],
+                "evidence": evidence[:500],
+            },
+        )
 
     def budget_warning(self, msg: str) -> None:
         self.write("budget_warning", {"message": msg[:500]})
@@ -150,12 +178,13 @@ class EventSink:
             return
         try:
             from secpt.core.context.budget import tokens_cost
+
             cost = tokens_cost(prompt_tokens, completion_tokens)
             rec = self.store.get_job(self.job_id)
             if rec is not None:
                 rec.cost_cny = round(rec.cost_cny + cost, 6)
                 self.store.upsert_job(rec)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[sink] on_tokens failed (ignored): {e}")
 
     def on_finding(self, kind: str, value: str, evidence: str = "") -> None:
@@ -166,31 +195,40 @@ class EventSink:
         if self.store is not None:
             try:
                 self.store.add_finding(self.job_id, fid, kind, value, evidence)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[sink] add_finding failed (ignored): {e}")
 
     def on_compaction(self, k: int, summary: str, removed: int, window: int) -> None:
         """记录一次 Compaction（S3 验收要求事件类型）。"""
-        self.write("compaction", {
-            "k": k,
-            "removed_messages": removed,
-            "window": window,
-            "summary": summary[:2000],
-        })
+        self.write(
+            "compaction",
+            {
+                "k": k,
+                "removed_messages": removed,
+                "window": window,
+                "summary": summary[:2000],
+            },
+        )
 
     def on_rollover(self, round_: int, messages: list[dict], handoff: str = "") -> None:
         """记录一次 Rollover：落 round 快照（新链）+ rollover 事件。"""
         try:
             from secpt.core.job.rounds import save_round
-            save_round(self.job_id, self.jobs_dir, round_, messages,
-                       handoff={"handoff": handoff[:2000]})
-        except Exception as e:  # noqa: BLE001
+
+            save_round(
+                self.job_id, self.jobs_dir, round_, messages, handoff={"handoff": handoff[:2000]}
+            )
+        except Exception as e:
             print(f"[sink] save_round(rollover) failed (ignored): {e}")
-        self.write("rollover", {
-            "round": round_,
-            "n_messages": len(messages),
-            "handoff": handoff[:2000],
-        }, round_=round_)
+        self.write(
+            "rollover",
+            {
+                "round": round_,
+                "n_messages": len(messages),
+                "handoff": handoff[:2000],
+            },
+            round_=round_,
+        )
 
     def on_budget_exceeded(self, messages: list[dict]) -> None:
         """预算 100% 优雅收尾：先落 findings + 阶段性 report.md，再置状态。"""
@@ -212,6 +250,6 @@ class EventSink:
             else:
                 lines.append("（暂无已落盘的 finding）")
             report.write_text("\n".join(lines), encoding="utf-8")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[sink] report.md failed (ignored): {e}")
         self.status_change("budget_exceeded")

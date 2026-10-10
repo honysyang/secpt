@@ -10,7 +10,6 @@ from secpt.config.models import GraphConfig
 from secpt.core.graph import get_graph_store
 from secpt.knowledge import Experience, ExperienceStore
 
-
 # ---- 4c Postgres ----
 
 HAS_PG = bool(os.environ.get("SECPT_TEST_PG_DSN"))
@@ -48,6 +47,7 @@ def test_postgres_factory_no_dsn() -> None:
 def test_factory_unsupported_backend() -> None:
     """未知后端在 pydantic Literal 层就被拦下（治理在配置层生效）。"""
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         GraphConfig(backend="unknown_backend")  # type: ignore[arg-type]
 
@@ -74,20 +74,24 @@ def test_experience_store_add_and_get() -> None:
 
 def test_experience_store_search() -> None:
     store = ExperienceStore()
-    store.add(Experience(
-        id="exp.1",
-        title="SSH brute force",
-        description="hydra 爆破 SSH 弱密码",
-        technique="credential_attack",
-        indicators=["ssh", "brute", "hydra"],
-    ))
-    store.add(Experience(
-        id="exp.2",
-        title="SQL injection",
-        description="union-based SQLi",
-        technique="web_injection",
-        indicators=["sqli", "union", "injection"],
-    ))
+    store.add(
+        Experience(
+            id="exp.1",
+            title="SSH brute force",
+            description="hydra 爆破 SSH 弱密码",
+            technique="credential_attack",
+            indicators=["ssh", "brute", "hydra"],
+        )
+    )
+    store.add(
+        Experience(
+            id="exp.2",
+            title="SQL injection",
+            description="union-based SQLi",
+            technique="web_injection",
+            indicators=["sqli", "union", "injection"],
+        )
+    )
     results = store.search("ssh brute")
     assert len(results) >= 1
     assert any("SSH" in r.title for r in results)
@@ -96,13 +100,15 @@ def test_experience_store_search() -> None:
 def test_experience_store_save_and_load(tmp_path) -> None:
     path = str(tmp_path / "exp.json")
     store1 = ExperienceStore(path)
-    store1.add(Experience(
-        id="exp.1",
-        title="Test",
-        description="Test description",
-        technique="test",
-        indicators=["test"],
-    ))
+    store1.add(
+        Experience(
+            id="exp.1",
+            title="Test",
+            description="Test description",
+            technique="test",
+            indicators=["test"],
+        )
+    )
     store1.save()
 
     store2 = ExperienceStore(path)
@@ -113,13 +119,15 @@ def test_experience_store_save_and_load(tmp_path) -> None:
 def test_experience_store_match_for_degradation() -> None:
     """模拟机制③：经验匹配。"""
     store = ExperienceStore()
-    store.add(Experience(
-        id="exp.1",
-        title="WordPress fingerprint",
-        description="whatweb 识别 WordPress 指纹后常见插件漏洞",
-        technique="web_fingerprint",
-        indicators=["wordpress", "wp-content", "plugin"],
-    ))
+    store.add(
+        Experience(
+            id="exp.1",
+            title="WordPress fingerprint",
+            description="whatweb 识别 WordPress 指纹后常见插件漏洞",
+            technique="web_fingerprint",
+            indicators=["wordpress", "wp-content", "plugin"],
+        )
+    )
     matches = store.match("found wordpress site with wp-content directory")
     assert len(matches) >= 1
     assert "WordPress" in matches[0].title

@@ -37,7 +37,7 @@ def sanitize_messages(messages: list[dict]) -> list[dict]:
         # 统计该 assistant 之后 tool 消息（属于它的 call_id）
         needed = {tc.get("id") for tc in tool_calls}
         have = 0
-        tail = msgs[last_assistant + 1:]
+        tail = msgs[last_assistant + 1 :]
         for m in tail:
             if m.get("role") == "tool" and m.get("tool_call_id") in needed:
                 have += 1
@@ -48,8 +48,9 @@ def sanitize_messages(messages: list[dict]) -> list[dict]:
     return msgs
 
 
-def save_round(job_id: str, jobs_dir: Path, n: int, messages: list[dict],
-               handoff: dict | None = None) -> Path:
+def save_round(
+    job_id: str, jobs_dir: Path, n: int, messages: list[dict], handoff: dict | None = None
+) -> Path:
     """落盘 round n 的 messages 快照。返回文件路径。"""
     rounds_dir = Path(jobs_dir) / job_id / "rounds"
     rounds_dir.mkdir(parents=True, exist_ok=True)

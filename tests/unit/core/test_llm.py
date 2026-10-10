@@ -17,9 +17,9 @@ from secpt.config.models import LLMConfig
 from secpt.core.llm import (
     BaseLLM,
     FakeLLM,
+    LiteLLMAdapter,
     LLMError,
     LLMMessage,
-    LiteLLMAdapter,
     get_llm,
 )
 
@@ -59,6 +59,7 @@ async def test_fake_llm_script_wraps_last() -> None:
 @pytest.mark.asyncio
 async def test_fake_llm_generator() -> None:
     """generator 回调按历史生成回复。"""
+
     def gen(history: list[LLMMessage]) -> LLMMessage:
         last_user = next((m for m in reversed(history) if m.role == "user"), None)
         text = f"echo:{last_user.content if last_user else ''}"

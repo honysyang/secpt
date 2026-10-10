@@ -11,7 +11,9 @@ from secpt.core.job.store import JobStore
 
 
 def _events_from_file(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def test_seq_contiguous(tmp_path):
@@ -27,6 +29,7 @@ def test_seq_contiguous(tmp_path):
 def test_unknown_event_type_rejected(tmp_path):
     sink = EventSink("j1", tmp_path, store=None)
     import pytest
+
     with pytest.raises(ValueError):
         sink.write("wat", {})
 
@@ -75,8 +78,17 @@ def test_hooks_all_wired(tmp_path):
     for hook in ("on_step", "on_assistant", "on_tool", "on_result", "on_round_end"):
         assert callable(getattr(sink, hook)), f"missing hook {hook}"
     # 事件类型全集（S3：compaction；S4：routed；Phase A：verdict 评判层写入）
-    assert EVENT_TYPES == {
-        "assistant", "tool_call", "tool_result", "finding", "round_end",
-        "budget_warning", "rollover", "status_change", "error", "compaction",
-        "routed", "verdict",
-    }
+    assert {
+        "assistant",
+        "tool_call",
+        "tool_result",
+        "finding",
+        "round_end",
+        "budget_warning",
+        "rollover",
+        "status_change",
+        "error",
+        "compaction",
+        "routed",
+        "verdict",
+    } == EVENT_TYPES

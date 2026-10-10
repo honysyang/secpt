@@ -70,13 +70,15 @@ def parse_nmap_xml(xml_text: str) -> list[HostInfo]:
                         if version_str:
                             version += f" {version_str}"
 
-                ports.append(PortInfo(
-                    port=port_id,
-                    protocol=protocol,
-                    state=state,
-                    service=service,
-                    version=version,
-                ))
+                ports.append(
+                    PortInfo(
+                        port=port_id,
+                        protocol=protocol,
+                        state=state,
+                        service=service,
+                        version=version,
+                    )
+                )
 
         # OS
         os_name = ""
@@ -94,24 +96,28 @@ def hosts_to_entities(hosts: list[HostInfo]) -> list[dict]:
     """把 HostInfo 转为 WorldModel 实体列表。"""
     entities: list[dict] = []
     for h in hosts:
-        entities.append({
-            "eid": f"host.{h.ip}",
-            "etype": "host",
-            "props": {"ip": h.ip, "hostname": h.hostname, "os": h.os},
-        })
+        entities.append(
+            {
+                "eid": f"host.{h.ip}",
+                "etype": "host",
+                "props": {"ip": h.ip, "hostname": h.hostname, "os": h.os},
+            }
+        )
         for p in h.ports:
             if p.state != "open":
                 continue
-            entities.append({
-                "eid": f"port.{h.ip}.{p.port}",
-                "etype": "port",
-                "props": {
-                    "port": p.port,
-                    "protocol": p.protocol,
-                    "service": p.service,
-                    "version": p.version,
-                },
-            })
+            entities.append(
+                {
+                    "eid": f"port.{h.ip}.{p.port}",
+                    "etype": "port",
+                    "props": {
+                        "port": p.port,
+                        "protocol": p.protocol,
+                        "service": p.service,
+                        "version": p.version,
+                    },
+                }
+            )
     return entities
 
 
@@ -122,11 +128,13 @@ def hosts_to_edges(hosts: list[HostInfo]) -> list[dict]:
         for p in h.ports:
             if p.state != "open":
                 continue
-            edges.append({
-                "src": f"host.{h.ip}",
-                "dst": f"port.{h.ip}.{p.port}",
-                "etype": "has_port",
-            })
+            edges.append(
+                {
+                    "src": f"host.{h.ip}",
+                    "dst": f"port.{h.ip}.{p.port}",
+                    "etype": "has_port",
+                }
+            )
     return edges
 
 

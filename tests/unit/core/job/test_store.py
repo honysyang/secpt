@@ -18,6 +18,7 @@ def _make_record(store: JobStore, job_id: str):
         allow_hosts=["10.0.0.1"],
     )
     from secpt.core.job.models import JobRecord
+
     return JobRecord(job_id=job_id, spec=spec, status="queued")
 
 
@@ -70,9 +71,10 @@ def test_wal_concurrent_write_no_deadlock(tmp_path):
     def worker(idx: int):
         try:
             for i in range(n_each):
-                store.add_event(f"job-{idx}", "tool_result",
-                                {"tool": f"t{i}", "status": "ok", "bytes": i}, 0)
-        except Exception as e:  # noqa: BLE001
+                store.add_event(
+                    f"job-{idx}", "tool_result", {"tool": f"t{i}", "status": "ok", "bytes": i}, 0
+                )
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]

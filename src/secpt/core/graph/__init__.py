@@ -10,10 +10,10 @@ from secpt.core.graph.factory import get_graph_store
 from secpt.core.graph.memory import MemoryGraphStore
 
 __all__ = [
+    "TRUST_SCORES",
     "EvidenceRecord",
     "GraphStore",
     "MemoryGraphStore",
-    "TRUST_SCORES",
     "TrustTier",
     "get_graph_store",
 ]

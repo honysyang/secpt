@@ -32,8 +32,17 @@ def extract_keywords(text: str) -> set[str]:
     for m in FLAG_RE.finditer(text):
         kws.add(f"FLAG:{m.group(0)}")
     # 错误关键词
-    for kw in ("timeout", "Connection refused", "401", "403", "404", "500",
-               "Access Denied", "Permission denied", "not found"):
+    for kw in (
+        "timeout",
+        "Connection refused",
+        "401",
+        "403",
+        "404",
+        "500",
+        "Access Denied",
+        "Permission denied",
+        "not found",
+    ):
         if kw.lower() in text.lower():
             kws.add(f"err:{kw}")
     return kws

@@ -17,6 +17,7 @@ def store(tmp_path):
     # close is idempotent via try/finally in run(); here just ensure
     try:
         import asyncio
+
         asyncio.run(s.close())
     except Exception:
         pass

@@ -20,8 +20,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
-import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -42,10 +42,10 @@ class ToolPlugin:
 
     name: str
     description: str
-    schema: dict            # OpenAI function schema（parameters 部分）
-    command: str = ""       # YAML 插件的命令模板
+    schema: dict  # OpenAI function schema（parameters 部分）
+    command: str = ""  # YAML 插件的命令模板
     timeout_s: int = 120
-    source: str = ""        # 文件路径（排障用）
+    source: str = ""  # 文件路径（排障用）
 
 
 class PluginError(Exception):
@@ -55,6 +55,7 @@ class PluginError(Exception):
 # ---------------------------------------------------------------------------
 # 加载与校验
 # ---------------------------------------------------------------------------
+
 
 def _validate(p: ToolPlugin) -> None:
     if not _NAME_RE.match(p.name):
@@ -73,7 +74,8 @@ def _validate(p: ToolPlugin) -> None:
         tpl_fields = set(_FIELD_RE.findall(p.command))
         if not tpl_fields <= set(props):
             raise PluginError(
-                f"{p.name}: 模板参数 {sorted(tpl_fields - set(props))} 未在 schema.properties 声明")
+                f"{p.name}: 模板参数 {sorted(tpl_fields - set(props))} 未在 schema.properties 声明"
+            )
 
 
 def load_yaml_plugin(path: Path) -> ToolPlugin:
@@ -118,7 +120,9 @@ def load_python_plugin(path: Path) -> dict[str, tuple[dict, object]]:
     return tools
 
 
-def discover_plugins(dirs: list[Path] | None = None) -> tuple[dict[str, ToolPlugin], dict[str, tuple[dict, object]]]:
+def discover_plugins(
+    dirs: list[Path] | None = None,
+) -> tuple[dict[str, ToolPlugin], dict[str, tuple[dict, object]]]:
     """扫描插件目录，返回 (yaml_plugins, python_tools)。非法插件跳过并告警。"""
     dirs = dirs or [PLUGINS_DIR]
     yaml_plugins: dict[str, ToolPlugin] = {}
@@ -138,7 +142,7 @@ def discover_plugins(dirs: list[Path] | None = None) -> tuple[dict[str, ToolPlug
                 continue
             try:
                 python_tools.update(load_python_plugin(f))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print(f"[plugins] 跳过非法插件 {f.name}: {e}")
     return yaml_plugins, python_tools
 
@@ -147,9 +151,9 @@ def discover_plugins(dirs: list[Path] | None = None) -> tuple[dict[str, ToolPlug
 # YAML 插件 → Engine 工具
 # ---------------------------------------------------------------------------
 
+
 def make_plugin_fn(plugin: ToolPlugin):
     """生成 async fn(args)->str：模板替换（shlex.quote）→ argv 执行。"""
-    fields = set(_FIELD_RE.findall(plugin.command))
     props = set((plugin.schema.get("properties") or {}).keys())
 
     async def fn(args: dict) -> str:
@@ -174,21 +178,20 @@ def make_plugin_fn(plugin: ToolPlugin):
             return "Error: 空命令"
         try:
             proc = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE)
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
         except FileNotFoundError:
-            return (f"Error: 命令 '{argv[0]}' 不存在。插件 {plugin.name} 需要的外部工具"
-                    f"未安装（定义于 {plugin.source}）")
-        except Exception as e:  # noqa: BLE001
+            return (
+                f"Error: 命令 '{argv[0]}' 不存在。插件 {plugin.name} 需要的外部工具"
+                f"未安装（定义于 {plugin.source}）"
+            )
+        except Exception as e:
             return f"Error: 启动失败: {e}"
         try:
-            out_b, err_b = await asyncio.wait_for(
-                proc.communicate(), timeout=plugin.timeout_s)
-        except asyncio.TimeoutError:
-            try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=plugin.timeout_s)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            except ProcessLookupError:
-                pass
             return f"Error: timeout {plugin.timeout_s}s"
         text = (out_b + (b"\n" + err_b if err_b else b"")).decode(errors="replace")
         return text[:OUT_CAP] if text.strip() else "(no output)"
@@ -196,24 +199,30 @@ def make_plugin_fn(plugin: ToolPlugin):
     return fn
 
 
-def engine_tools_for(names: list[str],
-                     dirs: list[Path] | None = None) -> dict[str, tuple[dict, object]]:
+def engine_tools_for(
+    names: list[str], dirs: list[Path] | None = None
+) -> dict[str, tuple[dict, object]]:
     """按名字装配插件工具 -> {name: (schema, fn)}（engine 的 extra_tools 格式）。"""
     yaml_plugins, python_tools = discover_plugins(dirs)
     out: dict[str, tuple[dict, object]] = {}
     for name in names:
         if name in yaml_plugins:
             p = yaml_plugins[name]
-            schema = {"type": "function", "function": {
-                "name": p.name, "description": p.description,
-                "parameters": p.schema}}
+            schema = {
+                "type": "function",
+                "function": {"name": p.name, "description": p.description, "parameters": p.schema},
+            }
             out[name] = (schema, make_plugin_fn(p))
         elif name in python_tools:
             schema, fn = python_tools[name]
-            full = {"type": "function", "function": {
-                "name": name,
-                "description": schema.get("description") or f"插件工具 {name}",
-                "parameters": schema}}
+            full = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": schema.get("description") or f"插件工具 {name}",
+                    "parameters": schema,
+                },
+            }
             out[name] = (full, fn)
         # 未命中：返回时不含该名字（调用方决定是否并入 bash 白名单）
     return out

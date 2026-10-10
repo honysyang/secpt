@@ -50,7 +50,7 @@ _BUILD_PROMPT = (
     "1. objective_summary：任务目标一句话\n"
     "2. completion_conditions：完成条件列表（3-5 条，可判定、可验证，"
     "不要规定具体 flag 格式）\n\n"
-    "只输出 JSON：{{\"objective_summary\": \"...\", \"completion_conditions\": [\"...\"]}}\n\n"
+    '只输出 JSON：{{"objective_summary": "...", "completion_conditions": ["..."]}}\n\n'
     "任务描述：\n{objective}"
 )
 
@@ -70,19 +70,22 @@ def _extract_json(text: str) -> dict | None:
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start:end + 1])
+        return json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
 
 
-async def build_rubric(objective: str, llm=None, model: str = "deepseek-chat",
-                       ground_truth: str | None = None) -> Rubric:
+async def build_rubric(
+    objective: str, llm=None, model: str = "deepseek-chat", ground_truth: str | None = None
+) -> Rubric:
     """由题面生成 rubric；LLM 不可用/解析失败时退化为以题面原文为唯一完成条件。"""
     if llm is not None:
         try:
-            text = await _acomplete(llm, [{"role": "user", "content":
-                                           _BUILD_PROMPT.format(objective=objective[:4000])}],
-                                    model)
+            text = await _acomplete(
+                llm,
+                [{"role": "user", "content": _BUILD_PROMPT.format(objective=objective[:4000])}],
+                model,
+            )
             data = _extract_json(text)
             if data and data.get("completion_conditions"):
                 return Rubric(
@@ -90,7 +93,7 @@ async def build_rubric(objective: str, llm=None, model: str = "deepseek-chat",
                     completion_conditions=[str(c) for c in data["completion_conditions"]],
                     ground_truth=ground_truth,
                 )
-        except Exception as e:  # noqa: BLE001 - 退化路径，不阻断评判
+        except Exception as e:
             print(f"[rubric] LLM 生成失败，退化使用题面原文: {e}")
     return Rubric(
         objective_summary=objective[:200],

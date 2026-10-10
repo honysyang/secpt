@@ -10,11 +10,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
 
 import structlog
 
@@ -36,7 +36,7 @@ def _get_audit_logger() -> AuditLogger:
             audit_cfg = getattr(get_settings(), "audit", None)
             if audit_cfg is not None:
                 audit_path = getattr(audit_cfg, "path", audit_path)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         _audit_logger = AuditLogger(f"{audit_path}/subprocess_audit.jsonl")
     return _audit_logger
@@ -76,9 +76,7 @@ def _validate_whitelist(cmd: str, config: ToolsConfig) -> None:
     """仅匹配基名（basename），避免路径穿透；不在白名单直接抛。"""
     base = cmd.rsplit("/", 1)[-1]
     if base not in config.whitelist:
-        raise WhitelistError(
-            f"命令 '{base}' 不在白名单内 (whitelist={config.whitelist})，拒绝执行"
-        )
+        raise WhitelistError(f"命令 '{base}' 不在白名单内 (whitelist={config.whitelist})，拒绝执行")
 
 
 async def run_whitelisted(
@@ -139,13 +137,11 @@ async def run_whitelisted(
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_val)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         proc.kill()
         # 等待进程真正退出，避免僵尸
-        try:
+        with contextlib.suppress(Exception):
             await proc.wait()
-        except Exception:  # noqa: BLE001 - 防御
-            pass
         duration_ms = (time.monotonic() - start) * 1000
         _get_audit_logger().log(
             "subprocess.exec.timeout",
@@ -162,9 +158,7 @@ async def run_whitelisted(
             audit_id=audit_id,
             whitelist_hit=True,
         )
-        raise TimeoutExpired(
-            f"命令执行超时 ({timeout_val}s) 已 kill: {command_str}"
-        ) from exc
+        raise TimeoutExpired(f"命令执行超时 ({timeout_val}s) 已 kill: {command_str}") from exc
 
     duration_ms = (time.monotonic() - start) * 1000
     returncode = proc.returncode if proc.returncode is not None else -1

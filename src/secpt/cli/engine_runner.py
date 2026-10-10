@@ -54,7 +54,6 @@ def run_engine(
     stage（多阶段编排用）：Stage 对象，覆盖 role/tools/prior/stop_condition。
     verbose：引擎步进详情输出。
     """
-    import time
 
     job_id = job_id or uuid.uuid4().hex[:8]
 
@@ -62,10 +61,12 @@ def run_engine(
         if os.environ.get("SECPT_FAKE_LLM"):
             # 与 worker 一致：SECPT_FAKE_LLM=1 时用假 LLM（无 key 可测）
             from secpt.core.job.fakellm import FakeLLM
+
             llm = FakeLLM(n_steps=max(1, (max_steps or 100) - 1), job_id=job_id)
         else:
             _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
             from secpt.runtime.llm.client import call_llm
+
             llm = call_llm
 
     jdir = jobs_dir() / job_id
@@ -75,6 +76,7 @@ def run_engine(
 
     # S4：profile 数据驱动（role/tools/terminator/budget/constraints）
     from secpt.core.profile.loader import load_profile
+
     prof = load_profile(profile)
 
     # 阶段覆盖（多阶段编排）：role/tools/prior/stop_condition
@@ -84,14 +86,12 @@ def run_engine(
     stage_stop = getattr(stage, "stop_condition", "") or ""
 
     prior_name = prior or (stage_prior or None)
-    if prior_name is not None:
-        # --prior 覆盖：显式指定先验文件（如 saml），必须存在
-        prior_text = load_prior(prior_name)
-    else:
-        prior_text = prof.prior_text()
+    # --prior 覆盖：显式指定先验文件（如 saml），必须存在；否则用 profile 先验
+    prior_text = load_prior(prior_name) if prior_name is not None else prof.prior_text()
 
     # 插件工具装配：tools 列表里已安装插件名 → extra_tools；其余按原语义并入 bash 白名单
     from secpt.tools.plugin_loader import discover_plugins, engine_tools_for
+
     _yp, _pt = discover_plugins()
     plugin_names = set(_yp) | set(_pt)
     extra_tools = engine_tools_for([t for t in stage_tools if t in plugin_names])
@@ -111,9 +111,11 @@ def run_engine(
         max_steps=prof.budget.steps if max_steps is None else max_steps,
         max_wall_s=prof.budget.wall_s if max_wall_s is None else max_wall_s,
     )
-    cfg.bash_whitelist = frozenset(_engine.DEFAULT_BASH_WHITELIST) | frozenset(
-        prof.merged_whitelist_extra()
-    ) | frozenset(t for t in bash_extra if t)
+    cfg.bash_whitelist = (
+        frozenset(_engine.DEFAULT_BASH_WHITELIST)
+        | frozenset(prof.merged_whitelist_extra())
+        | frozenset(t for t in bash_extra if t)
+    )
     # 显式窗口覆盖（如网关把 deepseek-chat 映射到 128k 上下文的 flash）：
     # SECPT_CONTEXT_WINDOW=128000；未设置则引擎按 MODEL_WINDOWS 查表
     _ctx_env = os.environ.get("SECPT_CONTEXT_WINDOW")
@@ -135,14 +137,16 @@ def run_engine(
     # 历史经验注入（learning 闭环；SECPT_EXPERIENCE=0 关闭）
     try:
         from secpt.learning.retrieve import experience_section
+
         exp_sec = experience_section(objective)
         if exp_sec:
             cfg.system_extra += "\n\n" + exp_sec
-    except Exception as e:  # noqa: BLE001 - 学习绝不影响主链路
+    except Exception as e:
         print(f"[learn] experience injection failed (ignored): {e}")
 
     # TaskSpec 快照（含 run_config，resume 时重建）
     from secpt.core.job.models import TaskBudget
+
     spec = TaskSpec(
         job_id=job_id,
         task_type=profile,
@@ -171,6 +175,7 @@ def run_engine(
     # 事件流 hooks（S3：外包 watchdog 空转检测）
     sink = EventSink(job_id, jobs_dir(), store=store)
     from secpt.core.watchdog import Watchdog
+
     hooks = Watchdog(sink, store=store, job_id=job_id)
 
     # JobRecord
@@ -179,13 +184,13 @@ def run_engine(
     sink.status_change("running")
 
     try:
-        result = asyncio.run(_engine.Engine(
-            cfg, llm=llm, hooks=hooks,
-            extra_tools=extra_tools or None, verbose=verbose).run())
-    except Exception as e:
-        result = _engine.RunResult(
-            flag=None, steps=0, wall_s=0.0, status="error", messages=[]
+        result = asyncio.run(
+            _engine.Engine(
+                cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None, verbose=verbose
+            ).run()
         )
+    except Exception as e:
+        result = _engine.RunResult(flag=None, steps=0, wall_s=0.0, status="error", messages=[])
         rec = store.get_job(job_id) or rec
         rec.set_status("failed", error=str(e))
         store.upsert_job(rec)
@@ -222,11 +227,13 @@ def resume_engine(
         if os.environ.get("SECPT_FAKE_LLM"):
             # 与 worker 一致：SECPT_FAKE_LLM=1 时用假 LLM（无 key 可测）
             from secpt.core.job.fakellm import FakeLLM
+
             max_steps = run_cfg.get("max_steps", spec.budget.steps)
             llm = FakeLLM(n_steps=max(1, max_steps - 1), job_id=job_id)
         else:
             _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
             from secpt.runtime.llm.client import call_llm
+
             llm = call_llm
 
     store = job_store or JobStore()
@@ -241,6 +248,7 @@ def resume_engine(
         # 无存档 → 从头开始（重建 system，profile 数据驱动）
         from secpt.core.profile.loader import load_profile
         from secpt.profiles import render_system_extra as _rse
+
         _prof = load_profile(spec.task_type)
         _cons = list(_prof.constraints) or [DEFAULT_CONSTRAINTS]
         if _prof.terminator.stop_condition:
@@ -256,6 +264,7 @@ def resume_engine(
 
     sink = EventSink(job_id, jobs_dir(), store=store)
     from secpt.core.watchdog import Watchdog
+
     hooks = Watchdog(sink, store=store, job_id=job_id)
     rec = store.get_job(job_id) or JobRecord(job_id=job_id, spec=spec, status="running")
     rec.set_status("running")
@@ -265,10 +274,12 @@ def resume_engine(
 
     # 快照里的插件工具重新装配（插件定义可能已更新）
     from secpt.tools.plugin_loader import engine_tools_for
+
     extra_tools = engine_tools_for(run_cfg.get("extra_tool_names") or [])
 
-    result = asyncio.run(_engine.Engine(
-        cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run())
+    result = asyncio.run(
+        _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
+    )
 
     rec = store.get_job(job_id) or rec
     rec.steps = result.steps
@@ -284,7 +295,7 @@ def resume_engine(
     return result
 
 
-def _apply_terminal_status(rec: JobRecord, result: "_engine.RunResult") -> None:
+def _apply_terminal_status(rec: JobRecord, result: _engine.RunResult) -> None:
     """RunResult.status → JobRecord.status（精确语义，超步数≠超预算）。"""
     if result.status == "error":
         rec.set_status("failed", error="engine error")

@@ -12,12 +12,10 @@ from secpt.core.tools.registry import build_registry
 from secpt.report import Finding, Report, ReportGenerator
 from secpt.runtime import subprocess as sp
 from secpt.tools.recon.more import (
-    NiktoTool,
     NslookupTool,
     PingTool,
     TracerouteTool,
     WhatWebTool,
-    WhoisTool,
 )
 from secpt.tools.recon.nmap_parser import (
     HostInfo,
@@ -26,7 +24,6 @@ from secpt.tools.recon.nmap_parser import (
     hosts_to_entities,
     parse_nmap_xml,
 )
-
 
 # ---- Fixtures ----
 
@@ -42,8 +39,16 @@ def full_whitelist(monkeypatch: pytest.MonkeyPatch):
     from secpt.config.models import ToolsConfig
 
     all_tools = [
-        "echo", "nmap", "curl", "dig",
-        "whatweb", "nikto", "nslookup", "traceroute", "whois", "ping",
+        "echo",
+        "nmap",
+        "curl",
+        "dig",
+        "whatweb",
+        "nikto",
+        "nslookup",
+        "traceroute",
+        "whois",
+        "ping",
     ]
     cfg = ToolsConfig(whitelist=all_tools)
     fake_settings = type("S", (), {"tools": cfg})()
@@ -148,7 +153,7 @@ def test_hosts_to_edges() -> None:
 
 
 def test_report_generator_create(worldmodel: WorldModel) -> None:
-    gen = ReportGenerator(worldmodel)
+    _gen = ReportGenerator(worldmodel)
     report = Report(
         title="Test Report",
         target="10.0.0.1",
