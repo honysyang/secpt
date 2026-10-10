@@ -95,7 +95,14 @@ def run_engine(
     _yp, _pt = discover_plugins()
     plugin_names = set(_yp) | set(_pt)
     extra_tools = engine_tools_for([t for t in stage_tools if t in plugin_names])
-    bash_extra = [t for t in stage_tools if t not in plugin_names]
+    # report_finding 走结构化工具通道，不进 bash 白名单
+    bash_extra = [t for t in stage_tools if t not in plugin_names and t != "report_finding"]
+
+    # report_finding：profile/stage 声明即装配的结构化发现上报工具（验证纪律入口）
+    from secpt.findings.tool import maybe_attach
+
+    extra_tools, _step_box = maybe_attach(extra_tools, stage_tools, job_id)
+    bash_extra = [t for t in bash_extra if t != "report_finding"]
 
     store = job_store or JobStore()
 
@@ -125,10 +132,15 @@ def run_engine(
     stop_cond = stage_stop or prof.terminator.stop_condition
     if stop_cond:
         constraints.append(stop_cond)
+    _tools_doc = _engine.build_tools_doc(cfg)
+    if "report_finding" in extra_tools:
+        from secpt.findings.tool import TOOL_DOC as _RF_DOC
+
+        _tools_doc += "\n" + _RF_DOC
     cfg.system_extra = render_system_extra(
         profile,
         objective=objective,
-        tools_doc=_engine.build_tools_doc(cfg),
+        tools_doc=_tools_doc,
         prior=prior_text,
         role=stage_role,
         constraints="\n".join(constraints),
@@ -177,6 +189,10 @@ def run_engine(
     from secpt.core.watchdog import Watchdog
 
     hooks = Watchdog(sink, store=store, job_id=job_id)
+    if "report_finding" in extra_tools:
+        from secpt.findings.tool import StepTracker
+
+        hooks = StepTracker(hooks, _step_box)
 
     # JobRecord
     rec = JobRecord(job_id=job_id, spec=spec, status="running")
@@ -276,7 +292,14 @@ def resume_engine(
     from secpt.tools.plugin_loader import engine_tools_for
 
     extra_tools = engine_tools_for(run_cfg.get("extra_tool_names") or [])
+    from secpt.findings.tool import StepTracker, maybe_attach
 
+    extra_tools, _step_box = maybe_attach(
+        extra_tools, run_cfg.get("extra_tool_names") or [], job_id
+    )
+
+    if "report_finding" in extra_tools:
+        hooks = StepTracker(hooks, _step_box)
     result = asyncio.run(
         _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
     )

@@ -313,6 +313,102 @@ def solve_entry(
     raise typer.Exit(code)
 
 
+@app.command("findings")
+def findings_cmd(
+    status: str | None = typer.Option(
+        None, "--status", "-s", help="按状态过滤（inferred/confirmed/...）"
+    ),
+    target: str | None = typer.Option(None, "--target", "-t", help="按目标模糊过滤"),
+    show: str | None = typer.Option(None, "--show", help="显示指定 finding 详情"),
+    mark: str | None = typer.Option(
+        None, "--mark", help="标记状态（false_positive/duplicate/ignored）"
+    ),
+) -> None:
+    """漏洞发现库：跨 job 存活的分诊视图（确认纪律：inferred 只能经 verify 升级）。"""
+    from secpt.findings.store import FindingStore
+
+    store = FindingStore()
+    if mark:
+        old = store.get(show or "")
+        if old is None:
+            typer.echo(f"Error: finding {show} 不存在", err=True)
+            raise typer.Exit(2)
+        try:
+            f = store.transition(show or "", mark)
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(2) from e
+        typer.echo(f"{f.id}: {old.status} → {f.status}（{f.title}）")
+        return
+    if show:
+        f = store.get(show)
+        if f is None:
+            typer.echo(f"Error: finding {show} 不存在", err=True)
+            raise typer.Exit(2)
+        typer.echo(f"id:         {f.id}")
+        typer.echo(f"title:      {f.title}")
+        typer.echo(
+            f"status:     {f.status}  (severity={f.severity}, confidence={f.confidence:.2f})"
+        )
+        typer.echo(f"target:     {f.target}")
+        typer.echo(f"vuln_class: {f.vuln_class}  cwe: {f.cwe or '-'}")
+        typer.echo(f"first_seen: {f.first_seen}")
+        typer.echo(f"evidence({len(f.evidence)}):")
+        for e in f.evidence:
+            typer.echo(f"  [{e.role}] {e.kind}: {e.ref[:120]}")
+        typer.echo(f"reproduction:\n{f.reproduction}")
+        if f.reproduced_by:
+            typer.echo("reproductions:")
+            for r in f.reproduced_by:
+                typer.echo(f"  {r['verdict']}  job={r['job_id']}")
+        return
+    rows = store.list(status=status, target=target)
+    if not rows:
+        typer.echo("（无 findings）")
+        return
+    typer.echo(f"{'id':16s} {'status':13s} {'sev':8s}  title / target")
+    for f in rows:
+        typer.echo(f"{f.id:16s} {f.status:13s} {f.severity:8s}  {f.title[:40]}  @{f.target[:30]}")
+
+
+@app.command("verify")
+def verify_cmd(
+    finding_id: str = typer.Argument(..., help="要对抗式复现的 finding_id"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+) -> None:
+    """对抗式自检：用与原始复现不同的路径独立再触发（唯一升级 confirmed 的入口）。"""
+    import asyncio
+
+    from secpt.findings.verify import verify_finding
+
+    try:
+        f = asyncio.run(verify_finding(finding_id, model=model))
+    except KeyError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2) from e
+    last = f.reproduced_by[-1] if f.reproduced_by else {}
+    typer.echo(f"{f.id}: verdict={last.get('verdict')} → status={f.status}")
+
+
+@app.command("retest")
+def retest_cmd(
+    finding_id: str = typer.Argument(..., help="要复测的 finding_id"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+) -> None:
+    """复测：最小化重放原始步骤（reproduced / fixed / inconclusive 三档）。"""
+    import asyncio
+
+    from secpt.findings.verify import retest_finding
+
+    try:
+        f = asyncio.run(retest_finding(finding_id, model=model))
+    except KeyError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2) from e
+    last = f.reproduced_by[-1] if f.reproduced_by else {}
+    typer.echo(f"{f.id}: verdict={last.get('verdict')}（复测不自动降级 confirmed，人工裁决）")
+
+
 @app.command("learn")
 def learn_entry(
     job_id: str | None = typer.Argument(None, help="job_id（缺省=最近一个）"),

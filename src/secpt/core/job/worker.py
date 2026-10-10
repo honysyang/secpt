@@ -181,16 +181,22 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     from secpt.tools.plugin_loader import engine_tools_for
 
     extra_tools = engine_tools_for(run_cfg.get("extra_tool_names") or [])
+    from secpt.findings.tool import StepTracker, maybe_attach
+
+    extra_tools, _step_box = maybe_attach(
+        extra_tools, run_cfg.get("extra_tool_names") or [], job_id
+    )
 
     exit_code = 3
     cancelled = False
     try:
         # S3：sink 外包 watchdog（空转检测 → paused + 换层提示），再包 cancel 钩子
         watchdog = Watchdog(sink, store=store, job_id=job_id)
+        hooks = _CancelHook(watchdog)
+        if "report_finding" in extra_tools:
+            hooks = StepTracker(hooks, _step_box)
         result = asyncio.run(
-            _engine.Engine(
-                cfg, llm=llm, hooks=_CancelHook(watchdog), extra_tools=extra_tools or None
-            ).run()
+            _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
         )
         cancelled = _stop.is_set()  # 在 finally 置位前捕获取消标志
     except Exception as e:
