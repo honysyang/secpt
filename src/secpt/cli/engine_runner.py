@@ -202,12 +202,19 @@ def run_engine(
     store.upsert_job(rec)
     sink.status_change("running")
 
+    from secpt.traffic.harness import traffic_scope
+
     try:
-        result = asyncio.run(
-            _engine.Engine(
-                cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None, verbose=verbose
-            ).run()
-        )
+        with traffic_scope(job_id, enabled=prof.traffic):
+            result = asyncio.run(
+                _engine.Engine(
+                    cfg,
+                    llm=llm,
+                    hooks=hooks,
+                    extra_tools=extra_tools or None,
+                    verbose=verbose,
+                ).run()
+            )
     except Exception as e:
         result = _engine.RunResult(flag=None, steps=0, wall_s=0.0, status="error", messages=[])
         rec = store.get_job(job_id) or rec
@@ -308,9 +315,14 @@ def resume_engine(
 
     if "report_finding" in extra_tools:
         hooks = StepTracker(hooks, _step_box)
-    result = asyncio.run(
-        _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
-    )
+    from secpt.core.profile.loader import load_profile as _load_profile
+    from secpt.traffic.harness import traffic_scope
+
+    _prof_traffic = _load_profile(spec.task_type).traffic
+    with traffic_scope(job_id, enabled=_prof_traffic):
+        result = asyncio.run(
+            _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
+        )
 
     rec = store.get_job(job_id) or rec
     rec.steps = result.steps

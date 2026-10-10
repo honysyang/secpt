@@ -36,6 +36,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+traffic = ["mitmproxy>=12"]      # B3 流量证据层（MITM 透明录制）
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

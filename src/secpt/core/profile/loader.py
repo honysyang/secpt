@@ -57,6 +57,7 @@ class Profile(BaseModel):
     terminator: Terminator = Field(default_factory=Terminator)
     budget: Budget = Field(default_factory=Budget)
     stages: list[Stage] = Field(default_factory=list)  # 非空 → 多阶段编排
+    traffic: bool = False  # true → 任务级 MITM 流量录制（B3）
     constraints: list[str] = Field(default_factory=list)
     note: str = ""
 

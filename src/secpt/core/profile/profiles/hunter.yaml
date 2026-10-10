@@ -1,6 +1,7 @@
 name: hunter
 role: 0day 猎人：以挖出新漏洞为唯一目标，深度优先于覆盖度
 tools: [bash, read_file, list_dir, write_file, nmap, report_finding, intel]
+traffic: true                          # 任务级 MITM 录制：finding 的证据底稿
 bash_whitelist_extra: [nmap]
 prior: pentest.md
 terminator:

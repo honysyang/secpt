@@ -96,6 +96,7 @@ def make_report_finding_fn(store, *, job_id: str, current_step) -> object:
                     f"OK(duplicate): 已有同类发现 {old.id}（status={old.status}），"
                     f"补充证据请用其它方式说明"
                 )
+        _attach_traffic_proof(store_obj=None, finding=f, job_id=job_id)
         store.save(f)
         return (
             f"OK: 已登记 finding {f.id}（status=inferred）。"
@@ -115,6 +116,39 @@ def engine_tool(schema_extra: dict | None = None) -> dict:
             "parameters": SCHEMA,
         },
     }
+
+
+def _attach_traffic_proof(store_obj, finding: Finding, job_id: str) -> None:
+    """B3 闭环：该 job 有流量录制时，把 target 最近一次请求快照绑定为 proof 证据。
+
+    best-effort：无录制/无匹配/任何异常都静默跳过（证据层不阻断上报）。
+    """
+    try:
+        from secpt.evidence.store import EvidenceStore
+        from secpt.traffic.store import TrafficStore, default_traffic_dir
+
+        db = default_traffic_dir() / f"{job_id}.sqlite"
+        if not db.is_file():
+            return
+        ts = TrafficStore(db)
+        host = finding.target.split("//")[-1].split("/")[0].split(":")[0]
+        hits = ts.search(host, limit=5)
+        if not hits:
+            return
+        ex_id = int(hits[-1]["id"])  # 最近一次命中
+        es = EvidenceStore()
+        blob = es.snapshot_from_exchange(ts, ex_id)
+        if blob:
+            es.attach(
+                finding.id,
+                blob,
+                "proof",
+                exchange_id=ex_id,
+                note="auto: report_finding 时绑定 target 最近请求",
+            )
+            finding.add_evidence(EvidenceRef(kind="traffic", ref=blob, role="proof"))
+    except Exception as e:
+        print(f"[findings] 流量证据绑定失败（忽略）: {e}")
 
 
 def maybe_attach(extra_tools: dict, names: list[str], job_id: str) -> tuple[dict, dict]:

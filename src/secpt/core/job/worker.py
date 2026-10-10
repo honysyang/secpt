@@ -200,9 +200,14 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         hooks = _CancelHook(watchdog)
         if "report_finding" in extra_tools:
             hooks = StepTracker(hooks, _step_box)
-        result = asyncio.run(
-            _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
-        )
+        from secpt.core.profile.loader import load_profile as _load_profile
+        from secpt.traffic.harness import traffic_scope
+
+        _prof_traffic = _load_profile(spec.task_type).traffic
+        with traffic_scope(job_id, enabled=_prof_traffic):
+            result = asyncio.run(
+                _engine.Engine(cfg, llm=llm, hooks=hooks, extra_tools=extra_tools or None).run()
+            )
         cancelled = _stop.is_set()  # 在 finally 置位前捕获取消标志
     except Exception as e:
         print(f"[worker] engine fatal: {e}", file=sys.stderr)
