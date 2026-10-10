@@ -286,17 +286,22 @@ def resume_cmd(
 @app.command("solve")
 def solve_entry(
     target: str = typer.Argument(..., help="挑战目录或题面文件（test.md/题目.md）"),
-    profile: str = typer.Option("ctf", "--profile", "-p", help="任务 profile"),
+    profile: str | None = typer.Option(
+        None, "--profile", "-p", help="任务 profile（默认自动路由：规则关键词→LLM 兜底）"
+    ),
     prior: str | None = typer.Option(None, "--prior", help="先验覆盖（默认按关键词自动匹配）"),
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
     fallback: str = typer.Option("deepseek-reasoner", "--fallback"),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
+    mode: str = typer.Option(
+        "auto", "--mode", help="执行模式：auto（默认）/ single / frontier / stages"
+    ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """一键解题（推荐主入口）：入口抽取/附件就位/先验匹配/运行/评判/学习全自动。"""
+    """一键解题（唯一用户入口）：任务类型与打法自动选择，全自动执行-评判-学习。"""
     from secpt.cli.solve import solve
 
     code = solve(
@@ -307,6 +312,7 @@ def solve_entry(
         fallback=fallback,
         wall=wall,
         steps=steps,
+        mode=mode,
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,

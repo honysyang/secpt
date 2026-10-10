@@ -124,20 +124,41 @@ def _find_ground_truth(challenge_dir: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def route_mode(prof, mode: str) -> str:
+    """执行模式自动路由（用户不需要知道单链/意图/多阶段）。
+
+    懒升级阶梯：最小充分打法——
+      profile 带 stages → stages（用户显式编排）
+      其余 → single（planner 无开销，短任务最优）
+      single 无成果 → 自动升级 frontier（solve 内失败升级，见 solve()）
+    """
+    if mode != "auto":
+        return mode
+    if getattr(prof, "stages", None):
+        return "stages"
+    return "single"
+
+
 def solve(
     target: str,
     *,
-    profile: str = "ctf",
+    profile: str | None = None,
     prior: str | None = None,
     model: str = "deepseek-chat",
     fallback: str = "deepseek-reasoner",
     wall: int = -1,
     steps: int = 0,
+    mode: str = "auto",
     judge_enable: bool = True,
     learn_enable: bool = True,
     verbose: bool = False,
 ) -> int:
-    """一键解题。返回退出码：0=完成且评判通过/拿到答案，1=未完成，2=输入错误。"""
+    """一键解题（唯一用户入口）。返回退出码：0=完成，1=未完成，2=输入错误。
+
+    两个自动决策（用户无需判断任务类型）：
+    - profile 未指定 → 规则关键词 + LLM 兜底自动路由（route_objective）
+    - 执行模式 auto → stages(若编排) / single；single 无成果自动升级 frontier
+    """
     target_p = Path(target)
     try:
         doc = _find_doc(target_p)
@@ -151,6 +172,13 @@ def solve(
     artifacts = _prepare_attachments(challenge_dir) if challenge_dir.is_dir() else []
     prior_name = prior or _auto_prior(objective)
     gt = _find_ground_truth(challenge_dir)
+
+    # profile 自动路由（用户没指定时；规则优先，LLM 兜底）
+    if profile is None or profile == "auto":
+        from secpt.core.profile.router import route_objective
+
+        profile = asyncio.run(route_objective(objective))
+        print(f"[solve] profile 自动路由 → {profile}")
 
     job_id = uuid.uuid4().hex[:8]
     spec = TaskSpec(
@@ -175,10 +203,12 @@ def solve(
     from secpt.core.job.store import JobStore
     from secpt.core.orchestrator import dag as _dag
 
+    prof = _load_profile(profile)
+    run_mode = route_mode(prof, mode)
+
     async def _run() -> dict:
         store = JobStore()
-        prof = _load_profile(profile)
-        if prof.stages:
+        if run_mode == "stages":
             from secpt.core.orchestrator.stages import run_stages
 
             return await run_stages(
@@ -192,9 +222,34 @@ def solve(
     flags = summary.get("flags") or []
     flag = flags[0] if flags else None
     print(
-        f"\n[solve] 运行结束：status={summary.get('mode')} wall={summary.get('wall_s')}s "
-        f"flag={flag or '未拿到'}"
+        f"\n[solve] 运行结束：mode={run_mode} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
     )
+
+    # 失败自动升级：single 无成果 → frontier 意图驱动继续（懒升级阶梯）
+    if run_mode == "single" and not flag and mode == "auto":
+        print("[solve] 单链未拿到成果，自动升级到意图驱动（frontier）继续...")
+        from secpt.core.orchestrator.frontier import run_frontier
+
+        retry_note = (
+            f"\n\n【首轮单链尝试未成功】已用 {summary.get('wall_s')}s。"
+            "请换技术路线深入，不要原样重跑。"
+        )
+        summary2 = asyncio.run(
+            run_frontier(
+                objective + retry_note, profile=profile, base_job_id=job_id, llm=None, model=model
+            )
+        )
+        flags2 = summary2.get("flags") or []
+        if flags2:
+            flag = flags2[0]
+            summary["flags"] = flags2
+            summary["wall_s"] = round(
+                float(summary.get("wall_s", 0)) + float(summary2.get("wall_s", 0)), 1
+            )
+        print(
+            f"[solve] frontier 续跑：flags={flags2 or '无'} "
+            f"chains={len(summary2.get('chains') or [])}"
+        )
 
     # 自动评判（best-effort，失败不阻断）
     verdict_ok = False
@@ -238,17 +293,24 @@ def _load_profile(name: str):
 
 def solve_cmd(
     target: str = typer.Argument(..., help="挑战目录或题面文件（test.md/题目.md）"),
-    profile: str = typer.Option("ctf", "--profile", "-p", help="任务 profile"),
+    profile: str | None = typer.Option(
+        None, "--profile", "-p", help="任务 profile（默认自动路由：规则关键词→LLM 兜底）"
+    ),
     prior: str | None = typer.Option(None, "--prior", help="先验覆盖（默认自动匹配）"),
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
     fallback: str = typer.Option("deepseek-reasoner", "--fallback"),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help="执行模式：auto（默认，自动选择+失败升级）/ single / frontier / stages",
+    ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """一键解题：入口抽取/附件就位/先验匹配/运行/评判/学习，全自动。"""
+    """一键解题（唯一入口）：任务类型与打法自动选择，全自动执行-评判-学习。"""
     code = solve(
         target,
         profile=profile,
@@ -257,6 +319,7 @@ def solve_cmd(
         fallback=fallback,
         wall=wall,
         steps=steps,
+        mode=mode,
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,

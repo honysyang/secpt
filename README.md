@@ -35,7 +35,7 @@ run: "getshell --target {target} --json"   # 换成你环境里真实的工具 C
 timeout_s: 300
 ```
 
-## 快速开始
+## 快速开始（唯一入口 solve）
 
 ```bash
 # 1. 准备环境
@@ -43,8 +43,11 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 export DEEPSEEK_API_KEY=<key>          # 或任意 OpenAI 兼容端点（见 docs/架构现状.md 模型路由）
 
-# 2. 一键解题（推荐主入口）
-secpt solve challenges/rois-saml-sso   # 入口/附件/先验全自动 → 运行 → AI 评判 → 经验沉淀
+# 2. 一键执行——任务类型与打法都不需要用户判断：
+secpt solve challenges/rois-saml-sso
+#    内部自动：profile 路由（规则关键词→LLM 兜底）→ 先验匹配 → 执行模式
+#    （懒升级阶梯：single → 无成果自动升级 frontier → stages 若 profile 编排）
+#    → AI 评判 → 经验沉淀。高级用户可用 -p/--prior/--mode 覆盖任何一步。
 
 # 3. 无 key 干跑（FakeLLM 全链路）
 SECPT_FAKE_LLM=1 secpt solve challenges/rois-saml-sso
