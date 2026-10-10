@@ -676,6 +676,12 @@ class Engine:
                     if removed_n:
                         summary_k += 1
                         print(f"[engine] compact #{summary_k}: 删 {removed_n} 条", file=sys.stderr)
+                        if summary_k == 5:
+                            print(
+                                "[engine] 提示：压缩已 5 次仍频繁——若网关模型为 128k 上下文，"
+                                "设 SECPT_CONTEXT_WINDOW=128000 可显著减少压缩",
+                                file=sys.stderr,
+                            )
                         if self.hooks and hasattr(self.hooks, "on_compaction"):
                             self.hooks.on_compaction(summary_k - 1, summary, removed_n, window)
 

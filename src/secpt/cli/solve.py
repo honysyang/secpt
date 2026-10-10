@@ -60,7 +60,11 @@ def _extract_entries(objective: str) -> list[str]:
 
 
 def _prepare_attachments(challenge_dir: Path) -> list[str]:
-    """解压挑战目录下的附件包到 <dir>/attachments/，返回可读源码路径列表。"""
+    """解压挑战目录下的附件包到 <dir>/attachments/，返回**绝对路径**列表。
+
+    必须绝对化：engine 的 bash 工作目录在 var/jobs/<id>/ws/，相对路径会漂移
+    （author_plus 真实运行暴露：模型读 src/author_plus/... 实际不存在）。
+    """
     out_dir = challenge_dir / "attachments"
     out_dir.mkdir(exist_ok=True)
     from secpt.challenge.attachments import AttachmentHandler
@@ -174,7 +178,9 @@ def solve(
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 2
-    challenge_dir = doc.parent
+    challenge_dir = (
+        doc.parent.resolve()
+    )  # 绝对化：附件路径注入 objective 后不能被 bash 工作目录影响
     objective = doc.read_text(encoding="utf-8", errors="replace").strip()
 
     entries = _extract_entries(objective)

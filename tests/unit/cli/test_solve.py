@@ -141,3 +141,37 @@ class TestRouteMode:
         assert _match_rules("对源码做代码审计")[0] == "codeaudit"
         assert _match_rules("红队攻防演练")[0] == "redteam"
         assert _match_rules("一次普通的渗透任务") == []  # 无命中 → LLM/默认兜底
+
+
+class TestAttachmentIndex:
+    """附件路径绝对化 + ws 索引（author_plus 路径漂移问题回归）。"""
+
+    def test_artifacts_absolute(self, tmp_path, monkeypatch):
+        import zipfile
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "题目.md").write_text("题", encoding="utf-8")
+        (tmp_path / "附件").mkdir()
+        with zipfile.ZipFile(tmp_path / "附件" / "a.zip", "w") as zf:
+            zf.writestr("src/app.js", "x")
+        found = _prepare_attachments(tmp_path)
+        assert found and all(Path(p).is_absolute() for p in found)
+
+    def test_write_index_symlink(self, tmp_path):
+        from secpt.cli.engine_runner import write_attachments_index
+
+        src = tmp_path / "challenge-attachments" / "blog"
+        src.mkdir(parents=True)
+        (src / "app.js").write_text("x", encoding="utf-8")
+        ws = tmp_path / "ws"
+        write_attachments_index(ws, [str(src)])
+        assert (ws / "ATTACHMENTS.md").is_file()
+        assert "app.js" not in (ws / "ATTACHMENTS.md").read_text(encoding="utf-8")  # 只列目录
+        assert (ws / "ATTACHMENTS.md").read_text(encoding="utf-8").count(str(src)) == 1
+        assert (ws / "attachments" / "blog" / "app.js").is_file()  # symlink 可达
+
+    def test_write_index_empty_noop(self, tmp_path):
+        from secpt.cli.engine_runner import write_attachments_index
+
+        write_attachments_index(tmp_path / "ws", [])  # 不炸
+        assert not (tmp_path / "ws" / "ATTACHMENTS.md").exists()

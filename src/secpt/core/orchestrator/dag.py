@@ -116,6 +116,7 @@ async def run_single_chain(
         max_wall_s=max_wall_s,
         model_primary=model_primary,
         model_fallback=model_fallback,
+        artifacts=spec.artifacts,
     )
     chains.append(
         {

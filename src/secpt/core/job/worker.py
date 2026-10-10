@@ -146,6 +146,9 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     ws = jdir / "ws"
     ws.mkdir(parents=True, exist_ok=True)
     cfg.workspace = ws
+    from secpt.cli.engine_runner import write_attachments_index
+
+    write_attachments_index(ws / "ws", spec.artifacts)
 
     # 全局限速（跨 job 生效）
     cfg.ratelimit = GlobalRateLimiter(

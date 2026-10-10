@@ -81,6 +81,7 @@ async def run_stages(
             model_primary=model_primary,
             model_fallback=model_fallback,
             stage=stage,
+            artifacts=spec.artifacts,
         )
         final_result = result
         total_wall += result.wall_s

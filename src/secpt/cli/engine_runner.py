@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
+from pathlib import Path
 
 from secpt.core.job.event import EventSink
 from secpt.core.job.models import JobRecord, TaskSpec
@@ -44,6 +46,34 @@ def _prod_llm():
     return call_llm
 
 
+def write_attachments_index(work_dir: Path, artifacts: list[str]) -> None:
+    """把附件索引写进工作区：ws/ATTACHMENTS.md（绝对路径清单）+ 每目录一个 symlink。
+
+    bash 的工作目录就是 ws/——有了 `attachments/xxx` 短路径，模型不会再凭感觉拼
+    `src/author_plus/...` 之类的漂移路径（author_plus 真实运行暴露的浪费源）。
+    """
+    if not artifacts:
+        return
+    try:
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        lines = ["# 附件源码索引（绝对路径为准；同名 symlink 已建在本目录下）", ""]
+        for a in artifacts:
+            ap = Path(a)
+            if not ap.is_absolute():
+                ap = ap.resolve()
+            lines.append(f"- {ap}")
+            if ap.is_dir():
+                link = work_dir / "attachments" / ap.name
+                link.parent.mkdir(exist_ok=True)
+                if not link.exists():
+                    with contextlib.suppress(OSError):
+                        link.symlink_to(ap, target_is_directory=True)
+        (work_dir / "ATTACHMENTS.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[engine] 附件索引写入失败（忽略）: {e}")
+
+
 def run_engine(
     *,
     objective: str,
@@ -51,6 +81,7 @@ def run_engine(
     prior: str | None = None,
     job_id: str | None = None,
     workspace: str | None = None,
+    artifacts: list[str] | None = None,
     max_steps: int | None = None,
     max_wall_s: int | None = None,
     model_primary: str = "deepseek-chat",
@@ -104,8 +135,15 @@ def run_engine(
     _yp, _pt = discover_plugins()
     plugin_names = set(_yp) | set(_pt)
     extra_tools = engine_tools_for([t for t in stage_tools if t in plugin_names])
-    # report_finding 走结构化工具通道，不进 bash 白名单
-    bash_extra = [t for t in stage_tools if t not in plugin_names and t != "report_finding"]
+    # 内置四工具（CORE_TOOLS）与 report_finding 走结构化通道，绝不进 bash 白名单——
+    # profile tools 里的 "bash" 是内置工具名，误并入白名单会放开 bash -lc _shell 解释
+    from secpt.core.profile.loader import CORE_TOOLS
+
+    bash_extra = [
+        t
+        for t in stage_tools
+        if t not in plugin_names and t != "report_finding" and t not in CORE_TOOLS
+    ]
 
     # report_finding：profile/stage 声明即装配的结构化发现上报工具（验证纪律入口）
     from secpt.findings.tool import maybe_attach
@@ -210,6 +248,8 @@ def run_engine(
     hooks = GraphScribe(hooks, job_id=job_id)
 
     # JobRecord
+    write_attachments_index(cfg.work_dir, artifacts or [])
+
     rec = JobRecord(job_id=job_id, spec=spec, status="running")
     store.upsert_job(rec)
     sink.status_change("running")
