@@ -83,8 +83,14 @@ class TestAutoPrior:
     def test_saml_hit(self):
         assert _auto_prior(TEST_MD) == "saml"
 
-    def test_sqli_hit(self):
-        assert _auto_prior("题目：某系统存在 SQL 注入点") == "sqli"
+    def test_uncurated_prior_skipped(self):
+        """映射表命中但 priors 文件未策划 → None（不炸任务），并提示。"""
+        assert _auto_prior("题目：某系统存在 SQL 注入点") is None
+
+    def test_curated_prior_hit(self):
+        """映射表命中且文件存在 → 返回先验名（仓库自带 saml/xss）。"""
+        assert _auto_prior("SAML 单点登录") == "saml"
+        assert _auto_prior("存储型 XSS") == "xss"
 
     def test_miss_returns_none(self):
         assert _auto_prior("一个完全无关的描述") is None
