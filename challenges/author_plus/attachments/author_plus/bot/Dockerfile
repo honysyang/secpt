@@ -1,6 +1,9 @@
-FROM node:20-buster-slim
+FROM node:20-bookworm-slim
 
 WORKDIR /app
+
+# Use npmmirror as Chrome for Testing download source (official source is often slow/unreachable)
+ENV PUPPETEER_DOWNLOAD_BASE_URL=https://cdn.npmmirror.com/binaries/chrome-for-testing
 
 RUN apt-get update && apt-get install -y \
     libnss3 \

@@ -8,7 +8,7 @@ services:
     container_name: blog-plus-app
     restart: unless-stopped
     ports:
-      - "8081:80"
+      - "18080:80"
     environment:
       - DB_HOST=blog-plus-mysql
       - DB_NAME=author
@@ -34,9 +34,9 @@ services:
     container_name: blog-plus-bot
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "18081:3000"
     environment:
-      - FLAG=RCTF{test_flag}
+      - FLAG=RCTF{local_test_flag}
       - ADMIN_EMAIL=admin@rois.team
       - ADMIN_PASSWD=admin123
       - BLOG_HOST=blog-plus-app

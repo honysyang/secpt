@@ -46,9 +46,9 @@ app.post('/audit', async (req, res) => {
             ]
         });
 
-        await browser.setCookie({ name: 'flag', value: FLAG, domain: BLOG_HOST });
-
         const page = await browser.newPage();
+
+        await page.setCookie({ name: 'flag', value: FLAG, domain: BLOG_HOST });
 
 
         await page.goto(LOGIN_URL, { timeout: 3000, waitUntil: 'domcontentloaded' })

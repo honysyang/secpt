@@ -29,6 +29,24 @@
 
 ## 纪律
 
+- **本地复现优先于盲测远程**（author_plus 教训：200 步耗在远程时序 oracle 上，
+  而附件自带 node 源码——`npm i dompurify jsdom` 本地起净化器逐 payload 验证
+  只要 10 分钟。远程 bot 每次验证 ~10s，本地无限快。顺序必须是：
+  读源码 → 本地复现净化器 → 本地复现 shield/浏览器 → 最后才打远程）
+- **盲 XSS 需要 oracle**：没有回显时，先造检测 oracle（如导航到黑洞 IP 的
+  时序差、`document.title` 变化），再批量测 payload——不要边测边改 oracle
 - 不要盲 fuzz 大字典：先读源码定位净化函数，10 次定向尝试 > 1000 次盲目 fuzz
 - 每次尝试记录"输入→净化输出"对（`record_fact`），变形模式是突破口
 - 确认触发后才 `report_finding`（inferred），拿到 flag/cookie 才算数
+
+## 多层防护拆解清单（遇到净化器+客户端 shield 组合时逐层问）
+
+1. 净化层：版本？配置（ADD_ATTR/USE_PROFILES）？宿主（jsdom scripting 开关）？
+   实体编码绕过？mXSS（序列化不转义 < 的属性值、noscript 差分）？
+2. 渲染上下文：内容进 HTML 正文还是属性？还有哪个页面回显同一份数据且防护更弱？
+3. 客户端 shield：拦了什么（列清单）？**没拦什么**——`onbegin` 等 SVGElement
+   原型上的处理器可能绕过 Element.prototype 重定义；`location.href`、
+   `document.title`、`Object.getOwnPropertyDescriptor(Document.prototype,...)`
+   常被漏网
+4. 外带：fetch/XHR 被封后还剩什么——GET 导航/meta/img.src 属性改值、
+   views 计数器、表单原生提交。外带终点必须是攻击者可读的回显点

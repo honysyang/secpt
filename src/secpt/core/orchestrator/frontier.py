@@ -261,6 +261,15 @@ async def run_frontier(
 
     from secpt.cli.engine_runner import run_engine
 
+    # llm 缺省时解析生产 LLM——planner 与 worker 共用（懒升级路径此前传 None 导致
+    # planner 静默死亡：plan_round 捕获 AttributeError 返回 0 意图）
+    if llm is None or planner_llm is None:
+        from secpt.cli.engine_runner import _prod_llm
+
+        _prod = _prod_llm()
+        llm = llm or _prod
+        planner_llm = planner_llm or _prod
+
     fr = frontier or Frontier()
     base = base_job_id or f"hunt-{uuid.uuid4().hex[:8]}"
     chains: list[dict] = []
