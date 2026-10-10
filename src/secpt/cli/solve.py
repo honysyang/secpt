@@ -94,18 +94,26 @@ def _prepare_attachments(challenge_dir: Path) -> list[str]:
 
 
 def _auto_prior(objective: str) -> str | None:
-    """关键词表匹配先验；未命中返回 None（用 profile 默认）。"""
+    """关键词表匹配先验；未命中或先验文件未策划 → None（用 profile 默认）。
+
+    只返回 priors 目录真实存在的先验——映射表是愿望清单，缺文件不炸任务。
+    """
     try:
         import yaml
 
         if not _PRIOR_MAP.is_file():
             return None
         table = yaml.safe_load(_PRIOR_MAP.read_text(encoding="utf-8")) or {}
+        priors_dir = _PRIOR_MAP.parent / "priors"
         low = objective.lower()
         for prior, keywords in table.items():
             for kw in keywords or []:
                 if str(kw).lower() in low:
-                    return str(prior)
+                    name = str(prior)
+                    if (priors_dir / f"{name}.md").is_file():
+                        return name
+                    print(f"[solve] 先验 {name!r} 未策划（priors/{name}.md 不存在），跳过")
+                    return None
     except Exception as e:
         print(f"[solve] 先验匹配失败（忽略）: {e}")
     return None
