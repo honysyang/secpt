@@ -48,9 +48,14 @@ class FindingStore:
     """漏洞库。状态迁移有白名单（确认纪律不可绕过）。"""
 
     # 合法状态迁移（confirmation discipline：inferred 只能经 verify 升级 confirmed）
+    # 9 态分诊（对齐真实 engagement 分诊生命周期）：
+    # resolved/risk_accepted=交付态，false_positive/duplicate/ignored=排除态
     TRANSITIONS: ClassVar[dict[str, set[str]]] = {
-        "inferred": {"confirmed", "false_positive", "duplicate", "ignored"},
-        "confirmed": {"false_positive", "duplicate", "ignored"},
+        "inferred": {"in_progress", "confirmed", "false_positive", "duplicate", "ignored"},
+        "in_progress": {"confirmed", "false_positive", "duplicate", "ignored"},
+        "confirmed": {"resolved", "risk_accepted", "false_positive", "duplicate", "ignored"},
+        "resolved": {"confirmed"},  # 复测 fixed 后可人工回归
+        "risk_accepted": {"confirmed"},
         "false_positive": {"inferred"},  # 误判可翻案（重新验证）
         "duplicate": set(),
         "ignored": {"inferred"},

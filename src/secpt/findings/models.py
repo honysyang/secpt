@@ -8,9 +8,18 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# 严重度（4 档）与分诊状态机（确认纪律的状态层；交付层 C1 会扩展 resolved 等）
+# 严重度（4 档）与 9 态分诊状态机（对齐真实渗透 engagement 的分诊生命周期）
 SEVERITIES = ("critical", "high", "medium", "low")
-STATUSES = ("inferred", "confirmed", "false_positive", "duplicate", "ignored")
+STATUSES = (
+    "inferred",
+    "in_progress",
+    "confirmed",
+    "resolved",
+    "risk_accepted",
+    "false_positive",
+    "duplicate",
+    "ignored",
+)
 # 证据角色：基线 / 直接证明 / 独立复现 / 辅助（对齐渗透报告惯例）
 EVIDENCE_ROLES = ("baseline", "proof", "verification", "supporting")
 
@@ -39,7 +48,16 @@ class Finding(BaseModel):
     title: str  # 一句话标题（含影响）
     vuln_class: str = ""  # 漏洞类别（自由文本；C1 映射 CWE）
     severity: Literal["critical", "high", "medium", "low"] = "medium"
-    status: Literal["inferred", "confirmed", "false_positive", "duplicate", "ignored"] = "inferred"
+    status: Literal[
+        "inferred",
+        "in_progress",
+        "confirmed",
+        "resolved",
+        "risk_accepted",
+        "false_positive",
+        "duplicate",
+        "ignored",
+    ] = "inferred"
     confidence: float = 0.5  # 发现者的把握（0-1）
 
     target: str = ""  # 目标（host/url，verify/retest 的输入）

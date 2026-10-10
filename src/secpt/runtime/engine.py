@@ -278,6 +278,22 @@ def make_tool_fns(cfg: RunConfig) -> dict:
         argv: list[str] = [exe, "-c", command] if uses_shell else parts
 
         env = os.environ.copy()
+        # 流量录制（B3）：traffic 模块启动 MITM 代理后通过环境变量宣告，
+        # 此处只认 env 不 import——零耦合。分生态 CA 变量让 curl/python/node
+        # 都信任代理 CA（绝不关 TLS 校验）
+        _proxy = os.environ.get("SECPT_PROXY_URL")
+        if _proxy:
+            ca = os.environ.get("SECPT_PROXY_CA")
+            env["HTTP_PROXY"] = env["http_proxy"] = _proxy
+            env["HTTPS_PROXY"] = env["https_proxy"] = _proxy
+            if ca:
+                for var in (
+                    "SSL_CERT_FILE",
+                    "REQUESTS_CA_BUNDLE",
+                    "NODE_EXTRA_CA_CERTS",
+                    "CURL_CA_BUNDLE",
+                ):
+                    env[var] = ca
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,

@@ -321,13 +321,35 @@ def findings_cmd(
     target: str | None = typer.Option(None, "--target", "-t", help="按目标模糊过滤"),
     show: str | None = typer.Option(None, "--show", help="显示指定 finding 详情"),
     mark: str | None = typer.Option(
-        None, "--mark", help="标记状态（false_positive/duplicate/ignored）"
+        None,
+        "--mark",
+        help="标记状态（false_positive/duplicate/ignored/resolved/risk_accepted）",
     ),
+    classify: str | None = typer.Option(None, "--classify", help="LLM 分类 CWE 并写回该 finding"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
 ) -> None:
     """漏洞发现库：跨 job 存活的分诊视图（确认纪律：inferred 只能经 verify 升级）。"""
     from secpt.findings.store import FindingStore
 
     store = FindingStore()
+    if classify:
+        import asyncio
+
+        from secpt.report import classify as _classify
+        from secpt.report import format_cwe
+
+        f = store.get(classify)
+        if f is None:
+            typer.echo(f"Error: finding {classify} 不存在", err=True)
+            raise typer.Exit(2)
+        cwes = asyncio.run(_classify(f.title, f.description, model=model))
+        if not cwes:
+            typer.echo("无可匹配 CWE（可扩充 report/cwe.py 字典）")
+            raise typer.Exit(1)
+        f.cwe = format_cwe(cwes)
+        store.save(f)
+        typer.echo(f"{f.id}: {f.cwe}")
+        return
     if mark:
         old = store.get(show or "")
         if old is None:
@@ -369,6 +391,33 @@ def findings_cmd(
     typer.echo(f"{'id':16s} {'status':13s} {'sev':8s}  title / target")
     for f in rows:
         typer.echo(f"{f.id:16s} {f.status:13s} {f.severity:8s}  {f.title[:40]}  @{f.target[:30]}")
+
+
+@app.command("report")
+def report_cmd(
+    job_id: str | None = typer.Argument(None, help="任务 job_id（缺省=全部发现）"),
+    fmt: str = typer.Option("md", "--format", "-f", help="md | md-zip | json"),
+    out: str | None = typer.Option(None, "--out", "-o", help="输出路径"),
+    stale: bool = typer.Option(False, "--stale", help="列出证据已变更、报告过期的 findings"),
+) -> None:
+    """生成渗透报告（md/md-zip/json），含 CWE 映射与证据一致性快照。"""
+    from secpt.report import ReportDelivery
+
+    rd = ReportDelivery()
+    if stale:
+        rows = rd.stale_findings()
+        if not rows:
+            typer.echo("（无过期报告）")
+            return
+        typer.echo("证据已变更、报告待更新：")
+        for f in rows:
+            typer.echo(f"  {f.id}  v{f.evidence_version}  {f.title}")
+        return
+    if fmt not in ("md", "md-zip", "json"):
+        typer.echo(f"Error: --format 只支持 md/md-zip/json，收到 {fmt!r}")
+        raise typer.Exit(2)
+    path = rd.generate(job_id=job_id, fmt=fmt, out=__import__("pathlib").Path(out) if out else None)
+    typer.echo(f"报告已生成: {path}")
 
 
 @app.command("verify")
