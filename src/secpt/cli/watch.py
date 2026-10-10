@@ -47,8 +47,7 @@ def render_event(ev: dict) -> str | None:
             lines.append(f"💬 说: {content[:_THINK_LEN]}")
         if (content or "").startswith("ANSWER"):
             lines.append(f"🏁 {content[:200]}")
-        for tc in p.get("tool_calls") or []:
-            lines.append(f"🔧 将调用 {tc.get('name')}: {tc.get('arguments', '')[:200]}")
+        # 注意：即将发生的工具调用由紧随的 tool_call 事件渲染（不重复预告）
         return "\n".join(lines) if lines else None
     if etype == "tool_call":
         return f"🔧 {p.get('tool')}: {p.get('args', '')[:220]}"

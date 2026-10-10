@@ -299,9 +299,10 @@ def solve_entry(
     ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
+    no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """一键解题（唯一用户入口）：任务类型与打法自动选择，全自动执行-评判-学习。"""
+    """一键解题（唯一用户入口）：自动选择打法，启动即自带实时交互日志。"""
     from secpt.cli.solve import solve
 
     code = solve(
@@ -316,6 +317,7 @@ def solve_entry(
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,
+        watch_enable=not no_watch,
     )
     raise typer.Exit(code)
 

@@ -160,6 +160,7 @@ def solve(
     judge_enable: bool = True,
     learn_enable: bool = True,
     verbose: bool = False,
+    watch_enable: bool = True,
 ) -> int:
     """一键解题（唯一用户入口）。返回退出码：0=完成，1=未完成，2=输入错误。
 
@@ -203,7 +204,8 @@ def solve(
     )
 
     print(f"[solve] job={job_id} profile={profile} prior={prior_name or '(profile 默认)'}")
-    print(f"[solve] 实时观察（另开终端）: secpt watch {job_id}")
+    if not watch_enable:
+        print(f"[solve] 交互日志已关闭（--no-watch）；事后回看: secpt watch {job_id} --tail 100")
     print(
         f"[solve] 入口 {len(entries)} 个，附件路径 {len(artifacts)} 个，"
         f"ground truth: {'有' if gt else '无'}"
@@ -227,7 +229,38 @@ def solve(
             spec, store=store, use_orchestrator=False, model_primary=model, model_fallback=fallback
         )
 
-    summary = asyncio.run(_run())
+    import threading
+    import time as _time
+
+    from secpt.cli.watch import render_lines
+    from secpt.core.job.resume import jobs_dir
+
+    _stop_watch = threading.Event()
+
+    def _follow_log() -> None:
+        """内嵌实时交互日志：跟随 events.jsonl 渲染到人读视图（同终端直接可见）。"""
+        path = jobs_dir() / job_id / "events.jsonl"
+        start = 0
+        while not _stop_watch.is_set():
+            if path.exists():
+                try:
+                    lines, start = render_lines(path, start)
+                    for line in lines:
+                        print(line, flush=True)
+                except OSError:
+                    pass
+            _time.sleep(0.8)
+
+    _watcher = threading.Thread(target=_follow_log, daemon=True)
+    if watch_enable:
+        _watcher.start()
+
+    try:
+        summary = asyncio.run(_run())
+    finally:
+        _stop_watch.set()
+        if watch_enable:
+            _watcher.join(timeout=2)
     flags = summary.get("flags") or []
     flag = flags[0] if flags else None
     print(
@@ -317,9 +350,10 @@ def solve_cmd(
     ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
+    no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """一键解题（唯一入口）：任务类型与打法自动选择，全自动执行-评判-学习。"""
+    """一键解题（唯一入口）：任务类型与打法自动选择，启动即自带实时交互日志。"""
     code = solve(
         target,
         profile=profile,
@@ -332,6 +366,7 @@ def solve_cmd(
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,
+        watch_enable=not no_watch,
     )
     raise typer.Exit(code)
 
