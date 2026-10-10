@@ -37,3 +37,6 @@ logs/
 tmp/
 artifacts/
 *.pcap
+
+# --- secpt runtime data（不入库） ---
+var/

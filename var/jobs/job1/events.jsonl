@@ -1,4 +1,0 @@
-{"seq": 1, "job_id": "job1", "ts": 1791471019.7064016, "round": 0, "type": "status_change", "payload": {"status": "running"}}
-{"seq": 1, "job_id": "job1", "ts": 1791471019.7083468, "round": 0, "type": "status_change", "payload": {"status": "running"}}
-{"seq": 2, "job_id": "job1", "ts": 1791471020.2666066, "round": 0, "type": "status_change", "payload": {"status": "failed"}}
-{"seq": 2, "job_id": "job1", "ts": 1791471020.312524, "round": 0, "type": "status_change", "payload": {"status": "failed"}}
