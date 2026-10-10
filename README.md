@@ -35,39 +35,27 @@ run: "getshell --target {target} --json"   # 换成你环境里真实的工具 C
 timeout_s: 300
 ```
 
-## Phase 0 目标
-
-1. 目录骨架与命名约定（仅骨架，不含业务实现）
-2. 配置约定：`config.yaml` + `.env`（pydantic-settings，env 优先）
-3. 关键技术栈的占位模块：
-   - `core/react` —— 自研 ReAct 循环
-   - `core/graph` —— GraphStore 三档后端（内存 → SQLite → Postgres）
-   - `core/llm` —— litellm 适配，DeepSeek 透传
-   - `tools` —— 白名单 subprocess 侦察工具
-   - `skills` —— 可复用技能 / 角色
-   - `cli` —— typer CLI 入口
-   - `telemetry` —— structlog 结构化日志
-   - `tests` —— pytest（含 pytest-asyncio）
-
-## 快速开始（Phase 0 占位）
+## 快速开始
 
 ```bash
 # 1. 准备环境
-cp .env.example .env          # 写入 DEEPSEEK_API_KEY
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+export DEEPSEEK_API_KEY=<key>          # 或任意 OpenAI 兼容端点（见 docs/架构现状.md 模型路由）
 
-# 2. CLI 入口（占位）
-secpt --help
-secpt doctor                 # 检查环境/配置
-secpt run --target example.com   # Phase 1+ 才会真正执行
+# 2. 一键解题（推荐主入口）
+secpt solve challenges/rois-saml-sso   # 入口/附件/先验全自动 → 运行 → AI 评判 → 经验沉淀
 
-# 3. 测试
-pytest
+# 3. 无 key 干跑（FakeLLM 全链路）
+SECPT_FAKE_LLM=1 secpt solve challenges/rois-saml-sso
 
-# 4. 复跑判据门禁（每次实战复跑后必跑）
-make recheck REPORT=data/reports/run.xxx.json
+# 4. 测试与规范
+make check                             # ruff check + ruff format --check + pytest（提交前必跑）
+make recheck REPORT=<report.json>      # 可选：复跑判据门禁
 ```
+
+> 开发约定与架构红线见 [AGENTS.md](AGENTS.md)；文档导航见 [docs/README.md](docs/README.md)；
+> 权威架构描述见 [docs/架构现状.md](docs/架构现状.md)。
 
 ## 配置优先级
 
@@ -81,34 +69,25 @@ make recheck REPORT=data/reports/run.xxx.json
 
 ```
 secpt/
-├── pyproject.toml
-├── config.yaml
-├── .env.example
+├── AGENTS.md                  # 项目约定（构建/测试/风格/红线）——修改前必读
+├── Makefile                   # make check = lint + format-check + test
+├── pyproject.toml             # ruff(line-length 100, py312) / pytest / coverage
 ├── src/secpt/
-│   ├── __init__.py
-│   ├── cli/
-│   │   └── app.py             # typer 入口（secpt 命令）
-│   ├── config/
-│   │   ├── settings.py        # pydantic-settings 根配置
-│   │   └── models.py          # 子配置模型（LLM / Graph / React / Tools / Logging / Audit）
+│   ├── cli/                   # typer 入口：solve(主) / run / judge / learn / chat / jobs
+│   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由) / intake
 │   ├── core/
-│   │   ├── react/             # 自研 ReAct 循环（think → act → observe）
-│   │   ├── graph/             # GraphStore 抽象 + memory/sqlite/postgres 三档实现
-│   │   ├── llm/               # litellm 适配，DeepSeek 透传
-│   │   └── tools/             # 工具注册中心（白名单拦截）
-│   ├── tools/
-│   │   ├── recon/             # 侦察类：nmap / curl / httpx / dig / whois
-│   │   └── web/               # web 类：phase 1+ 起步
-│   ├── skills/                # 可复用技能 / 角色（role-based）
-│   ├── telemetry/
-│   │   └── logging.py         # structlog 配置（JSON / console）
-│   ├── audit/                 # 操作审计日志（落盘不可变）
-│   └── runtime/
-│       ├── runner.py          # 顶层 run 编排
-│       └── subprocess.py      # 白名单 subprocess 封装
-├── tests/
-│   ├── conftest.py
-│   ├── unit/
-│   └── integration/
-└── data/                      # 运行时产物（gitignored）
+│   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event/manager/worker
+│   │   ├── orchestrator/      # dag 分流(默认单链) / stages 多阶段 / specialist(DAG,默认关)
+│   │   ├── profile/           # profile YAML loader + system_extra 渲染
+│   │   ├── context/           # S3 四件套：compaction / rollover / budget / summarize
+│   │   ├── memory|llm|react|graph|tools|knowledge   # 共享记忆 / litellm / 遗留兼容
+│   ├── evaluation/            # AI 评判层（anticheat→Jev→judge→verdict）
+│   ├── learning/              # 经验闭环（distill / store / retrieve）
+│   ├── tools/                 # 内置工具 + plugin_loader（plugins/ 外部能力集成）
+│   └── governance/            # scope / ratelimit / risk / audit
+├── tests/unit/**              # 255 个单测（FakeLLM 为地基，无 key 全链路可测）
+├── tools/plugins/             # 用户插件（YAML 声明式 / Python）
+├── docs/                      # 架构现状(权威) + 索引 + 实验报告
+├── var/                       # 运行时数据（jobs/knowledge/audit…，gitignored）
+└── archive/                   # 历史资料（v0.3 文档/旧格式数据），仅供考古
 ```

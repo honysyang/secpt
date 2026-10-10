@@ -29,13 +29,9 @@ def analyze(job_dir: Path) -> dict:
     assistant = sum(1 for e in events if e["type"] == "assistant")
     findings = sum(1 for e in events if e["type"] == "finding")
     err_calls = sum(
-        1 for e in events
-        if e["type"] == "tool_result" and e["payload"].get("status") != "ok"
+        1 for e in events if e["type"] == "tool_result" and e["payload"].get("status") != "ok"
     )
-    flag = any(
-        e["type"] == "finding" and e["payload"].get("kind") == "flag"
-        for e in events
-    )
+    flag = any(e["type"] == "finding" and e["payload"].get("kind") == "flag" for e in events)
     ts = [e["ts"] for e in events]
     wall = (ts[-1] - ts[0]) if ts else 0.0
     return {
@@ -68,12 +64,16 @@ def main() -> int:
         print("（未找到 ab-dag-* / ab-single-* 目录）")
         return 1
 
-    print(f"{'job_id':<14s} {'mode':<7s} {'flag':<4s} {'steps':>5s} "
-          f"{'wall_s':>9s} {'findings':>8s} {'err_calls':>9s}")
+    print(
+        f"{'job_id':<14s} {'mode':<7s} {'flag':<4s} {'steps':>5s} "
+        f"{'wall_s':>9s} {'findings':>8s} {'err_calls':>9s}"
+    )
     for jid, mode, r in rows:
-        print(f"{jid:<14s} {mode:<7s} {'yes' if r['flag'] else 'no':<4s} "
-              f"{r['assistant']:>5d} {r['wall']:>9.1f} {r['findings']:>8d} "
-              f"{r['err_calls']:>9d}")
+        print(
+            f"{jid:<14s} {mode:<7s} {'yes' if r['flag'] else 'no':<4s} "
+            f"{r['assistant']:>5d} {r['wall']:>9.1f} {r['findings']:>8d} "
+            f"{r['err_calls']:>9d}"
+        )
 
     print("")
     for mode in ("dag", "single"):
@@ -85,8 +85,10 @@ def main() -> int:
         avg_steps = sum(r["assistant"] for r in sel) / len(sel)
         avg_wall = sum(r["wall"] for r in sel) / len(sel)
         avg_err = sum(r["err_calls"] for r in sel) / len(sel)
-        print(f"{mode:<7s} 成功率 {n_ok}/{len(sel)}  平均步数 {avg_steps:.1f}  "
-              f"平均墙钟 {avg_wall:.1f}s  平均错误调用 {avg_err:.1f}")
+        print(
+            f"{mode:<7s} 成功率 {n_ok}/{len(sel)}  平均步数 {avg_steps:.1f}  "
+            f"平均墙钟 {avg_wall:.1f}s  平均错误调用 {avg_err:.1f}"
+        )
 
     return 0
 

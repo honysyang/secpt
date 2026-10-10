@@ -36,6 +36,7 @@ def _load_report(path: str | None) -> dict[str, Any]:
 # 判据 1：spawn_root goal 含真实 target
 # ---------------------------------------------------------------------------
 
+
 def check_spawn_root_goal(report: dict[str, Any]) -> tuple[bool, str]:
     """检查根节点 goal 是否包含真实 target（不得为 unknown）。"""
     genome = report.get("genome_summary", {})
@@ -61,6 +62,7 @@ def check_spawn_root_goal(report: dict[str, Any]) -> tuple[bool, str]:
 # 判据 2：首拍存在 list_dir 或 read_file 的成功记录
 # ---------------------------------------------------------------------------
 
+
 def check_first_beat_file_op(report: dict[str, Any]) -> tuple[bool, str]:
     """检查首拍是否有 list_dir 或 read_file 的成功调用。"""
     trajectory = report.get("trajectory", {})
@@ -82,16 +84,19 @@ def check_first_beat_file_op(report: dict[str, Any]) -> tuple[bool, str]:
     for entry in all_entries[:5]:  # 看前 5 拍
         action = entry.get("action", "")
         observation = entry.get("observation", "")
-        if action in ("list_dir", "read_file"):
-            if not observation.startswith("Error"):
-                return True, f"首拍 {action} 成功: {observation[:60]}"
+        if action in ("list_dir", "read_file") and not observation.startswith("Error"):
+            return True, f"首拍 {action} 成功: {observation[:60]}"
 
-    return False, f"前 5 拍无成功的 list_dir/read_file，动作: {[e.get('action') for e in all_entries[:5]]}"
+    return (
+        False,
+        f"前 5 拍无成功的 list_dir/read_file，动作: {[e.get('action') for e in all_entries[:5]]}",
+    )
 
 
 # ---------------------------------------------------------------------------
 # 判据 3：format_error 占比 < 10%
 # ---------------------------------------------------------------------------
+
 
 def check_format_error_ratio(report: dict[str, Any]) -> tuple[bool, str]:
     """检查 format_error 占比是否 < 10%。"""
@@ -117,6 +122,7 @@ def check_format_error_ratio(report: dict[str, Any]) -> tuple[bool, str]:
 # 判据 4：存在 tool_calls > 0 的 LLM 调用
 # ---------------------------------------------------------------------------
 
+
 def check_tool_calls_used(report: dict[str, Any]) -> tuple[bool, str]:
     """检查是否存在 tool_calls > 0 的调用。"""
     trajectory = report.get("trajectory", {})
@@ -134,9 +140,7 @@ def check_tool_calls_used(report: dict[str, Any]) -> tuple[bool, str]:
 
     # 也检查 thought 字段（结构化调用时 thought 通常非空）
     has_thought = any(
-        entry.get("thought", "")
-        for entries in trajectory.values()
-        for entry in entries
+        entry.get("thought", "") for entries in trajectory.values() for entry in entries
     )
     if has_thought:
         return True, "trajectory 含 thought（结构化路径）"
@@ -147,6 +151,7 @@ def check_tool_calls_used(report: dict[str, Any]) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 判据 5：连续失败时 score 单调下降
 # ---------------------------------------------------------------------------
+
 
 def check_score_monotonic_decrease(report: dict[str, Any]) -> tuple[bool, str]:
     """检查连续失败时 score 是否单调下降（不得上升）。"""
@@ -161,7 +166,7 @@ def check_score_monotonic_decrease(report: dict[str, Any]) -> tuple[bool, str]:
         failure_streaks: list[list[float]] = []
         current_streak: list[float] = []
 
-        for node_id, entries in trajectory.items():
+        for entries in trajectory.values():
             for entry in entries:
                 obs = entry.get("observation", "")
                 # 从 observation 提取 score 信息（如果有）
@@ -191,7 +196,10 @@ def check_score_monotonic_decrease(report: dict[str, Any]) -> tuple[bool, str]:
         if len(score_list) >= 2:
             for i in range(1, len(score_list)):
                 if score_list[i] > score_list[i - 1]:
-                    return False, f"node {node_id} score 上升: {score_list[i-1]} → {score_list[i]}"
+                    return (
+                        False,
+                        f"node {node_id} score 上升: {score_list[i - 1]} → {score_list[i]}",
+                    )
 
     return True, "score 单调性通过"
 
@@ -199,6 +207,7 @@ def check_score_monotonic_decrease(report: dict[str, Any]) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 判据 6：saml 被调用（真题场景）
 # ---------------------------------------------------------------------------
+
 
 def check_saml_called(report: dict[str, Any]) -> tuple[bool, str]:
     """检查 saml 工具是否被调用。"""
@@ -254,7 +263,7 @@ def main() -> int:
     for name, check_fn in CHECKS:
         try:
             ok, detail = check_fn(report)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ok, detail = False, f"检查异常: {exc}"
 
         status = "PASS" if ok else "FAIL"

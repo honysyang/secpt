@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -22,10 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # 防止 _api_key() 拦截（fake llm 不需要 key，但 engine_runner 会检查）
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-fake-for-verify")
 
-from secpt.cli.engine_runner import resume_engine, run_engine  # noqa: E402
-from secpt.core.job.resume import jobs_dir  # noqa: E402
-from secpt.core.job.rounds import load_latest_round  # noqa: E402
-from secpt.core.job.store import JobStore  # noqa: E402
+from secpt.cli.engine_runner import resume_engine, run_engine
+from secpt.core.job.resume import jobs_dir
+from secpt.core.job.store import JobStore
 
 
 class FakeLLM:
@@ -42,15 +40,19 @@ class FakeLLM:
         if step > self.n:
             # 结束后：输出 ANSWER 结束
             return _resp({"role": "assistant", "content": f"ANSWER: FLAG{{done_{self.prefix}}}"})
-        return _resp({
-            "role": "assistant",
-            "content": f"step {step}",
-            "tool_calls": [{
-                "id": f"{self.prefix}-call-{step}",
-                "type": "function",
-                "function": {"name": "bash", "arguments": json.dumps({"command": "ls"})},
-            }],
-        })
+        return _resp(
+            {
+                "role": "assistant",
+                "content": f"step {step}",
+                "tool_calls": [
+                    {
+                        "id": f"{self.prefix}-call-{step}",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": json.dumps({"command": "ls"})},
+                    }
+                ],
+            }
+        )
 
 
 def _resp(msg_dict: dict):
@@ -109,8 +111,9 @@ def main() -> int:
     assert rounds, "rounds/ 无存档"
 
     events_before = [
-        json.loads(line) for line in
-        (jdir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in (jdir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     n_events_before = len(events_before)
     last_seq_before = events_before[-1]["seq"]
@@ -127,16 +130,21 @@ def main() -> int:
     assert r2.steps == 6, r2.steps
 
     events_after = [
-        json.loads(line) for line in
-        (jdir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in (jdir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     seqs = [e["seq"] for e in events_after]
     assert seqs == list(range(1, len(seqs) + 1)), f"seq 不连续: {seqs}"
     # 不能重头再来：新 seq 从 last_seq_before+1 开始增长
     new_events = [e for e in events_after if e["seq"] > last_seq_before]
     assert new_events, "resume 后没有新增事件（重头再来或没跑）"
-    assert new_events[0]["seq"] == last_seq_before + 1, f"seq 断裂: {new_events[0]['seq']} != {last_seq_before+1}"
-    print(f"[2] resume 后新增 {len(new_events)} 条事件, 新 seq 从 {new_events[0]['seq']} 开始（连续）")
+    assert new_events[0]["seq"] == last_seq_before + 1, (
+        f"seq 断裂: {new_events[0]['seq']} != {last_seq_before + 1}"
+    )
+    print(
+        f"[2] resume 后新增 {len(new_events)} 条事件, 新 seq 从 {new_events[0]['seq']} 开始（连续）"
+    )
 
     # jobs 表状态
     rec = store.get_job(job_id)

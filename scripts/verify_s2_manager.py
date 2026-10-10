@@ -20,9 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-fake-for-verify")
 os.environ["SECPT_FAKE_LLM"] = "1"
 
-from secpt.core.job.manager import JobManager  # noqa: E402
-from secpt.core.job.models import TaskBudget, TaskSpec  # noqa: E402
-from secpt.core.job.resume import jobs_dir  # noqa: E402
+from secpt.core.job.manager import JobManager
+from secpt.core.job.models import TaskBudget, TaskSpec
+from secpt.core.job.resume import jobs_dir
 
 
 def _spec(job_id: str) -> TaskSpec:
@@ -50,8 +50,13 @@ def main() -> int:
         if not cancelled and time.time() - t0 >= 0.8:
             mgr.cancel("job2")
             cancelled = True
-        remaining = [j for j in ("job1", "job2", "job3") if mgr.get(j) and mgr.get(j).status not in
-                     ("succeeded", "failed", "budget_exceeded", "cancelled", "stuck")]
+        remaining = [
+            j
+            for j in ("job1", "job2", "job3")
+            if mgr.get(j)
+            and mgr.get(j).status
+            not in ("succeeded", "failed", "budget_exceeded", "cancelled", "stuck")
+        ]
         if not remaining:
             break
         time.sleep(0.5)
@@ -71,7 +76,6 @@ def main() -> int:
 
     # 判据 2：ws 独立，无跨写
     ws1 = jobs_dir() / "job1" / "ws"
-    ws2 = jobs_dir() / "job2" / "ws"
     ws3 = jobs_dir() / "job3" / "ws"
     f1 = {p.name for p in ws1.rglob("*") if p.is_file()}
     f3 = {p.name for p in ws3.rglob("*") if p.is_file()}

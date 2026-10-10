@@ -19,14 +19,14 @@ import tempfile
 from pathlib import Path
 
 os.environ["SECPT_FAKE_LLM"] = "1"
-os.environ["SECPT_FAKE_WINDOW"] = "8000"   # 假装窗口只有 8K，强制触发
+os.environ["SECPT_FAKE_WINDOW"] = "8000"  # 假装窗口只有 8K，强制触发
 
-from secpt.core.job.event import EventSink  # noqa: E402
-from secpt.core.job.fakellm import FakeLLM  # noqa: E402
-from secpt.core.job.models import JobRecord  # noqa: E402
-from secpt.core.job.store import JobStore  # noqa: E402
-from secpt.core.watchdog import Watchdog  # noqa: E402
-from secpt.runtime.engine import Engine, RunConfig  # noqa: E402
+from secpt.core.job.event import EventSink
+from secpt.core.job.fakellm import FakeLLM
+from secpt.core.job.models import JobRecord
+from secpt.core.job.store import JobStore
+from secpt.core.watchdog import Watchdog
+from secpt.runtime.engine import Engine, RunConfig
 
 JOB_ID = "s3fake"
 EXPECTED_FLAG = "FLAG{s3fake_done}"
@@ -58,6 +58,7 @@ def main() -> int:
         store = JobStore(db)
         sink = EventSink(JOB_ID, jobs_dir, store=store)
         from secpt.core.job.models import TaskSpec
+
         rec = JobRecord(
             job_id=JOB_ID,
             spec=TaskSpec(job_id=JOB_ID, objective=cfg.objective),
@@ -69,13 +70,19 @@ def main() -> int:
 
         # ---- 判据 ----
         events = _events(sink.events_path)
-        rounds = sorted((jobs_dir / JOB_ID / "rounds").glob("*.messages.json")) \
-            if (jobs_dir / JOB_ID / "rounds").is_dir() else []
+        rounds = (
+            sorted((jobs_dir / JOB_ID / "rounds").glob("*.messages.json"))
+            if (jobs_dir / JOB_ID / "rounds").is_dir()
+            else []
+        )
         compactions = [e for e in events if e["type"] == "compaction"]
         rollovers = [e for e in events if e["type"] == "rollover"]
         handoffs = [e["payload"].get("handoff", "") for e in rollovers]
-        pauses = [e for e in events if e["type"] == "status_change"
-                  and e["payload"].get("status") == "paused"]
+        pauses = [
+            e
+            for e in events
+            if e["type"] == "status_change" and e["payload"].get("status") == "paused"
+        ]
 
         final_rec = store.get_job(JOB_ID)
         cost = final_rec.cost_cny if final_rec else 0.0

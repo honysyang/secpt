@@ -98,7 +98,7 @@ def main(argv: list[str]) -> int:
     Path("spec.yaml").write_text(out, encoding="utf-8")
 
     lines = out.splitlines()
-    for i, line in enumerate(lines[:20]):
+    for line in lines[:20]:
         print(line)
     if len(lines) > 20:
         print(f"... (共 {len(lines)} 行)")
