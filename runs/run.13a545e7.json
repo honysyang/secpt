@@ -1,0 +1,56 @@
+{
+  "run_id": "run.13a545e7",
+  "challenge_id": "",
+  "genome_summary": {},
+  "started_at": "2026-10-08T14:53:34.746859Z",
+  "ended_at": null,
+  "duration_s": 1.0,
+  "wavefronts": [],
+  "node_tree": [],
+  "graph_stats": [],
+  "trajectory": {},
+  "metrics": {},
+  "token_metrics": {
+    "total_calls": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "estimated_cost_usd": 0.0,
+    "by_model": {}
+  },
+  "timing": {
+    "duration_s": 0.0,
+    "avg_wavefront_s": 0.0,
+    "max_wavefront_s": 0.0,
+    "min_wavefront_s": 0.0,
+    "llm_total_s": 0.0,
+    "tool_total_s": 0.0,
+    "overhead_s": 0.0
+  },
+  "observability": {
+    "llm_calls": 0,
+    "tool_calls": 0,
+    "tool_errors": 0,
+    "format_errors": 0,
+    "dedup_hits": 0,
+    "nodes_spawned": 0,
+    "nodes_dead": 0,
+    "nodes_degraded": 0,
+    "wavefronts": 0
+  },
+  "evaluation": {
+    "success": false,
+    "flag_found": false,
+    "flag_value": "",
+    "score": 0.0,
+    "grade": "F",
+    "breakdown": {}
+  },
+  "debug": {
+    "run_id": "",
+    "log_file": "",
+    "report_file": "",
+    "config_snapshot": {},
+    "errors": []
+  }
+}

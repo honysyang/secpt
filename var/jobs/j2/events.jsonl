@@ -1,0 +1,2 @@
+{"seq": 1, "job_id": "j2", "ts": 1791471019.3258975, "round": 0, "type": "status_change", "payload": {"status": "running"}}
+{"seq": 2, "job_id": "j2", "ts": 1791471020.0867782, "round": 0, "type": "status_change", "payload": {"status": "failed"}}

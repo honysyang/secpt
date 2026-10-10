@@ -1,0 +1,19 @@
+{"seq": 1, "job_id": "cli-verify-dag", "ts": 1791555687.44838, "round": 0, "type": "status_change", "payload": {"status": "running"}}
+{"seq": 2, "job_id": "cli-verify-dag", "ts": 1791555687.9920907, "round": 0, "type": "assistant", "payload": {"content": "fake step 1", "tool_calls": [{"id": "fake-cli-verify-dag-1", "name": "bash", "arguments": "{\"command\": \"ls\"}"}]}}
+{"seq": 3, "job_id": "cli-verify-dag", "ts": 1791555689.3085907, "round": 0, "type": "tool_call", "payload": {"tool": "bash", "args": "{\"command\": \"ls\"}"}}
+{"seq": 4, "job_id": "cli-verify-dag", "ts": 1791555689.6188707, "round": 0, "type": "tool_result", "payload": {"call_id": "fake-cli-verify-dag-1", "status": "empty", "bytes": 0, "preview": ""}}
+{"seq": 5, "job_id": "cli-verify-dag", "ts": 1791555689.7478514, "round": 0, "type": "round_end", "payload": {"round": 0, "n_messages": 3}}
+{"seq": 6, "job_id": "cli-verify-dag", "ts": 1791555690.6210406, "round": 0, "type": "assistant", "payload": {"content": "fake step 2", "tool_calls": [{"id": "fake-cli-verify-dag-2", "name": "bash", "arguments": "{\"command\": \"ls\"}"}]}}
+{"seq": 7, "job_id": "cli-verify-dag", "ts": 1791555691.3077214, "round": 0, "type": "tool_call", "payload": {"tool": "bash", "args": "{\"command\": \"ls\"}"}}
+{"seq": 8, "job_id": "cli-verify-dag", "ts": 1791555691.7602694, "round": 0, "type": "tool_result", "payload": {"call_id": "fake-cli-verify-dag-2", "status": "empty", "bytes": 0, "preview": ""}}
+{"seq": 9, "job_id": "cli-verify-dag", "ts": 1791555692.1819615, "round": 0, "type": "round_end", "payload": {"round": 0, "n_messages": 5}}
+{"seq": 10, "job_id": "cli-verify-dag", "ts": 1791555692.7352266, "round": 0, "type": "assistant", "payload": {"content": "fake step 3", "tool_calls": [{"id": "fake-cli-verify-dag-3", "name": "bash", "arguments": "{\"command\": \"ls\"}"}]}}
+{"seq": 11, "job_id": "cli-verify-dag", "ts": 1791555693.12273, "round": 0, "type": "tool_call", "payload": {"tool": "bash", "args": "{\"command\": \"ls\"}"}}
+{"seq": 12, "job_id": "cli-verify-dag", "ts": 1791555693.485976, "round": 0, "type": "tool_result", "payload": {"call_id": "fake-cli-verify-dag-3", "status": "empty", "bytes": 0, "preview": ""}}
+{"seq": 13, "job_id": "cli-verify-dag", "ts": 1791555693.9994128, "round": 0, "type": "round_end", "payload": {"round": 0, "n_messages": 7}}
+{"seq": 14, "job_id": "cli-verify-dag", "ts": 1791555694.5502667, "round": 0, "type": "assistant", "payload": {"content": "ANSWER: FLAG{cli-verify-dag_done}", "tool_calls": []}}
+{"seq": 15, "job_id": "cli-verify-dag", "ts": 1791555695.271386, "round": 0, "type": "assistant", "payload": {"content": "ANSWER: FLAG{cli-verify-dag_done}", "tool_calls": []}}
+{"seq": 16, "job_id": "cli-verify-dag", "ts": 1791555695.2716289, "round": 0, "type": "assistant", "payload": {"content": "ANSWER: FLAG{cli-verify-dag_done}", "tool_calls": []}}
+{"seq": 17, "job_id": "cli-verify-dag", "ts": 1791555696.0417075, "round": 0, "type": "finding", "payload": {"id": "flag", "kind": "flag", "value": "FLAG{cli-verify-dag_done}", "evidence": "orchestrator"}}
+{"seq": 18, "job_id": "cli-verify-dag", "ts": 1791555696.3315115, "round": 0, "type": "finding", "payload": {"id": "flag", "kind": "flag", "value": "FLAG{cli-verify-dag_done}", "evidence": "orchestrator"}}
+{"seq": 19, "job_id": "cli-verify-dag", "ts": 1791555697.002728, "round": 0, "type": "status_change", "payload": {"status": "succeeded"}}

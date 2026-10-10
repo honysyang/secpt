@@ -1,0 +1,63 @@
+spec:
+  job_id: verify-single-accept2
+  task_type: ctf
+  objective: '题目：ROIS 公司上线了一套统一身份认证中心，为旗下所有内部服务提供基于 SAML 的单点登录。最新接入该联邦的是一台机密存储服务：只有管理员才有权打开它的管理后台，读取其中的
+    FLAG。
+
+
+    内网地址 : 192.168.1.195
+
+    访问环境 :
+
+    http 10.30.15.1 58595 服务：http://oj-10-30-15-1-58595.adworld.xctf.org.cn/
+
+    http 10.30.15.1 49263 服务：http://oj-10-30-15-1-49263.adworld.xctf.org.cn/
+
+
+    附件：https://adworld.xctf.org.cn/file/ad/tenant/default/question_attachment/834/621/b5684ebf8bf4f57da90980b956ba55fb.zip?attname=5712ec10df6b47dca031b559c61e8b13.zip
+
+
+    【目标入口】
+
+    - http://oj-10-30-15-1-58595.adworld.xctf.org.cn/
+
+    - http://oj-10-30-15-1-49263.adworld.xctf.org.cn/'
+  priority: 0
+  allow_hosts: []
+  deny_hosts: []
+  max_rps: 0.0
+  budget:
+    wall_s: 900.0
+    steps: 100
+    rounds: 0
+    cost_cny: 0.0
+  artifacts: []
+  entries: []
+run_config:
+  workspace: var/jobs/verify-single-accept2
+  max_steps: 100
+  max_wall_s: 900.0
+  bash_timeout_s: 60
+  bash_whitelist:
+  - awk
+  - base64
+  - cat
+  - curl
+  - file
+  - grep
+  - ls
+  - nmap
+  - openssl
+  - python3
+  - sed
+  - whatweb
+  - xxd
+  flag_regex: null
+  model_primary: deepseek-chat
+  model_fallback: deepseek-reasoner
+  stuck_threshold: 6
+  stuck_increment: 2
+  context_window: 64000
+  budget_cost_cny: 0.0
+  round_max_steps: 60
+  round_max_wall_s: 1500

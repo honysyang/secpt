@@ -1,0 +1,18 @@
+spec:
+  job_id: stuck1
+  task_type: generic
+  objective: objective stuck1
+  priority: 0
+  prior: null
+  allow_hosts: []
+  deny_hosts: []
+  max_rps: 0.0
+  budget:
+    wall_s: 60.0
+    steps: 5
+    rounds: 0
+    cost_cny: 0.0
+  artifacts: []
+  entries: []
+run_config:
+  db_path: /tmp/pytest-of-kali/pytest-50/test_stuck_detection0/t.sqlite

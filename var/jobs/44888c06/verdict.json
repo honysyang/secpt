@@ -1,0 +1,16 @@
+{
+  "job_id": "44888c06",
+  "complete": true,
+  "confidence": 0.3,
+  "method": "heuristic",
+  "satisfied_conditions": [],
+  "evidence_quote": "",
+  "reasoning": "LLM judge 不可用（judge 输出不可解析: 'fake step 1'），启发式兜底：自报答案=有，答案在工具输出中=False；需真实 judge 复核",
+  "anticheat": {
+    "answer_in_outputs": false,
+    "local_answer_file_read": false,
+    "suspicious": [],
+    "hard_fail": false
+  },
+  "created_at": 1791564084.5366888
+}

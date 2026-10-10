@@ -1,0 +1,11 @@
+# 先验自动匹配表：题面关键词 → knowledge/priors/<name>.md
+# secpt solve 用 objective 做子串匹配（小写），命中第一个即用对应先验；
+# 未命中则回退 profile 默认先验。用户可自由增删（通用机制，不针对具体靶场）。
+saml: [saml, sso, 单点登录, 联邦认证, identity provider, idp]
+sqli: [sql 注入, sql injection, sqli, 注入点]
+xss: [xss, 跨站脚本, 存储型, 反射型]
+deser: [反序列化, deserialization, pickle, java serialize]
+ssrf: [ssrf, 服务端请求伪造]
+fileupload: [文件上传, upload, 任意文件]
+jwt: [jwt, json web token, 弱密钥]
+crypto: [密码学, 伪随机, prng, rsa, 弱加密]

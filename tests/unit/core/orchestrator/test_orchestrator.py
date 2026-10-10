@@ -1,0 +1,290 @@
+"""S5 Specialist 编排（DAG）单测。
+
+覆盖验收判据的核心：
+- 单入口（N==1）→ 编排层休眠，直连单链（红线 2，无 recon / 无 warroom）
+- 多入口（N>=2）→ recon → [exploit×N 并行] → verify：
+    - warroom 有数据（assets / attempts）
+    - 两条并行链各自落盘 round 1000 / 2000 的 checkpoint（判据 1 交织）
+    - verified >= 1 finding，flags == N（判据 3）
+- --no-orchestrator 对照 → 强制单链，verified==0，发现数少于 DAG（红线 2）
+- TaskSpec.entries 字段解析
+
+RoleAwareFakeLLM：按 system 内容区分角色（recon / exploit），全程不碰真实 API；
+flag 样式刻意用非固定格式（RCTF{...}），验证"AI 自评估、样式不固定"。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+
+import pytest
+import yaml as _yaml
+
+from secpt.core.job.models import TaskSpec
+from secpt.core.job.store import JobStore
+from secpt.core.orchestrator.dag import run_task, entries_of, needs_orchestrator
+
+# 从 system 的工具说明里提取 work_dir（write_file 落盘目录）
+_WORKDIR_RE = re.compile(r"写文件到 (.+?)/ 下")
+
+
+# ---------------------------------------------------------------------------
+# RoleAwareFakeLLM：按 system 内容扮演角色
+# ---------------------------------------------------------------------------
+
+class RoleAwareFakeLLM:
+    """多角色假 LLM：recon 写 assets.json 后自宣告；exploit/单链 bash 后自宣告 flag。"""
+
+    def __init__(self, n_bash: int = 1) -> None:
+        self.n_bash = n_bash
+        self.calls = 0
+
+    async def call(self, messages, tools, model):
+        self.calls += 1
+        system = messages[0]["content"] if messages else ""
+        if "资产侦察" in system:
+            return self._recon_step(messages)
+        m = re.search(r"exploit entry#(\d+)", system)
+        idx = int(m.group(1)) if m else -1
+        return self._exploit_step(messages, idx)
+
+    # ---------------- recon：写资产清单 → 自宣告 ----------------
+    def _recon_step(self, messages):
+        # 首次调用：把两条资产写进 ws/assets.json
+        if not any(m.get("role") == "tool" for m in messages):
+            work_dir = _WORKDIR_RE.search(messages[0]["content"]).group(1)
+            content = json.dumps([
+                {"host": "127.0.0.1", "port": 8001, "service": "http", "tech": "nginx"},
+                {"host": "127.0.0.1", "port": 8002, "service": "http", "tech": "flask"},
+            ], ensure_ascii=False)
+            return _resp_assistant(tool_calls=[_tc("recon-write", "write_file", {
+                "path": f"{work_dir}/assets.json", "content": content})])
+        return _resp_assistant(content="ANSWER: RECON_DONE")
+
+    # ---------------- exploit / 通用单链：bash → 自宣告 flag ----------------
+    def _exploit_step(self, messages, idx):
+        used_bash = sum(1 for m in messages if m.get("role") == "tool")
+        if used_bash < self.n_bash:
+            return _resp_assistant(tool_calls=[_tc(
+                f"exploit-{idx}-b", "bash", {"command": "echo probe"})])
+        if idx >= 0:
+            flag = f"RCTF{{entry_{idx}_got_it}}"
+        else:
+            flag = f"RCTF{{single_{uuid.uuid4().hex[:6]}}}"
+        return _resp_assistant(content=f"ANSWER: {flag}")
+
+
+# ---------------- 模拟 OpenAI ChatCompletion 响应 ----------------
+
+class _Fn:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _TC:
+    def __init__(self, tc_id, name, arguments):
+        self.id = tc_id
+        self.type = "function"
+        self.function = _Fn(name, json.dumps(arguments, ensure_ascii=False))
+
+
+class _Msg:
+    def __init__(self, content="", tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+        self.reasoning_content = None
+
+
+class _Choice:
+    def __init__(self, msg):
+        self.message = msg
+
+
+class _Resp:
+    def __init__(self, msg):
+        self.choices = [_Choice(msg)]
+
+
+def _resp_assistant(content="", tool_calls=None):
+    return _Resp(_Msg(content=content, tool_calls=tool_calls))
+
+
+def _tc(tc_id, name, arguments):
+    return _TC(tc_id, name, arguments)
+
+
+# ---------------------------------------------------------------------------
+# 公共设施
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    """隔离 jobs 目录 + 注入假 LLM 环境（不碰真实 API）。"""
+    monkeypatch.setenv("SECPT_VAR", str(tmp_path / "var"))
+    monkeypatch.setenv("SECPT_FAKE_LLM", "1")
+    # run_engine 的 _api_key() 检查必须（单链分支），值本身不被使用
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    return tmp_path
+
+
+def _spec(job_id: str, entries: list[str], task_type: str = "ctf") -> TaskSpec:
+    return TaskSpec(
+        job_id=job_id,
+        task_type=task_type,
+        objective="对给定入口做渗透测试，拿到目标证明（flag 样式不固定，由你评估）。",
+        entries=list(entries),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 判据 4/5：单入口直连（编排层休眠）
+# ---------------------------------------------------------------------------
+
+async def test_single_entry_runs_single_chain(env) -> None:
+    """N==1 → mode=single：无 recon、无 warroom 数据、无 finding 登记。"""
+    spec = _spec("test-single", ["http://127.0.0.1:8001"])
+    store = JobStore(str(env / "secpt.sqlite"))
+    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM())
+
+    assert summary["mode"] == "single(+retry)"   # 单链路径恒标重试装配
+    assert summary["recon_assets"] == 0          # 没跑 recon
+    assert summary["warroom_assets"] == 0        # 没建 warroom
+    assert summary["warroom_attempts"] == 0
+    assert summary["verified"] == 0
+    assert len(summary["chains"]) == 1
+    assert summary["chains"][0]["role"] == "exploit"
+    assert len(summary["flags"]) == 1            # 单链自宣告一个 flag
+
+
+# ---------------------------------------------------------------------------
+# 判据 6：单链失败自动重试一次（新 job_id -r2 + retry_note，不复用 workspace）
+# ---------------------------------------------------------------------------
+
+async def test_single_chain_retries_on_failure(env, monkeypatch) -> None:
+    """首轮 budget_exceeded 无 flag → 自动重试一次：新 job_id(-r2)、retry_note 追加、
+    chains==2（attempt-1/attempt-2）、flags 来自第二轮、mode 仍 single(+retry)。"""
+    from secpt.cli import engine_runner
+    from secpt.runtime.engine import RunResult
+
+    calls = {"n": 0}
+
+    def fake_run_engine(**kwargs):   # run_single_chain 经 asyncio.to_thread 调用（同步函数）
+        calls["n"] += 1
+        objective = kwargs["objective"]
+        if calls["n"] == 1:
+            assert kwargs["job_id"] == "test-retry"
+            assert "【上一次尝试未成功】" not in objective
+            return RunResult(flag=None, steps=100, wall_s=50.0,
+                             status="budget_exceeded", messages=[])
+        # 第二次：必须换新 job_id（防污染 workspace）+ 追加 retry_note
+        assert kwargs["job_id"] == "test-retry-r2"
+        assert "【上一次尝试未成功】" in objective
+        assert "不要把上次的步骤原样重跑一遍" in objective
+        return RunResult(flag="RCTF{retry_got_it}", steps=10, wall_s=20.0,
+                         status="success", messages=[])
+
+    monkeypatch.setattr(engine_runner, "run_engine", fake_run_engine)
+
+    spec = _spec("test-retry", ["http://127.0.0.1:8001"])
+    store = JobStore(str(env / "secpt.sqlite"))
+    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM())
+
+    assert summary["mode"] == "single(+retry)"
+    assert len(summary["chains"]) == 2           # attempt-1 / attempt-2
+    assert summary["chains"][0]["status"] == "budget_exceeded"
+    assert summary["chains"][0]["steps"] == 100
+    assert summary["chains"][1]["status"] == "success"
+    assert summary["chains"][1]["steps"] == 10
+    assert summary["flags"] == ["RCTF{retry_got_it}"]   # 只有第二轮产出 flag
+    assert summary["wall_s"] == 70.0             # 50.0 + 20.0 累加
+    assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 判据 1/2/3：多入口并行 DAG
+# ---------------------------------------------------------------------------
+
+async def test_multi_entry_runs_parallel_dag(env) -> None:
+    """N==2 → mode=dag：warroom 有数据、两条并行链、verified>=1、flags==2。"""
+    spec = _spec("test-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
+    store = JobStore(str(env / "secpt.sqlite"))
+    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM(),
+                             use_orchestrator=True)
+
+    assert summary["mode"] == "dag"
+    assert summary["warroom_assets"] >= 2        # recon 资产入库
+    assert summary["warroom_attempts"] >= 2      # recon + 两条链的尝试
+    assert len(summary["chains"]) == 2
+    assert {c["role"] for c in summary["chains"]} == {"exploit"}
+    assert len(summary["flags"]) == 2            # 每条链各自宣告一个 flag
+    assert summary["verified"] >= 1              # 判据 3：乐观确认的 finding
+    assert summary["findings"] >= 2
+
+    # 判据 1：两条并行链各自落盘 round 1000 / 2000 的 checkpoint（交织）
+    rounds = env / "var" / "jobs" / spec.job_id / "rounds"
+    assert (rounds / "1000.messages.json").is_file()
+    assert (rounds / "2000.messages.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# 判据 5：--no-orchestrator 对照
+# ---------------------------------------------------------------------------
+
+async def test_no_orchestrator_falls_back_to_single(env) -> None:
+    """多入口 + use_orchestrator=False → 强制单链（对照分支）。"""
+    spec = _spec("test-noorch", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
+    store = JobStore(str(env / "secpt.sqlite"))
+    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM(),
+                             use_orchestrator=False)
+
+    assert summary["mode"] == "single(+retry)"   # 非 dag 一律标 single(+retry)
+    assert summary["verified"] == 0
+    assert summary["warroom_assets"] == 0
+    assert len(summary["flags"]) <= 1            # 单链只出一个 flag
+    assert len(summary["chains"]) == 1
+
+
+async def test_dag_discovers_more_than_single(env) -> None:
+    """红线 2 对照：同样多入口，DAG 发现 >= 单链。"""
+    store = JobStore(str(env / "secpt.sqlite"))
+    dag = await run_task(
+        _spec("test-contrast-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]),
+        store=store, llm=RoleAwareFakeLLM(), use_orchestrator=True)
+    single = await run_task(
+        _spec("test-contrast-single", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]),
+        store=store, llm=RoleAwareFakeLLM(), use_orchestrator=False)
+
+    assert dag["mode"] == "dag" and single["mode"] == "single(+retry)"
+    assert len(dag["flags"]) > len(single["flags"])
+    assert dag["verified"] > single["verified"]
+
+
+# ---------------------------------------------------------------------------
+# TaskSpec.entries 字段解析
+# ---------------------------------------------------------------------------
+
+def test_taskspec_entries_parsing() -> None:
+    """entries >= 2 → 需要编排；空 / 单入口 → 直连单链。"""
+    doc = _yaml.safe_load(
+        "job_id: spec-test\n"
+        "task_type: ctf\n"
+        "objective: 测试多入口\n"
+        "entries:\n"
+        "  - http://10.0.0.1:8000\n"
+        "  - http://10.0.0.2:9000\n"
+    )
+    spec = TaskSpec.model_validate(doc)
+    assert entries_of(spec) == ["http://10.0.0.1:8000", "http://10.0.0.2:9000"]
+    # 对照组结论：编排层默认关闭，仅显式开启才启用
+    assert needs_orchestrator(spec) is False
+    assert needs_orchestrator(spec, use_dag=True) is True
+
+    single = _spec("spec-single", ["http://10.0.0.1:8000"])
+    assert needs_orchestrator(single) is False
+    assert needs_orchestrator(single, use_dag=True) is False   # 单入口永远不编排
+
+    empty = _spec("spec-empty", [])
+    assert needs_orchestrator(empty) is False

@@ -1,0 +1,262 @@
+"""secpt solve：一键解题（易用性主入口）。
+
+    secpt solve challenges/rois-saml-sso            # 挑战目录
+    secpt solve challenges/rois-saml-sso/test.md    # 题面文件
+    secpt solve <dir> --prior saml --wall 1800      # 覆盖项仍可干预
+    secpt solve <dir> --no-judge --no-learn         # 关掉自动评判/学习
+
+自动化（全部通用机制，可迁移）：
+1. 入口抽取：题面 URL/Host:Port 正则（复用 challenge/loader.py）
+2. 附件就位：<dir>/{attachments,附件}/ 下 zip/tar 自动解压（路径穿越防护）
+3. 先验匹配：knowledge/prior_map.yaml 关键词表
+4. ground truth 自动发现：<dir>/{flag.txt,answer.txt,ground_truth.txt}
+5. 跑完自动评判（AI 评判层）+ 自动经验蒸馏（learning 闭环）
+6. profile 含 stages 时自动走多阶段编排
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from pathlib import Path
+
+import typer
+
+from secpt.core.job.models import TaskBudget, TaskSpec
+
+_CHALLENGE_DOC_NAMES = ("test.md", "题目.md", "challenge.md", "README.md")
+_ATTACH_DIR_NAMES = ("attachments", "附件")
+_GT_NAMES = ("flag.txt", "answer.txt", "ground_truth.txt")
+_PRIOR_MAP = Path(__file__).resolve().parents[1] / "knowledge" / "prior_map.yaml"
+
+
+# ---------------------------------------------------------------------------
+# 自动化各步骤（独立容错：单步失败不阻断主流程）
+# ---------------------------------------------------------------------------
+
+def _find_doc(target: Path) -> Path:
+    if target.is_file():
+        return target
+    for name in _CHALLENGE_DOC_NAMES:
+        cand = target / name
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(
+        f"{target} 下找不到题面文件（{_CHALLENGE_DOC_NAMES}）")
+
+
+def _extract_entries(objective: str) -> list[str]:
+    """题面 → 入口列表（复用 Challenge 的多组正则）。"""
+    try:
+        from secpt.challenge.loader import Challenge
+        # extract_targets 只依赖 description：绕过 dataclass 构造（避免 path 等必填字段）
+        ch = object.__new__(Challenge)
+        ch.description = objective
+        return ch.extract_targets()
+    except Exception as e:  # noqa: BLE001
+        print(f"[solve] 入口抽取失败（忽略，题面仍完整传入）: {e}")
+        return []
+
+
+def _prepare_attachments(challenge_dir: Path) -> list[str]:
+    """解压挑战目录下的附件包到 <dir>/attachments/，返回可读源码路径列表。"""
+    out_dir = challenge_dir / "attachments"
+    out_dir.mkdir(exist_ok=True)
+    from secpt.challenge.attachments import AttachmentHandler
+    handler = AttachmentHandler(extract_dir=out_dir)
+    found = []
+    for dname in _ATTACH_DIR_NAMES:
+        d = challenge_dir / dname
+        if not d.is_dir():
+            continue
+        for f in sorted(d.iterdir()):
+            if f.suffix.lower() in (".zip", ".tar", ".gz", ".tgz") or \
+                    "?" in f.name:        # 平台附件常带 ?attname= 查询串
+                try:
+                    handler.extract(f)
+                    found.append(str(out_dir))
+                except Exception as e:  # noqa: BLE001
+                    print(f"[solve] 附件解压失败 {f.name}（忽略）: {e}")
+        # 已解压出的源码目录直接可用
+        for sub in sorted(out_dir.iterdir()):
+            if sub.is_dir():
+                found.append(str(sub))
+    # 去重保序
+    seen, uniq = set(), []
+    for p in found:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def _auto_prior(objective: str) -> str | None:
+    """关键词表匹配先验；未命中返回 None（用 profile 默认）。"""
+    try:
+        import yaml
+        if not _PRIOR_MAP.is_file():
+            return None
+        table = yaml.safe_load(_PRIOR_MAP.read_text(encoding="utf-8")) or {}
+        low = objective.lower()
+        for prior, keywords in table.items():
+            for kw in keywords or []:
+                if str(kw).lower() in low:
+                    return str(prior)
+    except Exception as e:  # noqa: BLE001
+        print(f"[solve] 先验匹配失败（忽略）: {e}")
+    return None
+
+
+def _find_ground_truth(challenge_dir: Path) -> Path | None:
+    for name in _GT_NAMES:
+        cand = challenge_dir / name
+        if cand.is_file():
+            return cand
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+def solve(
+    target: str,
+    *,
+    profile: str = "ctf",
+    prior: str | None = None,
+    model: str = "deepseek-chat",
+    fallback: str = "deepseek-reasoner",
+    wall: int = -1,
+    steps: int = 0,
+    judge_enable: bool = True,
+    learn_enable: bool = True,
+    verbose: bool = False,
+) -> int:
+    """一键解题。返回退出码：0=完成且评判通过/拿到答案，1=未完成，2=输入错误。"""
+    target_p = Path(target)
+    try:
+        doc = _find_doc(target_p)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 2
+    challenge_dir = doc.parent
+    objective = doc.read_text(encoding="utf-8", errors="replace").strip()
+
+    entries = _extract_entries(objective)
+    artifacts = _prepare_attachments(challenge_dir) if challenge_dir.is_dir() else []
+    prior_name = prior or _auto_prior(objective)
+    gt = _find_ground_truth(challenge_dir)
+
+    job_id = uuid.uuid4().hex[:8]
+    spec = TaskSpec(
+        job_id=job_id,
+        task_type=profile,
+        objective=objective,
+        prior=prior_name,
+        artifacts=artifacts,
+        entries=entries,
+        budget=TaskBudget(
+            steps=steps,
+            wall_s=float(wall) if wall >= 0 else 0.0,
+        ),
+    )
+
+    print(f"[solve] job={job_id} profile={profile} prior={prior_name or '(profile 默认)'}")
+    print(f"[solve] 入口 {len(entries)} 个，附件路径 {len(artifacts)} 个，"
+          f"ground truth: {'有' if gt else '无'}")
+
+    from secpt.core.job.store import JobStore
+    from secpt.core.orchestrator import dag as _dag
+
+    async def _run() -> dict:
+        store = JobStore()
+        prof = _load_profile(profile)
+        if prof.stages:
+            from secpt.core.orchestrator.stages import run_stages
+            return await run_stages(spec, prof, store=store,
+                                    model_primary=model, model_fallback=fallback)
+        return await _dag.run_task(spec, store=store, use_orchestrator=False,
+                                   model_primary=model, model_fallback=fallback)
+
+    summary = asyncio.run(_run())
+    flags = summary.get("flags") or []
+    flag = flags[0] if flags else None
+    print(f"\n[solve] 运行结束：status={summary.get('mode')} wall={summary.get('wall_s')}s "
+          f"flag={flag or '未拿到'}")
+
+    # 自动评判（best-effort，失败不阻断）
+    verdict_ok = False
+    if judge_enable:
+        try:
+            from secpt.evaluation.verdict import evaluate_job, render
+            verdict = asyncio.run(evaluate_job(
+                job_id, ground_truth_file=str(gt) if gt else None, model=model))
+            print("\n[solve] 评判结果：")
+            print(render(verdict))
+            verdict_ok = verdict.complete
+        except Exception as e:  # noqa: BLE001
+            print(f"[solve] 评判失败（忽略）: {e}")
+
+    # 自动学习（best-effort）
+    if learn_enable:
+        try:
+            from secpt.learning.distill import distill_job
+            exp = asyncio.run(distill_job(job_id, model=model))
+            if exp:
+                print(f"[solve] 已沉淀经验：{exp.title}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[solve] 经验蒸馏失败（忽略）: {e}")
+
+    return 0 if (flag or verdict_ok) else 1
+
+
+def _load_profile(name: str):
+    from secpt.core.profile.loader import load_profile
+    return load_profile(name)
+
+
+# ---------------------------------------------------------------------------
+# typer 入口（app.py 注册）
+# ---------------------------------------------------------------------------
+
+def solve_cmd(
+    target: str = typer.Argument(..., help="挑战目录或题面文件（test.md/题目.md）"),
+    profile: str = typer.Option("ctf", "--profile", "-p", help="任务 profile"),
+    prior: str | None = typer.Option(None, "--prior", help="先验覆盖（默认自动匹配）"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+    fallback: str = typer.Option("deepseek-reasoner", "--fallback"),
+    wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
+    steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
+    no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
+    no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """一键解题：入口抽取/附件就位/先验匹配/运行/评判/学习，全自动。"""
+    code = solve(
+        target,
+        profile=profile, prior=prior, model=model, fallback=fallback,
+        wall=wall, steps=steps,
+        judge_enable=not no_judge, learn_enable=not no_learn, verbose=verbose,
+    )
+    raise typer.Exit(code)
+
+
+def learn_cmd(
+    job_id: str | None = typer.Argument(None, help="job_id（缺省=最近一个）"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+) -> None:
+    """手动触发经验蒸馏（learning 闭环补漏）。"""
+    from secpt.learning.distill import distill_job
+    from secpt.core.job.store import JobStore
+
+    if job_id is None:
+        rows = JobStore().list_jobs(limit=1)
+        if not rows:
+            print("Error: 无历史 job")
+            raise typer.Exit(2)
+        job_id = rows[0].job_id
+    exp = asyncio.run(distill_job(job_id, model=model))
+    if exp:
+        print(f"已沉淀经验：{exp.title}（technique={exp.technique}, outcome={exp.outcome}）")
+    else:
+        print("无经验可沉淀（无 transcript / LLM 输出不可解析 / 指纹重复）")

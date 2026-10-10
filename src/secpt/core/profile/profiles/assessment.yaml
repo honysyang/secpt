@@ -1,0 +1,18 @@
+name: assessment
+role: 安全评估员
+tools: [bash, read_file, list_dir, write_file, nmap]
+bash_whitelist_extra: [nmap]
+prior: assessment.md
+terminator:
+  kind: budget
+  stop_condition: >
+    终止条件：检查清单跑完（逐项给出 通过/不通过 + 依据）或预算耗尽。
+    审计完成（或预算耗尽）时，必须以 ANSWER: <结论摘要> 输出并结束，
+    结论摘要里列出所有已确认缺陷的 文件:行。不要无限扩散。
+budget:
+  steps: 300
+  wall_s: 28800
+  rounds: 30
+constraints:
+  - 以检查清单驱动，逐项验证，禁止破坏性动作
+  - 发现即记录风险等级（高/中/低）+ 依据

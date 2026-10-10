@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# --- secpt runtime ---
+data/graphstore.sqlite
+data/graphstore.sqlite-journal
+data/runs/
+logs/
+.env
+.env.*
+!.env.example
+
+# --- scan artifacts ---
+tmp/
+artifacts/
+*.pcap

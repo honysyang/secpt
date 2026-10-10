@@ -1,0 +1,20 @@
+name: redteam
+role: 红队操作员
+tools: [bash, read_file, list_dir, write_file, nmap, httpx]
+bash_whitelist_extra: [nmap, httpx]
+prior: redteam.md
+terminator:
+  kind: budget
+  stop_condition: >
+    终止条件：覆盖度达标（关键路径已打通并形成攻击链）或预算耗尽。
+    每完成一步记录 ATT&CK 技术编号。
+    审计完成（或预算耗尽）时，必须以 ANSWER: <结论摘要> 输出并结束，
+    结论摘要里列出所有已确认缺陷的 文件:行。不要无限扩散。
+budget:
+  steps: 400
+  wall_s: 28800
+  rounds: 30
+constraints:
+  - 关注从初始访问到影响的完整链路，不追求单点漏洞
+  - 每完成一步记录 ATT&CK 技术编号
+  - 在不影响生产可用性的前提下推进
