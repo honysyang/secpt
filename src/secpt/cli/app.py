@@ -393,6 +393,55 @@ def findings_cmd(
         typer.echo(f"{f.id:16s} {f.status:13s} {f.severity:8s}  {f.title[:40]}  @{f.target[:30]}")
 
 
+@app.command("evidence")
+def evidence_cmd(
+    action: str = typer.Argument("export", help="export（导出 job 流量证据包）"),
+    job_id: str = typer.Argument(..., help="job_id"),
+    out: str = typer.Option("evidence-export", "--out", "-o", help="输出目录"),
+) -> None:
+    """证据包导出：job 的全部流量交换（request/response.http 风格 + manifest.json）。"""
+    from secpt.evidence.store import EvidenceStore
+
+    es = EvidenceStore()
+    dest = es.export_job(job_id, out)
+    if dest is None:
+        typer.echo(f"Error: job {job_id} 无流量库（该任务未启用录制或尚无流量）", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"证据包已导出: {dest}")
+
+
+@app.command("hunt")
+def hunt_cmd(
+    objective_file: str = typer.Argument(..., help="目标/任务描述文件"),
+    profile: str = typer.Option("hunter", "--profile", "-p"),
+    model: str = typer.Option("deepseek-chat", "--model", "-m"),
+    max_rounds: int = typer.Option(20, "--rounds", "-r"),
+) -> None:
+    """意图驱动狩猎：planner 产意图入 frontier（SQLite 持久化），worker 逐条执行。
+
+    多步利用链的计划不依赖模型上下文记忆——深洞场景（5+ 步）用这个入口。
+    """
+    import asyncio
+    from pathlib import Path as _P
+
+    from secpt.core.orchestrator.frontier import run_frontier
+
+    objective = _P(objective_file).read_text(encoding="utf-8", errors="replace")
+    summary = asyncio.run(
+        run_frontier(objective, profile=profile, model=model, max_rounds=max_rounds)
+    )
+    typer.echo("")
+    typer.echo(
+        f"hunt: {summary['job_id']}  wall={summary['wall_s']}s  "
+        f"flags={summary['flags'] or '无'}  open剩余={summary['open_remaining']}"
+    )
+    for c in summary["chains"]:
+        typer.echo(
+            f"  [{c['status']:9s}] depth={c['depth']} steps={c['steps']}  {c['intent'][:60]}"
+        )
+    raise typer.Exit(0 if summary["flags"] else 1)
+
+
 @app.command("coverage")
 def coverage_cmd(
     asset_type: str = typer.Option(
