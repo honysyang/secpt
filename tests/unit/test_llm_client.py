@@ -133,3 +133,64 @@ def test_exhausts_retries(monkeypatch):
     with pytest.raises(httpx.ConnectError):
         _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk-test"))
     assert fake.posts == client_mod.MAX_RETRIES + 1
+
+
+class TestRequestParams:
+    def test_temperature_max_tokens_env(self, monkeypatch):
+        """SECPT_LLM_TEMPERATURE/MAX_TOKENS 进入请求 payload（mock 传输层）。"""
+        import secpt.runtime.llm.client as m
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
+        monkeypatch.setenv("SECPT_LLM_TEMPERATURE", "0.7")
+        monkeypatch.setenv("SECPT_LLM_MAX_TOKENS", "4096")
+        captured = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        class _Client:
+            async def post(self, url, json=None, headers=None):
+                captured.update(json or {})
+                return _Resp()
+
+        monkeypatch.setattr(m, "_get_client", lambda: _Client())
+        _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk"))
+        assert captured["temperature"] == 0.7
+        assert captured["max_tokens"] == 4096
+
+    def test_no_params_by_default(self, monkeypatch):
+        import secpt.runtime.llm.client as m
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
+        for v in ("SECPT_LLM_TEMPERATURE", "SECPT_LLM_MAX_TOKENS"):
+            monkeypatch.delenv(v, raising=False)
+        # config.yaml 里有默认值 0.2/2048 → 也会进 payload（配置即生效）
+        captured = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        class _Client:
+            async def post(self, url, json=None, headers=None):
+                captured.update(json or {})
+                return _Resp()
+
+        monkeypatch.setattr(m, "_get_client", lambda: _Client())
+        _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk"))
+        assert captured.get("temperature") == 0.2  # config.yaml llm.temperature
+        assert captured.get("max_tokens") == 2048  # config.yaml llm.max_tokens
+
+    def test_base_url_override_for_default_provider(self, monkeypatch):
+        """默认 deepseek 的 base_url 也可被 env 覆盖（自建网关场景）。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
+        monkeypatch.setenv("SECPT_MODEL_BASE_DEEPSEEK", "https://gw.internal/v1")
+        base, _key, mid = resolve_model("deepseek-chat")
+        assert base == "https://gw.internal/v1" and mid == "deepseek-chat"

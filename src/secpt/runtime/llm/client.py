@@ -61,6 +61,26 @@ def resolve_model(model: str) -> tuple[str, str, str]:
     return base_url.rstrip("/"), api_key, rest
 
 
+def _llm_param(env_name: str, attr: str, default):
+    """请求参数解析：环境变量 > config.yaml 的 llm 段 > 默认。
+
+    SECPT_LLM_TEMPERATURE / SECPT_LLM_MAX_TOKENS / SECPT_LLM_TIMEOUT_S
+    与 SECPT_MODEL_* 生态一致；config.yaml 的 llm.temperature 等同名项同样生效。
+    """
+    v = os.environ.get(env_name)
+    if v not in (None, ""):
+        return type(default)(v) if default is not None else v
+    try:
+        from secpt.config.settings import get_settings
+
+        cfg_val = getattr(get_settings().llm, attr, None)
+        if cfg_val is not None:
+            return cfg_val
+    except Exception:
+        pass
+    return default
+
+
 # 共享 client：按事件循环缓存（asyncio.run 每次新建 loop，不能跨 loop 复用）
 _clients: dict = {}
 
@@ -71,8 +91,9 @@ def _get_client() -> object:
     loop = asyncio.get_running_loop()
     client = _clients.get(loop)
     if client is None:
+        timeout_s = float(_llm_param("SECPT_LLM_TIMEOUT_S", "timeout_s", REQUEST_TIMEOUT_S))
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(REQUEST_TIMEOUT_S),
+            timeout=httpx.Timeout(timeout_s),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
         _clients[loop] = client
@@ -159,6 +180,12 @@ async def call_llm(
         "messages": sanitize_messages(messages),
         "tools": tools,
     }
+    temperature = _llm_param("SECPT_LLM_TEMPERATURE", "temperature", None)
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+    max_tokens = _llm_param("SECPT_LLM_MAX_TOKENS", "max_tokens", None)
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
     # reasoning_content 为 DeepSeek reasoner 专有参数
     if is_reasoner and "deepseek" in base_url:
         payload["include_reasoning_content"] = True
