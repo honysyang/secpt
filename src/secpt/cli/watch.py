@@ -31,12 +31,56 @@ def _job_events_path(job_id: str) -> Path:
     return jobs_dir() / job_id / "events.jsonl"
 
 
+# 行首图标 → 颜色（typer.secho；管道/非 TTY 时 click 自动去色）
+_LINE_STYLES = {
+    "💭": ("cyan",),
+    "💬": ("cyan",),
+    "🔧": ("blue",),
+    "📥": ("green",),
+    "⚠️": ("red",),
+    "★": ("yellow",),
+    "🗜": ("magenta",),
+    "🔁": ("magenta",),
+    "💰": ("yellow",),
+    "📌": ("white",),
+    "❌": ("red",),
+    "🏁": ("bright_green", "bold"),
+    "🧭": ("bright_cyan", "bold"),
+    "🔀": ("yellow",),
+    "✅": ("bright_green",),
+    "👀": ("bright_black",),
+}
+
+
+def _emit(line: str) -> None:
+    import typer
+
+    for icon, style in _LINE_STYLES.items():
+        if line.lstrip().startswith(icon) or line.startswith(icon):
+            typer.secho(line, fg=style[0], bold=len(style) > 1)
+            return
+    typer.echo(line)
+
+
+def _fmt_ts(ts: float) -> str:
+    import time as _t
+
+    return _t.strftime("%H:%M:%S", _t.localtime(ts or _t.time()))
+
+
 def render_event(ev: dict) -> str | None:
     """单事件 → 人读一行/多行。None = 不显示。"""
     etype = ev.get("type")
     p = ev.get("payload") or {}
     if etype == "step":
-        return f"\n── step {p.get('n')} ({p.get('elapsed_s', 0)}s) " + "─" * 40
+        return (
+            f"\n── step {p.get('n')} · {_fmt_ts(ev.get('ts'))} "
+            f"(+{p.get('elapsed_s', 0)}s) " + "─" * 30
+        )
+    if etype == "user_msg":
+        icons = {"steer": "🧭", "nudge": "🔀", "budget": "💰"}
+        icon = icons.get(p.get("kind"), "📢")
+        return f"{icon} [{p.get('kind')}] {p.get('content', '')[:_THINK_LEN]}"
     if etype == "assistant":
         lines = []
         reasoning = (p.get("reasoning") or "").strip()
@@ -141,11 +185,78 @@ def watch(job_id: str, *, tail: int = 0, raw: bool = False, poll_s: float = 1.0)
         start = events[-1].get("seq", 0) if events else 0
 
     print(f"👀 watching {job_id}（Ctrl-C 退出）")
+    summary_seen = False
     try:
         while True:
             lines, start = render_lines(path, start)
             for line in lines:
-                print(line)
+                _emit(line)
+                if "状态:" in line and any(
+                    k in line
+                    for k in (
+                        "succeeded",
+                        "failed",
+                        "budget_exceeded",
+                        "step_exceeded",
+                        "wallclock_exceeded",
+                        "cancelled",
+                    )
+                ):
+                    summary_seen = True
+            if summary_seen:
+                print("─" * 56)
+                print(
+                    "（任务已至终态，watch 自动停止跟随；完整日志: secpt logs export"
+                    f" {job_id} -o run.log）"
+                )
+                break
             time.sleep(poll_s)
     except KeyboardInterrupt:
         print("\n（已退出 watch，任务仍在后台运行）")
+
+
+# ---------------------------------------------------------------------------
+# 日志导出：可读日志保存（txt=实时视图同款渲染 / md=报告向 / json=原始事件）
+# ---------------------------------------------------------------------------
+
+
+def export_log(job_id: str, out: str | Path, *, fmt: str = "txt") -> Path:
+    """把任务完整事件流导出为可读日志文件。返回输出路径。"""
+    path = _job_events_path(job_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"job {job_id} 无事件流: {path}")
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        out.write_text(
+            "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n", encoding="utf-8"
+        )
+        return out
+
+    lines, _ = render_lines(path, 0)  # 复用实时视图渲染，所见即所得
+    if fmt == "md":
+        import time as _t
+
+        header = [
+            f"# 任务执行日志 · {job_id}",
+            "",
+            f"- 导出时间：{_t.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- 事件总数：{len(events)}（思考/工具调用/工具响应/发现/操舵/审批全量）",
+            f"- 原始事件流：`{path}`（append-only，可 `secpt watch {job_id}` 实时回看）",
+            "",
+            "```",
+        ]
+        out.write_text("\n".join(header) + "\n" + "\n".join(lines) + "\n```\n", encoding="utf-8")
+    else:
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out

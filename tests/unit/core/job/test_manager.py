@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
 
 from datetime import UTC
 
-from secpt.core.job.manager import STUCK_AFTER_S, JobManager
-from secpt.core.job.models import TaskBudget, TaskSpec
+from secpt.core.job.manager import MAX_AUTO_RESTARTS, STUCK_AFTER_S, JobManager
+from secpt.core.job.models import JobRecord, TaskBudget, TaskSpec
 from secpt.core.job.store import JobStore
 
 
@@ -150,3 +150,52 @@ def test_store_wal_concurrent_multi_proc(tmp_path):
     store = JobStore(tmp_path / "w.sqlite")
     store.add_event("j1", "status_change", {"status": "running"}, 0)
     assert len(store.get_events("j1")) == 1
+
+
+def test_crash_auto_restart(tmp_path):
+    """崩溃自动重启：异常退出 → requeue 断点续跑，restarts 递增，超限转 failed。"""
+    crashy = tmp_path / "crashy.py"
+    crashy.write_text("import sys; sys.exit(1)")
+    mgr = JobManager(max_parallel_jobs=1, db_path=tmp_path / "t.sqlite", worker_script=crashy)
+    mgr.submit(_spec("c1"))
+
+    # 第一轮：spawn → 崩 → requeue（restarts=1）→ respawn（需等进程退出）
+    mgr.reap()
+    time.sleep(0.4)
+    mgr.reap()
+    time.sleep(0.4)
+    rec = mgr.store.get_job("c1")
+    assert rec.status == "running", "崩溃后应自动 requeue 并重新拉起"
+    assert rec.restarts == 1
+
+    # 崩到超限 → failed，不再重启
+    for _ in range(MAX_AUTO_RESTARTS + 1):
+        mgr.reap()
+        time.sleep(0.4)
+    rec = mgr.store.get_job("c1")
+    assert rec.status == "failed"
+    assert "重启超限" in rec.last_error
+    assert "c1" not in mgr._queue and "c1" not in mgr._procs
+
+
+def test_success_not_restarted(tmp_path):
+    """正常退出（rc=0）不触发重启。"""
+    ok = tmp_path / "ok.py"
+    ok.write_text("import sys; sys.exit(0)")
+    mgr = JobManager(max_parallel_jobs=1, db_path=tmp_path / "t.sqlite", worker_script=ok)
+    mgr.submit(_spec("s1"))
+    mgr.reap()
+    time.sleep(0.4)
+    mgr.reap()
+    rec = mgr.store.get_job("s1")
+    assert rec.restarts == 0
+    assert "s1" not in mgr._queue
+
+
+def test_restarts_roundtrip(tmp_path):
+    """restarts 字段经 upsert/get 完整往返（含老库迁移列）。"""
+    store = JobStore(tmp_path / "m.sqlite")
+    rec = JobRecord(job_id="r1", spec=_spec("r1"), status="running", restarts=2)
+    store.upsert_job(rec)
+    got = store.get_job("r1")
+    assert got.restarts == 2

@@ -146,6 +146,31 @@ app.command("run")(run_cmd)
 app.command("resume")(resume_cmd)
 
 
+@app.command("vpn")
+def vpn_entry(
+    action: str = typer.Argument("status", help="status | up | down"),
+) -> None:
+    """VPN 自举：查看/拉起/关闭 VPN（benchmark 内网任务前置；SECPT_VPN_TYPE/CONFIG 配置）。"""
+    from secpt.runtime import vpn
+
+    if action == "status":
+        typer.echo(
+            f"VPN: {'✓ 已连通' if vpn.status() else '✗ 未连通'}"
+            f"（type={vpn.vpn_type()} configured={vpn.vpn_configured()}）"
+        )
+        raise typer.Exit(0 if vpn.status() else 1)
+    if action == "up":
+        ok, msg = vpn.up()
+        typer.echo(msg)
+        raise typer.Exit(0 if ok else 1)
+    if action == "down":
+        ok, msg = vpn.down()
+        typer.echo(msg)
+        raise typer.Exit(0 if ok else 1)
+    typer.echo(f"Error: 只支持 status/up/down，收到 {action!r}")
+    raise typer.Exit(2)
+
+
 @app.command("steer")
 def steer_entry(
     job_id: str = typer.Argument(..., help="目标 job_id"),
@@ -195,6 +220,31 @@ def metrics_entry(
 
 app.add_typer(cmd_ops.intent_app, name="intent")
 app.add_typer(cmd_ops.intercept_app, name="intercept")
+
+
+@app.command("logs")
+def logs_entry(
+    action: str = typer.Argument("export", help="export（导出可读日志）"),
+    job_id: str = typer.Argument(..., help="job_id"),
+    out: str = typer.Option(None, "--out", "-o", help="输出路径（缺省 var/jobs/<id>/run.log）"),
+    fmt: str = typer.Option("txt", "--format", "-f", help="txt | md | json"),
+) -> None:
+    """导出完整可读日志（txt=终端同款渲染 / md=带元信息报告向 / json=原始事件）。"""
+    from secpt.cli.watch import export_log
+
+    if action != "export":
+        typer.echo(f"Error: 只支持 export，收到 {action!r}")
+        raise typer.Exit(2)
+    if fmt not in ("txt", "md", "json"):
+        typer.echo("Error: --format 只支持 txt/md/json")
+        raise typer.Exit(2)
+    out = out or f"var/jobs/{job_id}/run.log"
+    try:
+        p = export_log(job_id, out, fmt=fmt)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2) from e
+    typer.echo(f"日志已导出: {p}")
 
 
 @app.command("graph")

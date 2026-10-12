@@ -60,3 +60,63 @@ class TestRenderLines:
         # 增量：从 seq 3 之后只有新事件
         lines2, last2 = render_lines(p, 3)
         assert lines2 == [] and last2 == 3
+
+
+class TestExportLog:
+    def _mk_events(self, tmp_path):
+        import json as _json
+
+        p = tmp_path / "events.jsonl"
+        events = [
+            _ev(1, "step", {"n": 1, "elapsed_s": 0.5}),
+            _ev(2, "assistant", {"reasoning": "先侦察", "content": "开工", "tool_calls": []}),
+            _ev(3, "tool_call", {"tool": "bash", "args": "ls"}),
+            _ev(4, "tool_result", {"status": "ok", "preview": "app.py"}),
+            _ev(5, "user_msg", {"kind": "steer", "content": "【人工操舵】换方向"}),
+            _ev(6, "status_change", {"status": "succeeded"}),
+        ]
+        p.write_text(
+            "\n".join(_json.dumps(e, ensure_ascii=False) for e in events), encoding="utf-8"
+        )
+        return p
+
+    def test_export_txt(self, tmp_path, monkeypatch):
+        from secpt.cli.watch import export_log
+
+        monkeypatch.setattr(
+            "secpt.cli.watch._job_events_path", lambda jid: self._mk_events(tmp_path)
+        )
+        out = export_log("j1", tmp_path / "run.log")
+        text = out.read_text(encoding="utf-8")
+        assert "step 1" in text and "🔧 bash" in text and "🧭 [steer]" in text
+        assert "succeeded" in text
+
+    def test_export_md_has_meta(self, tmp_path, monkeypatch):
+        from secpt.cli.watch import export_log
+
+        monkeypatch.setattr(
+            "secpt.cli.watch._job_events_path", lambda jid: self._mk_events(tmp_path)
+        )
+        out = export_log("j1", tmp_path / "run.md", fmt="md")
+        text = out.read_text(encoding="utf-8")
+        assert text.startswith("# 任务执行日志") and "事件总数：6" in text
+
+    def test_export_json_raw(self, tmp_path, monkeypatch):
+        from secpt.cli.watch import export_log
+
+        src = self._mk_events(tmp_path)
+        monkeypatch.setattr("secpt.cli.watch._job_events_path", lambda jid: src)
+        out = export_log("j1", tmp_path / "run.json", fmt="json")
+        import json as _json
+
+        rows = [_json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 6 and rows[0]["type"] == "step"
+
+    def test_export_missing_raises(self, tmp_path, monkeypatch):
+        import pytest
+
+        from secpt.cli.watch import export_log
+
+        monkeypatch.setattr("secpt.cli.watch._job_events_path", lambda jid: tmp_path / "nope.jsonl")
+        with pytest.raises(FileNotFoundError):
+            export_log("nope", tmp_path / "x.log")

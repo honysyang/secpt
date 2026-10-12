@@ -237,6 +237,28 @@ def make_tool_fns(cfg: RunConfig) -> dict:
     """四个工具：bash / read_file / list_dir / write_file。闭包绑定 cfg。"""
     work_dir = cfg.work_dir
 
+    _out_seq = [0]  # 长输出落盘序号（闭包内用容器保持跨调用状态）
+
+    def _truncate_output(text: str) -> str:
+        """输出超 BASH_MAX_OUT 时全量落盘，返回截断文本+引用路径。
+
+        ARTEX 长日志落盘：扫描产生的超长输出截断给模型，完整内容保存到
+        工作目录 outputs/ 下，模型可随时 read_file 按需取细节（避免窗口浪费）。
+        """
+        if not text.strip():
+            return "(no output)"
+        if len(text) <= BASH_MAX_OUT:
+            return text
+        _out_seq[0] += 1
+        odir = Path(work_dir) / "outputs"
+        odir.mkdir(parents=True, exist_ok=True)
+        fname = f"bash-{_out_seq[0]}.log"
+        (odir / fname).write_text(text, encoding="utf-8", errors="replace")
+        return text[:BASH_MAX_OUT] + (
+            f"\n...(输出 {len(text)} 字符过长已截断，"
+            f"完整内容已存 outputs/{fname}，可 read_file 查看)"
+        )
+
     def _ratelimit_check(command: str) -> str | None:
         # S2 全局限速：网络请求先过配额检查（跨 job 生效）
         rl = cfg.ratelimit
@@ -326,7 +348,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
                             return f"Error: timeout {cfg.bash_timeout_s}s"
                         if rc != 0 and not text.strip():
                             return f"Error: exit {rc}"
-                        return text[:BASH_MAX_OUT] if text.strip() else "(no output)"
+                        return _truncate_output(text)
             except SandboxUnavailable as e:
                 return f"Error: sandbox 不可用: {e}"
 
@@ -377,7 +399,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             return f"Error: exit {proc.returncode}"
         if not text.strip() and proc.returncode == 0:
             return "(no output)"
-        return text[:BASH_MAX_OUT]
+        return _truncate_output(text)
 
     def read_file(path: str) -> str:
         p = Path(path)
@@ -540,6 +562,8 @@ class Engine:
                     _steer = self.hooks.on_step(steps, elapsed)
                     if isinstance(_steer, str) and _steer.strip():
                         messages.append({"role": "user", "content": _steer})
+                        if hasattr(self.hooks, "on_user_message"):
+                            self.hooks.on_user_message(_steer, kind="steer")
                         if _v:
                             print(f"  [steer] {_steer[:80]}...", file=sys.stderr)
 
@@ -636,6 +660,8 @@ class Engine:
 
                         print("[engine] budget 80%，注入引导消息", file=sys.stderr)
                         messages.append({"role": "user", "content": WARN_80_MSG})
+                        if self.hooks and hasattr(self.hooks, "on_user_message"):
+                            self.hooks.on_user_message(WARN_80_MSG, kind="budget")
                         if self.hooks and hasattr(self.hooks, "budget_warning"):
                             self.hooks.budget_warning(WARN_80_MSG)
 
@@ -702,6 +728,8 @@ class Engine:
                 if detector.should_nudge():
                     nudge_msg = detector.nudge()
                     messages.append({"role": "user", "content": nudge_msg})
+                    if self.hooks and hasattr(self.hooks, "on_user_message"):
+                        self.hooks.on_user_message(nudge_msg, kind="nudge")
                     print(f"  [nudge] {nudge_msg[:80]}...", file=sys.stderr)
 
                 # S1：本轮结束，落盘 round 快照（会话轮次号，resume 接续用）

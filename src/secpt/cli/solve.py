@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from pathlib import Path
 
@@ -165,6 +166,7 @@ def solve(
     learn_enable: bool = True,
     verbose: bool = False,
     watch_enable: bool = True,
+    vpn: bool = False,
 ) -> int:
     """一键解题（唯一用户入口）。返回退出码：0=完成，1=未完成，2=输入错误。
 
@@ -172,6 +174,16 @@ def solve(
     - profile 未指定 → 规则关键词 + LLM 兜底自动路由（route_objective）
     - 执行模式 auto → stages(若编排) / single；single 无成果自动升级 frontier
     """
+    if vpn:
+        # VPN 自举：拉起并验证；沙箱切 host 网络（容器才能走 VPN 路由网段）
+        from secpt.runtime import vpn as _vpn
+
+        ok, msg = _vpn.up()
+        print(f"[vpn] {msg}")
+        if not ok:
+            return 2
+        os.environ.setdefault("SECPT_SANDBOX_NETWORK", "host")
+
     target_p = Path(target)
     try:
         doc = _find_doc(target_p)
@@ -299,6 +311,19 @@ def solve(
             f"chains={len(summary2.get('chains') or [])}"
         )
 
+    # 自动导出可读日志（best-effort）
+    try:
+        from secpt.cli.watch import export_log
+
+        log_path = export_log(
+            job_id,
+            Path(os.environ.get("SECPT_VAR", "var")) / "jobs" / job_id / "run.log",
+            fmt="txt",
+        )
+        print(f"[solve] 可读日志已保存: {log_path}")
+    except Exception as e:
+        print(f"[solve] 日志导出失败（忽略）: {e}")
+
     # 自动评判（best-effort，失败不阻断）
     verdict_ok = False
     if judge_enable:
@@ -369,6 +394,9 @@ def solve_cmd(
     sandbox: bool = typer.Option(
         True, "--sandbox/--no-sandbox", help="bash 在 Docker 容器内执行（宿主隔离；需镜像）"
     ),
+    vpn: bool = typer.Option(
+        False, "--vpn", help="任务前自动拉起并验证 VPN（SECPT_VPN_TYPE/CONFIG 配置）"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """一键解题（唯一入口）：任务类型与打法自动选择，启动即自带实时交互日志。"""
@@ -388,6 +416,7 @@ def solve_cmd(
         learn_enable=not no_learn,
         verbose=verbose,
         watch_enable=not no_watch,
+        vpn=vpn,
     )
     raise typer.Exit(code)
 

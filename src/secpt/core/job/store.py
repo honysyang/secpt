@@ -66,6 +66,7 @@ class JobStore:
                     round      INTEGER NOT NULL DEFAULT 0,
                     steps      INTEGER NOT NULL DEFAULT 0,
                     cost_cny   REAL NOT NULL DEFAULT 0,
+                    restarts   INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_error TEXT NOT NULL DEFAULT ''
@@ -92,6 +93,10 @@ class JobStore:
                 );
                 """
             )
+            # 老库补列（CREATE IF NOT EXISTS 不会给已存在的表加新列）
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "restarts" not in cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN restarts INTEGER NOT NULL DEFAULT 0")
 
     # ---------------- jobs ----------------
 
@@ -102,12 +107,13 @@ class JobStore:
             conn.execute(
                 """INSERT INTO jobs
                        (job_id, spec_json, status, round, steps, cost_cny,
-                        created_at, updated_at, last_error)
-                   VALUES (?,?,?,?,?,?,?,?,?)
+                        restarts, created_at, updated_at, last_error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(job_id) DO UPDATE SET
                        spec_json=excluded.spec_json, status=excluded.status,
                        round=excluded.round, steps=excluded.steps,
-                       cost_cny=excluded.cost_cny, updated_at=excluded.updated_at,
+                       cost_cny=excluded.cost_cny, restarts=excluded.restarts,
+                       updated_at=excluded.updated_at,
                        last_error=excluded.last_error""",
                 (
                     rec.job_id,
@@ -116,6 +122,7 @@ class JobStore:
                     rec.round,
                     rec.steps,
                     rec.cost_cny,
+                    rec.restarts,
                     rec.created_at,
                     rec.updated_at,
                     rec.last_error,
@@ -158,6 +165,7 @@ class JobStore:
             round=row["round"],
             steps=row["steps"],
             cost_cny=row["cost_cny"],
+            restarts=int(row["restarts"] or 0),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_error=row["last_error"],

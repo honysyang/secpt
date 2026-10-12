@@ -31,6 +31,7 @@ from secpt.core.job.store import JobStore
 STUCK_AFTER_S = 15 * 60  # 15min 无心跳 → stuck
 REAP_INTERVAL_S = 5.0
 HEARTBEAT_GRACE_S = 30.0  # 启动头 30s 不算 stuck（worker 刚起来还没心跳）
+MAX_AUTO_RESTARTS = 3  # 崩溃自动重启上限（worker 从磁盘断点续跑，限次防重启风暴）
 
 
 class JobManager:
@@ -74,7 +75,7 @@ class JobManager:
     # ---------------- 调度 ----------------
 
     def reap(self) -> None:
-        """轮询子进程；回收退出码；启动队列中可跑的 job。"""
+        """轮询子进程；回收退出码；崩溃 job 自动重启；启动队列中可跑的 job。"""
         # 1) 回收已退出的进程
         done = []
         for job_id, (proc, _t0) in self._procs.items():
@@ -82,8 +83,27 @@ class JobManager:
             if rc is not None:
                 done.append(job_id)
                 rec = self.store.get_job(job_id)
-                if rec is not None and rec.status == "running" and rc != 0:
-                    # 子进程自己会更新终态；这里只兜底（被 kill 等）
+                if rec is None:
+                    continue
+                if rc != 0 and rec.status in ("running", "failed") and rec.status != "cancelled":
+                    # 崩溃/异常退出（非被 cancel、非资源耗尽）→ 断点自动重启
+                    if rec.restarts < MAX_AUTO_RESTARTS:
+                        rec.restarts += 1
+                        rec.set_status(
+                            "queued",
+                            error=f"worker exited rc={rc}（重启 {rec.restarts}/{MAX_AUTO_RESTARTS}）",
+                        )
+                        self.store.upsert_job(rec)
+                        self._queue.append(job_id)
+                        print(
+                            f"[manager] job {job_id} crashed rc={rc}, requeue "
+                            f"restart {rec.restarts}/{MAX_AUTO_RESTARTS}"
+                        )
+                        continue
+                    rec.set_status("failed", error=f"worker exited rc={rc}（重启超限）")
+                    self.store.upsert_job(rec)
+                elif rc != 0 and rec.status == "running":
+                    # 非重启范围内的异常退出（如资源耗尽态已被 worker 自己写回）
                     rec.set_status("failed", error=f"worker exited rc={rc}")
                     self.store.upsert_job(rec)
         for job_id in done:

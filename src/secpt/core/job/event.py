@@ -30,6 +30,7 @@ EVENT_TYPES = {
     "compaction",
     "routed",
     "step",  # 步进心跳（watch 实时视图的分界）
+    "user_msg",  # 注入的 user 消息（人工操舵/换层提醒/预算警告）
     "verdict",  # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
 }
 
@@ -91,6 +92,10 @@ class EventSink:
         return self._seq
 
     # ---------------- Engine hooks ----------------
+
+    def on_user_message(self, content: str, kind: str = "info") -> None:
+        """注入类 user 消息落事件流（steer=人工操舵 / nudge=换层提醒 / budget=预算警告）。"""
+        self.write("user_msg", {"kind": kind, "content": content[:800]})
 
     def on_step(self, idx: int, elapsed_s: float) -> None:
         # 步进心跳：watch 实时视图的分界（一行，低成本）

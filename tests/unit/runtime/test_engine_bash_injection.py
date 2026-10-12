@@ -53,6 +53,34 @@ class TestInjectionRejected:
         assert "不在白名单" in out
 
 
+class TestLongOutputPersisted:
+    """ARTEX 长日志落盘：超长输出截断给模型，完整内容落盘、可 read_file 取回。"""
+
+    def test_long_output_truncated_and_saved(self, tmp_path):
+        cfg = RunConfig(job_id="t", objective="o", system_extra="", workspace=tmp_path)
+        cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        tools = make_tool_fns(cfg)
+        out = _run(tools["bash"]({"command": "python3 -c \"print('x'*9000)\""}))
+        assert len(out) <= 8000 + 300  # 截断（含引用说明的少量附加文本）
+        assert "outputs/" in out and "read_file" in out
+        saved = list((tmp_path / "ws" / "outputs").glob("bash-*.log"))
+        assert saved, "超长输出应落盘 outputs/"
+        full = saved[0].read_text()
+        assert len(full) >= 9000
+        # 完整内容可通过 read_file 相对路径按需取回（read_file 统一 8K 截断，细节不丢在对话里）
+        got = tools["read_file"]({"path": f"outputs/{saved[0].name}"})
+        assert len(got) == 8000
+        assert got.startswith("x")
+
+    def test_short_output_not_saved(self, tmp_path):
+        cfg = RunConfig(job_id="t", objective="o", system_extra="", workspace=tmp_path)
+        cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        tools = make_tool_fns(cfg)
+        out = _run(tools["bash"]({"command": "echo hi"}))
+        assert out == "hi\n"
+        assert not (tmp_path / "ws" / "outputs").exists()
+
+
 class TestLegitCommandsWork:
     def test_simple_whitelist_command(self, tools):
         out = _run(tools["bash"]({"command": "echo hello_secpt"}))

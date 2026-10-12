@@ -64,6 +64,17 @@ class Frontier:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._migrate(c)
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
+        """老库补列（CREATE IF NOT EXISTS 不会给已存在的表加新列）。"""
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(intents)")}
+        if "source" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN source TEXT DEFAULT 'planner'")
+        if "depends_on" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN depends_on TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -177,6 +188,49 @@ class Frontier:
             source=dict(row).get("source", "planner"),
             depends_on=dict(row).get("depends_on", "") or "",
         )
+
+    def refund_attempt(self, iid: str) -> None:
+        """依赖未满足被放回 blocked：回退 claim 的 attempts 消耗（未真正执行）。"""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE intents SET attempts = MAX(attempts-1, 0), updated_at=? WHERE id=?",
+                (time.time(), iid),
+            )
+
+    def reopen_ready(self) -> int:
+        """把依赖已满足的 blocked 意图重新置 open（依赖解锁后恢复可领）。
+
+        依赖未满足的意图在 claim 时置 blocked（不空耗 attempts），
+        当被依赖的意图 done / fact 落图后，这里把它们放回可领队列。
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM intents WHERE status='blocked'"
+                " ORDER BY priority DESC, depth DESC LIMIT 20"
+            ).fetchall()
+        n = 0
+        for row in rows:
+            d = dict(row)
+            intent = Intent(
+                id=d["id"],
+                title=d["title"],
+                goal=d["goal"],
+                done_criteria=d["done_criteria"],
+                priority=d["priority"],
+                depth=d["depth"],
+                status="blocked",
+                attempts=d["attempts"],
+                source=d.get("source", "planner"),
+                depends_on=d.get("depends_on", "") or "",
+            )
+            if self.deps_satisfied(intent):
+                with self._conn() as c2:
+                    c2.execute(
+                        "UPDATE intents SET status='open', updated_at=? WHERE id=?",
+                        (time.time(), d["id"]),
+                    )
+                n += 1
+        return n
 
     def settle(self, iid: str, *, status: str, result: str = "", fail_reason: str = "") -> None:
         assert status in ("done", "exhausted", "blocked", "open")
@@ -432,6 +486,7 @@ async def run_frontier(
         fr.settle(
             intent.id, status=status, result=answer or f"steps={result.steps}", fail_reason=why
         )
+        fr.reopen_ready()  # 本条结算后立即解锁依赖已满足的 blocked 意图（事件驱动，不等轮询）
         async with chains_lock:
             chains.append(
                 {
@@ -456,10 +511,12 @@ async def run_frontier(
         while not stop_ev.is_set():
             intent = fr.claim_next()
             if intent is None:
+                fr.reopen_ready()  # 无 open 可领 → 解锁依赖已满足的 blocked 意图
                 await asyncio.sleep(0.5)
                 continue
-            if not fr.deps_satisfied(intent):  # D2.1 依赖未满足 → 放回
-                fr.settle(intent.id, status="open")
+            if not fr.deps_satisfied(intent):  # D2.1 依赖未满足 → blocked（不空耗 attempts）
+                fr.settle(intent.id, status="blocked", fail_reason="依赖未满足")
+                fr.refund_attempt(intent.id)
                 await asyncio.sleep(0.5)
                 continue
             ans = await _run_one(intent)

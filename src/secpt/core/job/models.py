@@ -55,6 +55,7 @@ class JobRecord(BaseModel):
     round: int = 0  # 已完成的最大轮数
     steps: int = 0  # 已完成步数
     cost_cny: float = 0.0
+    restarts: int = 0  # 崩溃自动重启次数（manager 兜底，限 MAX_AUTO_RESTARTS）
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
     last_error: str = ""

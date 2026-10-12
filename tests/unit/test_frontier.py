@@ -34,6 +34,38 @@ class TestFrontier:
         fr = Frontier(tmp_path / "f.db")
         assert fr.claim_next() is None
 
+    def test_deps_unsatisfied_goes_blocked(self, tmp_path):
+        """依赖未满足：意图置 blocked 而非 open，不空耗 attempts。"""
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("找注入点", priority=5)
+        b = fr.add("拿凭据", priority=8, depends_on=a)  # 高优先但依赖未满足
+        i = fr.claim_next()
+        assert i.id == b  # 高优先先被领
+        # 与 _worker_loop 阻塞分支同序列：settle(blocked) 后回退 claim 消耗
+        fr.settle(i.id, status="blocked", fail_reason="依赖未满足")
+        fr.refund_attempt(i.id)
+        assert fr.count_open() == 1  # 只剩 a
+        assert fr.claim_next().id == a
+        # blocked 意图不再被反复 claim（未真正执行的 claim 已回退，不虚增 attempts）
+        assert fr.claim_next() is None
+        rec = fr.list_all(status="blocked")
+        assert len(rec) == 1 and rec[0]["attempts"] == 0
+
+    def test_deps_unlock_reopens(self, tmp_path):
+        """依赖解锁：前置意图 done 后 blocked 意图恢复可领。"""
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("拿注入点", priority=5)
+        b = fr.add("拿凭据", priority=8, depends_on=a)
+        i = fr.claim_next()
+        assert i.id == b
+        fr.settle(b, status="blocked", fail_reason="依赖未满足")
+        fr.refund_attempt(b)
+        assert fr.reopen_ready() == 0  # 依赖未满足，不解锁
+        fr.settle(a, status="done")
+        assert fr.reopen_ready() == 1  # 解锁
+        nxt = fr.claim_next()
+        assert nxt.id == b and nxt.attempts == 1
+
 
 class _PlannerLLM:
     """第一轮产 2 意图，之后产空（收敛）。"""
