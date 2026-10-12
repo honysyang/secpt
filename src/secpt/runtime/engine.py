@@ -132,6 +132,8 @@ class RunConfig:
     round_offset: int = 0  # S1 resume：续跑后 round 编号继续，避免覆盖旧 checkpoint
     ratelimit: object | None = None  # S2 全局限速器（.check(command)->list[str]，非空拦截）
     context_window: int | None = None  # S3 上下文窗口（token）；None=按模型查表
+    sandbox: str = "auto"  # bash 执行环境：auto（有 docker 用容器）/ docker（强制）/ none
+
     # （MODEL_WINDOWS），可用 SECPT_FAKE_WINDOW 覆盖
     budget_cost_cny: float = 0.0  # S3 成本上限（元），0 表示不限
     budget_warn_pct: float = 0.8  # S3 预算警告阈值
@@ -277,23 +279,49 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             )
         argv: list[str] = [exe, "-c", command] if uses_shell else parts
 
-        env = os.environ.copy()
-        # 流量录制（B3）：traffic 模块启动 MITM 代理后通过环境变量宣告，
-        # 此处只认 env 不 import——零耦合。分生态 CA 变量让 curl/python/node
-        # 都信任代理 CA（绝不关 TLS 校验）
+        # 流量录制（B3）代理 env：宿主与容器两条执行路径共用
+        proxy_env: dict | None = None
         _proxy = os.environ.get("SECPT_PROXY_URL")
         if _proxy:
+            proxy_env = {
+                "HTTP_PROXY": _proxy,
+                "HTTPS_PROXY": _proxy,
+                "http_proxy": _proxy,
+                "https_proxy": _proxy,
+            }
             ca = os.environ.get("SECPT_PROXY_CA")
-            env["HTTP_PROXY"] = env["http_proxy"] = _proxy
-            env["HTTPS_PROXY"] = env["https_proxy"] = _proxy
             if ca:
-                for var in (
-                    "SSL_CERT_FILE",
-                    "REQUESTS_CA_BUNDLE",
-                    "NODE_EXTRA_CA_CERTS",
-                    "CURL_CA_BUNDLE",
-                ):
-                    env[var] = ca
+                proxy_env.update(
+                    {
+                        "SSL_CERT_FILE": ca,
+                        "REQUESTS_CA_BUNDLE": ca,
+                        "NODE_EXTRA_CA_CERTS": ca,
+                        "CURL_CA_BUNDLE": ca,
+                    }
+                )
+
+        # Docker 沙箱路径：容器内执行（宿主隔离）；auto 且 docker 不可用 → 回退宿主
+        if cfg.sandbox != "none":
+            from secpt.runtime.sandbox import SandboxUnavailable, sandbox_scope
+
+            try:
+                with sandbox_scope(cfg.job_id, work_dir=str(work_dir), mode=cfg.sandbox) as _sb:
+                    if _sb is not None:
+                        rc, out_b, err_b = await asyncio.to_thread(
+                            _sb.exec, argv, timeout_s=cfg.bash_timeout_s, env=proxy_env
+                        )
+                        text = out_b + ("\n" + err_b if err_b else "")
+                        if rc == 124:
+                            return f"Error: timeout {cfg.bash_timeout_s}s"
+                        if rc != 0 and not text.strip():
+                            return f"Error: exit {rc}"
+                        return text[:BASH_MAX_OUT] if text.strip() else "(no output)"
+            except SandboxUnavailable as e:
+                return f"Error: sandbox 不可用: {e}"
+
+        env = os.environ.copy()
+        if proxy_env:
+            env.update(proxy_env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,

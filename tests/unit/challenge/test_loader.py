@@ -129,8 +129,8 @@ def test_cli_run_file_and_task_mutex(tmp_path: Path) -> None:
     assert "互斥" in result.output
 
 
-def test_cli_run_file_ok(tmp_path: Path) -> None:
-    """secpt run --file 用文件内容作为 task。"""
+def test_cli_run_tree_deprecated_redirects_to_direct(tmp_path: Path) -> None:
+    """secpt run --mode tree 已废弃：提示并自动转 direct，--file 作为题面。"""
     from unittest.mock import MagicMock, patch
 
     from secpt.cli.app import app
@@ -139,13 +139,13 @@ def test_cli_run_file_ok(tmp_path: Path) -> None:
     f.write_text("scan the target", encoding="utf-8")
 
     mock_result = MagicMock()
-    mock_result.graph_backend = "memory"
+    mock_result.job_id = "job-tree-x"
     mock_result.steps = 1
-    mock_result.exhausted = False
-    mock_result.answer = "done"
-    mock_result.trajectory = []
+    mock_result.wall_s = 1.0
+    mock_result.status = "success"
+    mock_result.flag = "FLAG{tree_redirected}"
 
-    with patch("secpt.runtime.runner.run_sync", return_value=mock_result) as mock_run:
+    with patch("secpt.cli.engine_runner.run_engine", return_value=mock_result) as mock_run:
         result = runner.invoke(
             app,
             [
@@ -158,9 +158,10 @@ def test_cli_run_file_ok(tmp_path: Path) -> None:
             ],
         )
     assert result.exit_code == 0
+    assert "已废弃" in result.output
     mock_run.assert_called_once()
     _, kwargs = mock_run.call_args
-    assert kwargs["task"] == "scan the target"
+    assert "scan the target" in kwargs["objective"]
 
 
 def test_cli_engage_file_and_objective_mutex(tmp_path: Path) -> None:

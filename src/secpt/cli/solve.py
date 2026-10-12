@@ -357,9 +357,15 @@ def solve_cmd(
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
+    sandbox: bool = typer.Option(
+        True, "--sandbox/--no-sandbox", help="bash 在 Docker 容器内执行（宿主隔离；需镜像）"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """一键解题（唯一入口）：任务类型与打法自动选择，启动即自带实时交互日志。"""
+    import os as _os
+
+    _os.environ["SECPT_SANDBOX"] = "1" if sandbox else "0"
     code = solve(
         target,
         profile=profile,

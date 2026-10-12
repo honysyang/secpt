@@ -1,4 +1,4 @@
-.PHONY: install test lint format check recheck
+.PHONY: install test lint format check recheck sandbox-image
 
 # 安装依赖
 install:
@@ -28,3 +28,7 @@ check: lint test
 # 用法: make recheck REPORT=<report.json 路径>
 recheck:
 	python scripts/recheck.py $(REPORT)
+
+# 构建执行沙箱镜像（agent 的 bash 工具在容器内运行，宿主隔离）
+sandbox-image:
+	docker build -f docker/sandbox.Dockerfile -t secpt-sandbox .

@@ -81,5 +81,6 @@ def make_run_config(job_id: str, spec: TaskSpec, run_config: dict) -> RunConfig:
         budget_cost_cny=run_config.get("budget_cost_cny", spec.budget.cost_cny),
         round_max_steps=run_config.get("round_max_steps", 60),
         round_max_wall_s=run_config.get("round_max_wall_s", 1500),
+        sandbox=run_config.get("sandbox", "auto"),
     )
     return cfg

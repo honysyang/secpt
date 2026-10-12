@@ -90,6 +90,7 @@ def run_engine(
     llm=None,
     stage=None,
     verbose: bool = False,
+    sandbox: str = "auto",
 ) -> _engine.RunResult:
     """新建任务跑一次 Engine，全程落盘。profile 决定 tools/terminator/budget/先验。
 
@@ -215,6 +216,7 @@ def run_engine(
         objective=objective,
         budget=TaskBudget(wall_s=cfg.max_wall_s, steps=cfg.max_steps),
     )
+    cfg.sandbox = sandbox
     run_cfg_dict = {
         "workspace": workspace,
         "max_steps": cfg.max_steps,
@@ -231,6 +233,7 @@ def run_engine(
         "round_max_steps": cfg.round_max_steps,
         "round_max_wall_s": cfg.round_max_wall_s,
         "extra_tool_names": sorted(extra_tools),
+        "sandbox": cfg.sandbox,
     }
     write_task_snapshot(jdir, spec, run_cfg_dict)
 
