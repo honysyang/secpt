@@ -1,0 +1,5 @@
+Usage: python -m secpt.cli.app solve [OPTIONS] {target}
+Try 'python -m secpt.cli.app solve --help' for help.
+╭─ Error ─────────────────────────────────────────────────────────────────╮
+│ No such option: --vpn                                                   │
+╰─────────────────────────────────────────────────────────────────────────╯

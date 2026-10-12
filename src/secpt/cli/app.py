@@ -279,6 +279,9 @@ def solve_entry(
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
+    vpn: bool = typer.Option(
+        False, "--vpn", help="任务前自动拉起并验证 VPN（SECPT_VPN_TYPE/CONFIG 配置）"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """一键解题（唯一用户入口）：自动选择打法，启动即自带实时交互日志。"""
@@ -297,6 +300,7 @@ def solve_entry(
         learn_enable=not no_learn,
         verbose=verbose,
         watch_enable=not no_watch,
+        vpn=vpn,
     )
     raise typer.Exit(code)
 
