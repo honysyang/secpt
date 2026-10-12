@@ -60,6 +60,7 @@ make check                             # ruff check + ruff format --check + pyte
 make recheck REPORT=<report.json>      # 可选：复跑判据门禁
 ```
 
+> 🚀 **想快速读懂整个系统？→ [docs/系统速览.md](docs/系统速览.md)**（5 分钟版）
 > 开发约定与架构红线见 [AGENTS.md](AGENTS.md)；文档导航见 [docs/README.md](docs/README.md)；
 > 权威架构描述见 [docs/架构现状.md](docs/架构现状.md)。
 
