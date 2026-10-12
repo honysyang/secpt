@@ -224,6 +224,26 @@ class IntelStore:
             )
             return int(cur.lastrowid)
 
+    def record_goal(self, content: str, *, job_id: str = "") -> int:
+        """Goals 层：登记子目标节点（type='goal'），幂等——同文本只建一次。
+
+        供 plan_round 把意图的 subgoal 写入探索图，跨轮/跨任务可检索。
+        """
+        content = content.strip()[:500]
+        if not content:
+            raise ValueError("子目标内容不能为空")
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT id FROM nodes WHERE type='goal' AND content=?", (content,)
+            ).fetchone()
+            if row:
+                return int(row["id"])
+            cur = c.execute(
+                "INSERT INTO nodes (type,content,job_id,step,ts) VALUES ('goal',?,?,0,?)",
+                (content, job_id, time.time()),
+            )
+            return int(cur.lastrowid)
+
     # ---------------- 联想召回（图记忆派核心） ----------------
 
     def neighbors(self, node_id: int, *, hops: int = 1, limit: int = 20) -> list[dict]:

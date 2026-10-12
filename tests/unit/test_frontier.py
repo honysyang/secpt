@@ -6,7 +6,12 @@ import asyncio
 import json
 from typing import ClassVar
 
-from secpt.core.orchestrator.frontier import Frontier, build_intent_objective, run_frontier
+from secpt.core.orchestrator.frontier import (
+    Frontier,
+    build_intent_objective,
+    plan_round,
+    run_frontier,
+)
 
 
 def _run(coro):
@@ -65,6 +70,62 @@ class TestFrontier:
         assert fr.reopen_ready() == 1  # 解锁
         nxt = fr.claim_next()
         assert nxt.id == b and nxt.attempts == 1
+
+    def test_subgoal_roundtrip(self, tmp_path):
+        """Goals 层：add 带 subgoal 持久化（含老库迁移列）。"""
+        fr = Frontier(tmp_path / "f.db")
+        fr.add("扫登录接口", subgoal="找注入点")
+        rows = fr.list_all()
+        assert rows[0]["subgoal"] == "找注入点"
+
+    def test_subgoal_coverage_and_settled(self, tmp_path):
+        """覆盖度聚合 + 收敛判定：全子目标结算后才 True。"""
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("扫登录接口", subgoal="找注入点")
+        b = fr.add("打凭据接口", subgoal="拿凭据")
+        cov = fr.subgoal_coverage()
+        assert len(cov) == 2 and all(x["pending"] == 1 for x in cov)
+        assert fr.all_subgoals_settled() is False
+        fr.settle(a, status="done")
+        assert fr.all_subgoals_settled() is False  # 拿凭据仍 pending
+        fr.settle(b, status="exhausted", fail_reason="没洞")
+        assert fr.all_subgoals_settled() is True
+        by = {x["subgoal"]: x for x in fr.subgoal_coverage()}
+        assert by["找注入点"]["done"] == 1 and by["拿凭据"]["exhausted"] == 1
+
+    def test_no_subgoals_not_settled(self, tmp_path):
+        """无 subgoal 时不启用覆盖度收敛（退回 idle_rounds，向后兼容）。"""
+        fr = Frontier(tmp_path / "f.db")
+        fr.add("普通意图")
+        assert fr.all_subgoals_settled() is False
+
+    def test_plan_round_records_subgoal(self, tmp_path, monkeypatch):
+        """plan_round：解析 subgoal 字段 → intents 落库 + 探索图登记 goal 节点。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        fr = Frontier(tmp_path / "f.db")
+        body = json.dumps(
+            [
+                {
+                    "title": "扫登录接口",
+                    "goal": "摸指纹",
+                    "done_criteria": "有指纹",
+                    "priority": 5,
+                    "depth": 0,
+                    "subgoal": "找注入点",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        planner = _PlannerLLM([body])
+        n = _run(plan_round("目标：拿下 test", fr, planner, model="m"))
+        assert n == 1
+        assert fr.list_all()[0]["subgoal"] == "找注入点"
+        from secpt.intel.store import IntelStore
+
+        st = IntelStore(tmp_path / "intel.sqlite")
+        with st._conn() as c:
+            n_goals = c.execute("SELECT COUNT(*) n FROM nodes WHERE type='goal'").fetchone()["n"]
+        assert n_goals == 1
 
 
 class _PlannerLLM:

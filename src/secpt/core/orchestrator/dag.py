@@ -95,13 +95,13 @@ async def run_single_chain(
             f"- {a}" for a in spec.artifacts
         )
 
-    # spec.budget 权威：0=未指定用 profile，<0=不限（7×24）
-    max_steps = spec.budget.steps if spec.budget.steps != 0 else None
-    max_wall_s = spec.budget.wall_s if spec.budget.wall_s != 0 else None
-    if spec.budget.steps < 0:
-        max_steps = 0
-    if spec.budget.wall_s < 0:
-        max_wall_s = 0
+    # spec.budget 语义：0=未指定（用 profile）；>0=该值；<0=不限（7×24，--wall 0 显式不限）
+    max_steps = (
+        spec.budget.steps if spec.budget.steps > 0 else (0 if spec.budget.steps < 0 else None)
+    )
+    max_wall_s = (
+        spec.budget.wall_s if spec.budget.wall_s > 0 else (0 if spec.budget.wall_s < 0 else None)
+    )
 
     # attempt-1：主尝试
     result = await asyncio.to_thread(

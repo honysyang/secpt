@@ -63,6 +63,17 @@ class TestExploration:
         kinds = {e["kind"] for e in lin["derived_from"]}
         assert kinds == {"derived_from"}
 
+    def test_record_goal_idempotent(self, tmp_path):
+        """Goals 层：子目标落图幂等——同文本只建一次，跨任务复用。"""
+        st = IntelStore(tmp_path / "i.db")
+        g1 = st.record_goal("拿到 admin 凭据", job_id="j1")
+        g2 = st.record_goal("拿到 admin 凭据", job_id="j2")
+        assert g1 == g2
+        g3 = st.record_goal("横向移动到内网")
+        assert g3 != g1
+        with pytest.raises(ValueError):
+            st.record_goal("   ")
+
 
 class TestRecall:
     def test_fts_or_like(self, tmp_path):

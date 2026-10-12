@@ -190,6 +190,13 @@ def solve(
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 2
+    # model/fallback 提前解析（CLI 不传 -m 时是 None；judge/蒸馏/frontier 都用这个值，
+    # 不提前解析会把 None 传到 client.partition 崩——f242661a 日志里的
+    # 'NoneType' object has no attribute 'partition' 即此因）
+    from secpt.cli.engine_runner import resolve_models
+
+    model, fallback = resolve_models(model, fallback)
+
     challenge_dir = (
         doc.parent.resolve()
     )  # 绝对化：附件路径注入 objective 后不能被 bash 工作目录影响
@@ -217,7 +224,8 @@ def solve(
         entries=entries,
         budget=TaskBudget(
             steps=steps,
-            wall_s=float(wall) if wall >= 0 else 0.0,
+            # --wall 0 = 显式不限（-1 标记）；-1 = 未指定（用 profile）；>0 = 该秒数
+            wall_s=-1.0 if wall == 0 else (float(wall) if wall > 0 else 0.0),
         ),
     )
 

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS intents (
     status TEXT DEFAULT 'open',        -- open/running/done/exhausted/blocked
     source TEXT DEFAULT 'planner',     -- planner | direct（人工直投：规划者见 direct 即暂停）
     depends_on TEXT DEFAULT '',        -- 逗号分隔 intent_id 或 fact:谓词（D2 依赖解锁）
+    subgoal TEXT DEFAULT '',            -- Goals 层：本意图服务的子目标（跨轮方向一致性的锚点）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -75,6 +76,9 @@ class Frontier:
         if "depends_on" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN depends_on TEXT DEFAULT ''")
+        if "subgoal" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN subgoal TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -91,14 +95,15 @@ class Frontier:
         depth: int = 0,
         source: str = "planner",
         depends_on: str = "",
+        subgoal: str = "",
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
         with self._conn() as c:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
-                                        source,depends_on,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?)""",
+                                        source,depends_on,subgoal,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -108,6 +113,7 @@ class Frontier:
                     int(depth),
                     source,
                     depends_on[:300],
+                    subgoal[:300],
                     now,
                     now,
                 ),
@@ -269,6 +275,7 @@ class Frontier:
         report: dict = {
             "open_intents": self.open_summary(limit),
             "recent_results": self.recent_results(limit),
+            "subgoal_coverage": self.subgoal_coverage(),
         }
         try:
             from secpt.intel.store import IntelStore
@@ -303,6 +310,52 @@ class Frontier:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def subgoal_coverage(self, limit: int = 10) -> list[dict]:
+        """Goals 层覆盖度：按子目标聚合意图结算状态（planner 决策原材料）。
+
+        每个子目标给出 done/exhausted/open 计数——planner 据此判断
+        "哪些方向已证、哪些没测完"，跨轮方向一致性从文本记忆变结构记忆。
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT subgoal,
+                          SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
+                          SUM(CASE WHEN status='exhausted' THEN 1 ELSE 0 END) AS exhausted,
+                          SUM(CASE WHEN status IN ('open','running','blocked')
+                              THEN 1 ELSE 0 END) AS pending
+                   FROM intents WHERE subgoal != ''
+                   GROUP BY subgoal ORDER BY pending DESC, done DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["done"] = int(d["done"] or 0)
+            d["exhausted"] = int(d["exhausted"] or 0)
+            d["pending"] = int(d["pending"] or 0)
+            out.append(d)
+        return out
+
+    def all_subgoals_settled(self) -> bool:
+        """覆盖度驱动收敛判定：所有子目标下意图均已结算（done/exhausted）。
+
+        存在 subgoal 分组且每个分组都无未结算意图 → True。
+        没有任何 subgoal 时返回 False（退回 idle_rounds 空转逻辑，向后兼容）。
+        """
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT COUNT(*) n FROM (
+                       SELECT subgoal FROM intents WHERE subgoal != ''
+                       GROUP BY subgoal
+                       HAVING SUM(CASE WHEN status IN ('open','running','blocked')
+                                       THEN 1 ELSE 0 END) > 0
+                   )"""
+            ).fetchone()
+            total = c.execute(
+                "SELECT COUNT(DISTINCT subgoal) n FROM intents WHERE subgoal != ''"
+            ).fetchone()
+        return int(total["n"]) > 0 and int(row["n"]) == 0
+
 
 _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近期结果】【当前待办】产出下一步意图。
 
@@ -311,6 +364,8 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 2. 否定记账：近期结果里已证伪的路线不要重复派意图（至多复核一次）
 3. 每条意图必须可判定：done_criteria 写清"怎样算这条做完了"
 4. 最多产 {max_new} 条；没有值得做的就产空列表（任务自然收敛）
+5. 子目标记账：每条意图可用可选字段 "subgoal" 归属到某个子目标；优先派发
+   【子目标覆盖度】里 pending=0 且 done=0 的未测方向；某子目标已全部 done 就别再派
 
 【总目标】
 {objective}
@@ -327,8 +382,11 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 【覆盖度缺口·未触达资产（优先派这里）】
 {untested}
 
+【子目标覆盖度】
+{coverage}
+
 只输出 JSON：[{{"title": "...", "goal": "...", "done_criteria": "...",
-"priority": 1-10, "depth": {next_depth}}}]"""
+"priority": 1-10, "depth": {next_depth}, "subgoal": "..."}}]"""
 
 
 async def plan_round(
@@ -351,6 +409,8 @@ async def plan_round(
         facts=json.dumps(situation.get("recent_facts", []), ensure_ascii=False)[:900] or "（无）",
         untested=json.dumps(situation.get("untested_assets", []), ensure_ascii=False)[:400]
         or "（无）",
+        coverage=json.dumps(situation.get("subgoal_coverage", []), ensure_ascii=False)[:500]
+        or "（无）",
     )
     try:
         if hasattr(llm, "call"):
@@ -372,13 +432,23 @@ async def plan_round(
         title = str(item.get("title") or "").strip()
         if not title:
             continue
+        subgoal = str(item.get("subgoal") or "").strip()
         frontier.add(
             title,
             goal=str(item.get("goal") or ""),
             done_criteria=str(item.get("done_criteria") or ""),
             priority=int(item.get("priority", 5)),
             depth=int(item.get("depth", next_depth)),
+            subgoal=subgoal,
         )
+        if subgoal:
+            # Goals 层：子目标落探索图（幂等；best-effort，失败不阻断派发）
+            with contextlib.suppress(Exception):
+                from secpt.intel.store import IntelStore
+
+                IntelStore(Path(os.environ.get("SECPT_VAR", "var")) / "intel.sqlite").record_goal(
+                    subgoal
+                )
         n += 1
     return n
 
@@ -545,6 +615,8 @@ async def run_frontier(
         if fr.count_open() == 0:
             if fr.total() == 0 and rounds == 0:
                 continue  # 首盘：等 worker 空转也无妨，继续 plan
+            if fr.all_subgoals_settled():
+                break  # Goals 覆盖度驱动收敛：所有子目标已结算（done/exhausted）
             if idle_rounds >= 2:
                 break
             timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）

@@ -111,3 +111,113 @@ class TestEngineIntegration:
 
         out = asyncio.new_event_loop().run_until_complete(go())
         assert "hello_host" in out
+
+
+class TestRelativeWorkDir:
+    """回归：相对 work_dir 必须被绝对化后再给 docker -v（f242661a 事故）。"""
+
+    def test_relative_path_absolutized(self, tmp_path, monkeypatch):
+        import subprocess
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SECPT_SANDBOX", "1")  # 覆盖 conftest 全局关闭
+        monkeypatch.setattr("secpt.runtime.sandbox.docker_available", lambda: True)
+        monkeypatch.setattr(DockerSandbox, "_image_exists", staticmethod(lambda img: True))
+        (tmp_path / "var" / "jobs" / "j1" / "ws").mkdir(parents=True)
+
+        sb = DockerSandbox("j1", work_dir="var/jobs/j1/ws")  # 相对路径！
+        run_cmd = {}
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["docker", "run"] and "-v" in cmd and "run_cmd" not in run_cmd:
+                run_cmd["run_cmd"] = cmd  # 只记 run（readiness 的 exec 会覆盖）
+            return subprocess.CompletedProcess(cmd, 0, "container-id", "")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        sb.start()
+        v = run_cmd["run_cmd"][run_cmd["run_cmd"].index("-v") + 1]
+        assert v.startswith("/") and v.endswith(":/work"), f"挂载源未绝对化: {v}"
+
+
+class TestAutoFallbackToHost:
+    def test_sandbox_unavailable_auto_runs_host(self, tmp_path, monkeypatch):
+        """auto 模式容器起不来 → 回退宿主执行（docker 模式仍硬失败）。"""
+        import asyncio
+        from unittest.mock import patch
+
+        from secpt.runtime.engine import RunConfig, make_tool_fns
+        from secpt.runtime.sandbox import SandboxUnavailable
+
+        cfg = RunConfig(
+            job_id="j", objective="o", system_extra="x", workspace=tmp_path, sandbox="auto"
+        )
+        cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        tools = make_tool_fns(cfg)
+        monkeypatch.setenv("SECPT_SANDBOX", "1")  # 覆盖 conftest 全局关闭
+
+        with (
+            patch("secpt.runtime.sandbox.docker_available", return_value=True),
+            patch.object(DockerSandbox, "start", side_effect=SandboxUnavailable("boom")),
+        ):
+            out = asyncio.new_event_loop().run_until_complete(
+                tools["bash"]({"command": "echo fallback-works"})
+            )
+        assert "fallback-works" in out  # auto 模式容器起不来 → 回退宿主执行
+
+    def test_sandbox_unavailable_docker_mode_hard_fails(self, tmp_path, monkeypatch):
+        import asyncio
+        from unittest.mock import patch
+
+        from secpt.runtime.engine import RunConfig, make_tool_fns
+        from secpt.runtime.sandbox import SandboxUnavailable
+
+        cfg = RunConfig(
+            job_id="j2", objective="o", system_extra="x", workspace=tmp_path, sandbox="docker"
+        )
+        cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        tools = make_tool_fns(cfg)
+        monkeypatch.setenv("SECPT_SANDBOX", "1")  # 覆盖 conftest 全局关闭
+        with (
+            patch("secpt.runtime.sandbox.docker_available", return_value=True),
+            patch.object(DockerSandbox, "start", side_effect=SandboxUnavailable("boom")),
+        ):
+            out = asyncio.new_event_loop().run_until_complete(tools["bash"]({"command": "echo x"}))
+        assert out.startswith("Error: sandbox 不可用")
+
+
+class TestWallZeroSemantics:
+    """--wall 0 = 显式不限（spec wall_s=-1 → run_engine 收 0）；0 = profile 默认。"""
+
+    def _capture(self, wall_s):
+        import asyncio as _a
+
+        from secpt.core.job.models import TaskBudget, TaskSpec
+        from secpt.core.orchestrator.dag import run_single_chain
+
+        captured = {}
+
+        class _R:
+            flag = None
+            steps = 1
+            wall_s = 1.0
+            status = "step_exceeded"
+            messages = []
+
+        import secpt.cli.engine_runner as er
+
+        orig = er.run_engine
+        er.run_engine = lambda **kw: (captured.update(kw), _R())[1]
+        try:
+            spec = TaskSpec(job_id="w1", objective="o", budget=TaskBudget(wall_s=wall_s))
+            _a.new_event_loop().run_until_complete(run_single_chain(spec, llm=object()))
+        finally:
+            er.run_engine = orig
+        return captured.get("max_wall_s")
+
+    def test_wall_negative_one_is_unlimited(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        assert self._capture(-1.0) == 0  # 0 = engine 层"不限"
+
+    def test_wall_zero_is_profile_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        assert self._capture(0.0) is None  # None → run_engine 用 profile

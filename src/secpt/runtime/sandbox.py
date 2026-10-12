@@ -72,9 +72,11 @@ class DockerSandbox:
             return False
 
     def start(self) -> None:
-        # 关键：挂载源必须预先由本进程创建——docker 守护进程会为不存在的 bind 源
-        # 自动创建 root:root 目录（容器内 uid 不符 → PermissionError）
-        Path(self.work_dir).mkdir(parents=True, exist_ok=True)
+        # 关键 1：挂载源绝对化——相对路径会被 docker 当"卷名"解析（报 invalid
+        # characters）；solve 从项目根运行时 resolve 即正确绝对路径
+        # 关键 2：预先由本进程创建——docker 会为不存在的 bind 源自动建 root 目录
+        src = str(Path(self.work_dir).resolve())
+        Path(src).mkdir(parents=True, exist_ok=True)
         cmd = [
             "docker",
             "run",
@@ -87,7 +89,7 @@ class DockerSandbox:
             "--user",
             f"{os.getuid()}:{os.getgid()}",
             "-v",
-            f"{self.work_dir}:/work",
+            f"{src}:/work",
             "-w",
             "/work",
             "--rm",  # stop 后自动清理

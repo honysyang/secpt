@@ -350,7 +350,16 @@ def make_tool_fns(cfg: RunConfig) -> dict:
                             return f"Error: exit {rc}"
                         return _truncate_output(text)
             except SandboxUnavailable as e:
-                return f"Error: sandbox 不可用: {e}"
+                if cfg.sandbox == "docker":
+                    return f"Error: sandbox 不可用: {e}"
+                # auto 模式：容器起不来就回退宿主执行（观测层不阻断主链路），
+                # 告警只打一次，错误信息截断防刷屏
+                if not getattr(run_bash, "_sb_warned", False):
+                    run_bash._sb_warned = True
+                    print(
+                        f"[engine] 沙箱不可用，回退宿主执行: {str(e).splitlines()[0][:120]}",
+                        file=sys.stderr,
+                    )
 
         env = os.environ.copy()
         if proxy_env:
