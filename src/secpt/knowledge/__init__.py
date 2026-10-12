@@ -1,5 +1,3 @@
-"""Knowledge 包导出。"""
+"""Knowledge 包：先验知识（priors/）与先验路由表（prior_map.yaml）。"""
 
-from secpt.knowledge.experience import Experience, ExperienceStore
-
-__all__ = ["Experience", "ExperienceStore"]
+__all__: list[str] = []

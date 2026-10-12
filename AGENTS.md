@@ -55,25 +55,33 @@ secpt solve challenges/rois-saml-sso
 
 ```
 src/secpt/
-  cli/           typer 入口（solve=主入口 / run / judge / learn / chat / jobs…）
-  runtime/       Engine 主循环（engine.py ★）、LLM client（多模型路由）、intake
+  cli/           typer 入口（app=薄注册层）+ solve(★主入口) / watch / cmd_run / cmd_findings / cmd_jobs
+  runtime/       engine.py(★主循环) / llm/client(多模型路由+池) / sandbox(Docker沙箱) / stuck(卡死检测)
   core/
     job/         作业层：TaskSpec/JobRecord/store/event/resume/rounds/manager/worker
-    orchestrator/ dag 分流（默认单链+重试）、stages 多阶段、specialist(DAG,默认关)
+    orchestrator/ dag 分流(默认单链) / stages 多阶段 / frontier 意图调度 / specialist(DAG,默认关)
     profile/     profile YAML loader + render（system_extra 渲染）
     context/     S3 四件套：estimator/compaction(0.72)/roundpool(0.95)/budget/summarize
-    memory/      warroom 共享作战记忆（SQLite 四表）
-    llm/         litellm 适配（chat/intake 路径）
+    memory/      warroom 共享作战记忆（SQLite 四表，作业内暂存）
+    watchdog.py  空转监控（连续回合零新增 → paused + 换层提示）
   evaluation/    AI 评判层：anticheat → ground_truth → Jev 门控 → judge → verdict
-  learning/      经验闭环：distill（run后）/store(jsonl,sha1去重）/retrieve(启动注入)
-  tools/         内置工具 + plugin_loader（tools/plugins/*.yaml|py 外部能力集成）
+  findings/      漏洞发现全生命周期：模型/存储/report_finding 工具/verify 对抗式复现/cve 去重
+  intel/         图记忆：资产图+探索血缘图+锚点覆盖度+联想召回+冷压缩
+  learning/      经验闭环：distill(run后) / store(jsonl,sha1去重) / retrieve(启动注入)
+  traffic/       MITM 透明录制（mitmproxy）+ harness（per-job 容器生命周期）
+  evidence/      内容寻址证据快照（SHA-256 blob）+ 四角色绑定 + 证据包导出
+  report/        CWE 映射（内置字典+幻觉校验）+ 报告交付（md/md-zip/json + 一致性快照）
+  tools/         plugin_loader（tools/plugins/*.yaml|py 外部能力集成）
   governance/    scope/ratelimit/risk/audit
-  knowledge/     priors/（先验 md）+ prior_map.yaml（solve 关键词匹配表）
-tests/           单元测试为主（tests/unit/**），1 个集成文件（本地 skip）
-tools/plugins/   用户插件目录（getshell.yaml 示例）
-var/             运行时数据（jobs/knowledge/audit/sessions…，不入库）
-archive/         历史资料（v0.3 文档、旧格式 runs、data-legacy），仅供考古
-docs/            架构现状.md(权威) + 索引 README.md + 实验报告
+  challenge/     挑战加载（题面/入口抽取/附件解压，solve 的原材料）
+  config/        pydantic-settings 配置（app/llm/logging/audit/pricing）
+  knowledge/     priors/（先验打法 md）+ prior_map.yaml（关键词→先验路由表）
+tests/           单元测试（tests/unit/**，conftest 默认关沙箱）；FakeLLM 为地基，无 key 全链路可测
+tools/plugins/   用户插件目录（YAML 声明式 / Python）
+docker/          sandbox.Dockerfile（执行沙箱镜像）
+docs/            系统速览(第一入口) + 架构现状(权威) + 路线图 + 索引
+var/             运行时数据（jobs/knowledge/findings/intel.sqlite…，不入库）
+archive/         历史资料（v0.3 文档/旧格式数据），仅供考古
 ```
 
 ## 配置与环境变量

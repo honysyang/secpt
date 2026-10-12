@@ -17,42 +17,8 @@ llm:
   timeout_s: 60.0
   fake: false                       # true → 用 FakeLLM（测试 / dry-run）
 
-graph:
-  backend: memory                   # memory / sqlite / postgres（postgres 未实现）
-  sqlite:
-    path: ./var/graphstore.sqlite
-    echo: false
-  postgres:
-    dsn: ""
-    pool_size: 5
 
-react:
-  max_steps: 12
-  timeout_s: 600
-  early_stop_on_finish: true
-  reflection: false
 
-tools:
-  command_whitelist:
-    - nmap
-    - curl
-    - dig
-    - whois
-  tool_names:
-    - read_file
-    - nmap
-    - curl
-    - dig
-    - whatweb
-    - whois
-    - crawler
-    - http_analyze
-    - saml
-    - flag_extract
-  exec_timeout_s: 120
-  sandbox:
-    enabled: false
-    backend: null
 
 logging:
   level: INFO

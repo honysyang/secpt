@@ -35,12 +35,9 @@ from pydantic_settings import (
 from secpt.config.models import (
     AppConfig,
     AuditConfig,
-    GraphConfig,
     LLMConfig,
     LoggingConfig,
     PricingConfig,
-    ReactConfig,
-    ToolsConfig,
 )
 
 _ROOT_YAML = Path(__file__).resolve().parents[3] / "config.yaml"
@@ -75,9 +72,6 @@ class Settings(BaseSettings):
 
     app: AppConfig = Field(default_factory=AppConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    graph: GraphConfig = Field(default_factory=GraphConfig)
-    react: ReactConfig = Field(default_factory=ReactConfig)
-    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     pricing: PricingConfig = Field(default_factory=PricingConfig)

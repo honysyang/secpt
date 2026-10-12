@@ -12,9 +12,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import shutil
 
 import typer
 
@@ -46,65 +44,48 @@ app = typer.Typer(help="secpt — security penetration testing agent")
 def doctor() -> None:
     """检查环境与配置。"""
     from secpt.config.settings import get_settings
-    from secpt.core.graph.factory import get_graph_store
+    from secpt.runtime.llm.client import resolve_model
 
     settings = get_settings()
 
     typer.echo(f"app.name          = {settings.app.name}")
     typer.echo(f"app.version       = {settings.app.version}")
-    typer.echo(f"llm.provider      = {settings.llm.provider}")
     typer.echo(f"llm.planning      = {settings.llm.planning_model}")
     typer.echo(f"llm.eval          = {settings.llm.eval_model}")
-    typer.echo(f"llm.fake          = {settings.llm.fake}")
-    typer.echo(f"graph.backend     = {settings.graph.backend}")
-    typer.echo(f"tools.command_whitelist = {settings.tools.command_whitelist}")
-    typer.echo(f"tools.tool_names   = {settings.tools.tool_names}")
-    typer.echo(f"react.max_steps   = {settings.react.max_steps}")
 
-    # 打印实际注册的工具清单
-    from secpt.core.tools.registry import build_registry
-
-    reg = build_registry(
-        whitelist=settings.tools.command_whitelist,
-        tool_names=settings.tools.tool_names,
-    )
-    typer.echo("")
-    typer.echo("已注册工具:")
-    for t in reg.all():
-        typer.echo(f"  {t.name:20s} {t.description[:60]}")
-
-    # 检查 Web/SSO 工具
-    reg_names = set(reg.names())
-    missing = {"saml", "crawler"} - reg_names
-    if missing:
-        typer.echo(
-            f"⚠️  缺少 Web/SSO 工具: {', '.join(missing)}（Web/SSO 类题目需要 saml + crawler）"
-        )
-
+    # 模型路由检查（多 provider / 故障转移池）
     key_env = settings.llm.api_key_env
     has_key = bool(os.environ.get(key_env))
     typer.echo(f"llm.api_key_env   = {key_env}  {'✓ set' if has_key else '✗ NOT SET'}")
-
-    for name in settings.tools.whitelist:
-        path = shutil.which(name)
-        status = f"✓ {path}" if path else "✗ NOT FOUND in PATH"
-        typer.echo(f"  tool {name:10s} {status}")
-
+    if os.environ.get("SECPT_MODEL_POOL"):
+        typer.echo(f"llm.pool          = {os.environ['SECPT_MODEL_POOL']}")
     try:
-        store = get_graph_store(settings.graph)
-        asyncio.run(store.close())
-        typer.echo(f"graph.store       = ✓ ({settings.graph.backend})")
-    except Exception as exc:
-        typer.echo(f"graph.store       = ✗ {exc}")
+        base, _key, mid = resolve_model(settings.llm.planning_model)
+        typer.echo(f"llm.route         = ✓ {settings.llm.planning_model} -> {base} ({mid})")
+    except RuntimeError as exc:
+        typer.echo(f"llm.route         = ✗ {exc}")
         raise typer.Exit(1) from exc
+
+    # 沙箱与插件
+    from secpt.runtime.sandbox import docker_available
+    from secpt.tools.plugin_loader import discover_plugins
+
+    if os.environ.get("SECPT_SANDBOX") == "0":
+        typer.echo("sandbox           = 关闭（SECPT_SANDBOX=0）")
+    else:
+        ok = docker_available()
+        typer.echo(f"sandbox           = {'✓ docker 可用' if ok else '✗ 不可用（回退宿主执行）'}")
+    yp, pt = discover_plugins()
+    typer.echo(
+        f"plugins           = YAML:{sorted(yp) or '无'} Python:{sorted(pt) or '无'}"
+        "（tools/plugins/ 声明即装配）"
+    )
 
     if settings.llm.fake:
         typer.echo("llm.adapter       = FakeLLM (dry-run)")
-    else:
-        if not has_key:
-            typer.echo("llm.adapter       = ✗ missing API key")
-            raise typer.Exit(1)
-        typer.echo("llm.adapter       = LiteLLM (DeepSeek)")
+    elif not has_key:
+        typer.echo("llm.adapter       = ✗ missing API key")
+        raise typer.Exit(1)
 
     typer.echo("doctor: OK")
 
@@ -276,26 +257,6 @@ def challenge_cmd() -> None:
     """旧挑战自动渗透（已废弃）。S5 起由 orchestrator 取代。"""
     typer.echo("challenge 已废弃：S5 起用 secpt run --task <TaskSpec.yaml> 走 orchestrator")
     raise typer.Exit(1)
-
-
-@app.command("chat")
-def chat(
-    backend: str = typer.Option("memory", "--backend", help="GraphStore 后端 (memory/sqlite)"),
-    budget: float = typer.Option(50.0, "--budget", "-b", help="总预算"),
-    concurrency: int = typer.Option(3, "--concurrency", "-c", help="最大并发"),
-    session_id: str | None = typer.Option(None, "--session", "-s", help="会话 ID（默认自动生成）"),
-    fake: bool = typer.Option(False, "--fake", "-f", help="FakeLLM 干跑"),
-) -> None:
-    """进入交互式会话（自然语言即任务）。"""
-    from secpt.cli.chat import chat_cmd
-
-    chat_cmd(
-        backend=backend,
-        budget=budget,
-        concurrency=concurrency,
-        session_id=session_id,
-        fake=fake,
-    )
 
 
 if __name__ == "__main__":

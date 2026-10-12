@@ -12,7 +12,7 @@
 - ``openai/<model>`` → OPENAI_BASE_URL（默认官方）+ OPENAI_API_KEY
 - 自建网关/内网：``SECPT_MODEL_BASE_<PREFIX>`` / ``SECPT_MODEL_KEY_<PREFIX>`` /
   ``SECPT_MODEL_KEYENV_<PREFIX>`` 环境变量注入任意 provider
-- 非 OpenAI 兼容协议（如原生 anthropic）请走 core/llm 的 litellm 路径（chat/intake）
+- 非 OpenAI 兼容协议（如原生 anthropic）需先接入其 OpenAI 兼容端点再用本客户端
 """
 
 from __future__ import annotations

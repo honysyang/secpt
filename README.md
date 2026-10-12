@@ -80,18 +80,25 @@ secpt/
 ├── Makefile                   # make check = lint + format-check + test
 ├── pyproject.toml             # ruff(line-length 100, py312) / pytest / coverage
 ├── src/secpt/
-│   ├── cli/                   # typer 入口：solve(主) / run / judge / learn / chat / jobs
-│   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由) / intake
+│   ├── cli/                   # typer 薄注册层：solve(★主入口) / watch / cmd_run / cmd_findings / cmd_jobs
+│   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由+池) / sandbox(Docker沙箱)
 │   ├── core/
 │   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event/manager/worker
-│   │   ├── orchestrator/      # dag 分流(默认单链) / stages 多阶段 / specialist(DAG,默认关)
+│   │   ├── orchestrator/      # dag 分流(默认单链) / stages 多阶段 / frontier 意图调度
 │   │   ├── profile/           # profile YAML loader + system_extra 渲染
 │   │   ├── context/           # S3 四件套：compaction / rollover / budget / summarize
-│   │   ├── memory|llm|react|graph|tools|knowledge   # 共享记忆 / litellm / 遗留兼容
+│   │   ├── memory/            # warroom 共享作战记忆（作业内暂存）
+│   │   └── watchdog.py        # 空转监控
 │   ├── evaluation/            # AI 评判层（anticheat→Jev→judge→verdict）
+│   ├── findings/              # 漏洞发现全生命周期（验证纪律/CWE/CVE 去重）
+│   ├── intel/                 # 图记忆（资产图+血缘图+覆盖度+冷压缩）
+│   ├── traffic/ + evidence/   # MITM 流量录制 + 内容寻址证据快照
+│   ├── report/                # CWE 映射 + 报告交付（md/md-zip 证据包）
 │   ├── learning/              # 经验闭环（distill / store / retrieve）
-│   ├── tools/                 # 内置工具 + plugin_loader（plugins/ 外部能力集成）
-│   └── governance/            # scope / ratelimit / risk / audit
+│   ├── tools/                 # plugin_loader（plugins/ 外部能力集成）
+│   ├── governance/            # scope / ratelimit / risk / audit
+│   ├── challenge/             # 挑战加载（题面/入口/附件，solve 的原材料）
+│   └── knowledge/             # priors/ 先验打法 + prior_map.yaml 路由表
 ├── tests/unit/**              # 255 个单测（FakeLLM 为地基，无 key 全链路可测）
 ├── tools/plugins/             # 用户插件（YAML 声明式 / Python）
 ├── docs/                      # 架构现状(权威) + 索引 + 实验报告
