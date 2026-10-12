@@ -113,9 +113,13 @@ def doctor(
     typer.echo(f"llm.api_key_env   = {key_env}  {'✓ set' if has_key else '✗ NOT SET'}")
     if os.environ.get("SECPT_MODEL_POOL"):
         typer.echo(f"llm.pool          = {os.environ['SECPT_MODEL_POOL']}")
+    from secpt.cli.engine_runner import resolve_models
+
+    actual_primary, actual_fallback = resolve_models(None, None)
     try:
-        base, _key, mid = resolve_model(settings.llm.planning_model)
-        typer.echo(f"llm.route         = ✓ {settings.llm.planning_model} -> {base} ({mid})")
+        base, _key, mid = resolve_model(actual_primary)
+        typer.echo(f"llm.route         = ✓ {actual_primary} -> {base} ({mid})")
+        typer.echo(f"llm.fallback      = {actual_fallback}")
     except RuntimeError as exc:
         typer.echo(f"llm.route         = ✗ {exc}")
         raise typer.Exit(1) from exc
