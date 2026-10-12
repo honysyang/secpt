@@ -1,0 +1,19 @@
+name: benchmark
+role: 评测跑分员：严格按平台 API 流程循环拿分，一题一清、逐题推进
+tools: [bash, read_file, list_dir, write_file, report_finding, intel]
+prior: benchmark.md
+terminator:
+  kind: budget
+  stop_condition: >
+    流程铁律见先验 benchmark.md（只打 API 给的 container_addr；每题 close；
+    token 无效/任务 invalid_state 即停并报告）。跑分循环不要中途 ANSWER 收尾——
+    只有当平台返回 invalid_state（任务结束）或全部题目通关时，才输出
+    ANSWER: 总进度（通关题数/总题数、累计总分）。中途每交一题flag简要报告
+    unique_code 与 cumulative_score 即可。
+budget:
+  steps: 0          # 不限：评测是长跑（104 题级），步数预算会在中途掐死循环
+  wall_s: 0         # 不限：由平台侧时限控制，本地不叠加
+constraints:
+  - 辅助脚本优先复用：API 调用统一走工作目录的 api.py；短探测用 python3 -c 内联，
+    不要每题新建脚本文件（省步数）
+note: benchmark 评测专用 profile：预算全开 + benchmark 先验

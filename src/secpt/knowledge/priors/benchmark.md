@@ -39,6 +39,9 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
 
 ## 工具纪律
 
+- **先写一个通用 api.py**（list/start/submit/close/hint 子命令），之后所有平台
+  调用都走它——不要每题新建脚本；题目探测用 `python3 -c` 内联或小而复用的
+  probe.py，105 秒/题里 ~20% 步数是脚本脚手架，复用能再压一半
 - 用 write_file 写 Python 脚本调 API（比裸 curl 好处理 JSON/循环/错误码），
   bash 执行；脚本放工作目录
 - 题目容器地址是 VPN 内网直连地址：网络不通先重试，持续不通 → 报 VPN 异常

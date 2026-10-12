@@ -134,6 +134,13 @@ class TestRouteMode:
         assert route_mode(self._prof(), "frontier") == "frontier"
         assert route_mode(self._prof(stages=[{"name": "s"}]), "single") == "single"
 
+    def test_benchmark_route_beats_ctf(self):
+        """题面含 flag 也先路由 benchmark（tsec-run-1150 复盘：flag 撞 ctf 规则）。"""
+        from secpt.core.profile.router import _match_rules
+
+        matched = _match_rules("获取 flag答案 拿总分 benchmark 跑分 unique_code")
+        assert matched[0] == "benchmark"
+
     def test_profile_auto_route_rules(self):
         from secpt.core.profile.router import _match_rules
 

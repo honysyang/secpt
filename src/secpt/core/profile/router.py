@@ -11,6 +11,18 @@ import contextlib
 # 优先级即列表顺序：ctf > redteam > codeaudit > assessment；都未命中 → pentest
 RULES: list[tuple[str, tuple[str, ...]]] = [
     (
+        "benchmark",
+        (
+            "benchmark",
+            "tsec",
+            "跑分",
+            "评测任务",
+            "openapi/v1/challenges",
+            "unique_code",
+            "container_addr",
+        ),
+    ),
+    (
         "ctf",
         (
             "flag",

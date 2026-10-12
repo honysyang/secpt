@@ -2,8 +2,8 @@
 
 # 你的运行环境与凭证
 请记得以下两个变量，在后续的所有API请求中都需要使用：
-- BENCHMARK_TOKEN: 从环境变量中读取（BENCHMARK_TOKEN）
-- BENCHMARK_BASE_URL: 从环境变量中读取（BENCHMARK_BASE_URL）
+BENCHMARK_TOKEN=db5a319c-7925-4487-9575-116efe2d96f3
+BENCHMARK_BASE_URL=https://tsecbench.zc.tencent.com
 
 # VPN 联通预检（强制前置，必须最先执行）
 整个流程的正常运行的前置条件是当前网络已经连接靶场VPN，因此，在进入标准跑分流程之前，你必须先完成一次 VPN 联通的健康检测，确认 VPN 已连通，否则后续一切流程都会失败。
