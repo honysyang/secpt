@@ -109,7 +109,7 @@ class TestExportLog:
         out = export_log("j1", tmp_path / "run.json", fmt="json")
         import json as _json
 
-        rows = [_json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+        rows = [_json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
         assert len(rows) == 6 and rows[0]["type"] == "step"
 
     def test_export_missing_raises(self, tmp_path, monkeypatch):

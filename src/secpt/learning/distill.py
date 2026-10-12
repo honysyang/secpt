@@ -18,7 +18,9 @@ from secpt.learning.store import ExperienceJournal, LearnedExperience
 _PROMPT = """你是渗透测试经验提炼器。根据下面的任务与轨迹，提炼一条可迁移经验（不要针对具体靶场，要抽象成通用打法）。
 
 只输出 JSON：
-{{"title": "一句话标题", "technique": "技术分类(英文小写下划线)", "indicators": ["特征关键词1", "特征关键词2"], "what_worked": "行之有效的做法（200字内）", "pitfalls": ["无效尝试/坑"], "outcome": "success|fail|partial"}}
+{{"title": "一句话标题", "technique": "技术分类(英文小写下划线)", "indicators": ["特征关键词1", "特征关键词2"], "what_worked": "行之有效的做法（200字内）", "pitfalls": ["无效尝试/坑"], "outcome": "success|fail|partial", "importance": 1-10}}
+
+importance：这条经验对同类任务的价值（10=直接决定成败的打法，1=细枝末节）
 
 【任务】
 {objective}
@@ -88,6 +90,14 @@ def _load_job_text(job_dir: Path, max_chars: int = 6000) -> tuple[str, str]:
     return objective or job_dir.name, trajectory
 
 
+def _clamp_importance(v) -> float:
+    """importance 钳位 1-10（缺省/异常 → 5）。"""
+    try:
+        return max(1.0, min(10.0, float(v)))
+    except (TypeError, ValueError):
+        return 5.0
+
+
 async def distill_job(
     job_id: str,
     llm=None,
@@ -147,6 +157,7 @@ async def distill_job(
             what_worked=str(data.get("what_worked") or "")[:400],
             pitfalls=[str(x)[:120] for x in (data.get("pitfalls") or [])][:6],
             outcome=str(data.get("outcome") or "partial"),
+            importance=_clamp_importance(data.get("importance")),
             task_type=task_type,
             job_id=job_id,
         )

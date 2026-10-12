@@ -8,6 +8,7 @@ SECPT_EXPERIENCE=0 关闭；默认 top-3。
 from __future__ import annotations
 
 import os
+import time as _time
 
 from secpt.learning.store import ExperienceJournal, LearnedExperience
 
@@ -15,7 +16,21 @@ _MAX_ITEMS = 3
 _MAX_ITEM_CHARS = 220
 
 
+_HALF_LIFE_DAYS = 21.0  # 经验半衰期：3 周前的经验权重减半
+
+
+def _recency_factor(ts: float) -> float:
+    """时效衰减：exp(-ln2 * age/半衰期)——老经验不消失但降权。"""
+    if not ts:
+        return 1.0
+    age_days = max(0.0, (_time.time() - ts) / 86400.0)
+    import math
+
+    return math.exp(-math.log(2) * age_days / _HALF_LIFE_DAYS)
+
+
 def _score(query: str, exp: LearnedExperience) -> float:
+    """三维打分：相关性 × 重要性 × 时效（Generative Agents 三因子检索）。"""
     q = query.lower()
     s = 0.0
     if q in exp.title.lower():
@@ -25,10 +40,12 @@ def _score(query: str, exp: LearnedExperience) -> float:
     for ind in exp.indicators:
         if ind.lower() in q or q in ind.lower():
             s += 1.5
-    # technique 命中也加权（如 objective 提到 saml）
     if exp.technique and exp.technique.lower() in q:
         s += 2.0
-    return s
+    if s <= 0:
+        return 0.0
+    importance_w = 0.5 + (exp.importance or 5.0) / 10.0  # 0.6 ~ 1.5
+    return s * importance_w * _recency_factor(exp.ts)
 
 
 def search_experiences(

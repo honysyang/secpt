@@ -106,6 +106,6 @@ class TestUpDown:
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        ok, msg = vpn.down()
+        ok, _msg = vpn.down()
         assert ok and killed and "12345" in killed[0]
         assert not pid.exists()

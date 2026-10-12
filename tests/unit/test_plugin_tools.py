@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,3 +138,95 @@ class TestEngineIntegration:
         assert "getshell" in yp
         tools = engine_tools_for(["getshell", "nosuch"], dirs=[plug_dir])
         assert list(tools) == ["getshell"]
+
+
+class TestSanitizeOraclePlugin:
+    """净化器 oracle：注册/缺失依赖报错/差分判定（mock node+chromium）。"""
+
+    def _load(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "secpt_plugin_sanitize_oracle",
+            Path(__file__).resolve().parents[2] / "tools/plugins/sanitize_oracle.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_register_three_tools(self):
+        mod = self._load()
+        tools = mod.register()
+        assert set(tools) == {"sanitize_probe", "browser_check", "mxss_probe"}
+        for _name, (schema, fn) in tools.items():
+            assert schema["type"] == "object" and callable(fn)
+
+    def _mk_attachments(self, tmp_path):
+        blog = tmp_path / "blog"
+        blog.mkdir()
+        (blog / "sanitize.js").write_text("// sanitize", encoding="utf-8")
+        (blog / "package.json").write_text('{"dependencies":{}}', encoding="utf-8")
+        return blog
+
+    def test_mxss_probe_full_path(self, tmp_path, monkeypatch):
+        import json as _json
+
+        mod = self._load()
+        blog = self._mk_attachments(tmp_path)
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "npm":
+                (blog / "node_modules").mkdir(exist_ok=True)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if cmd[0] == "node":
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    _json.dumps({"success": True, "content": "<img src=x onerror=alert(1)>"}),
+                    "",
+                )
+            if cmd[0].endswith("chromium"):
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    "<html><body><div id='c'><img src=x onerror=alert(1)></div></body></html>",
+                    "",
+                )
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(
+            mod.shutil,
+            "which",
+            lambda b: f"/usr/bin/{b}" if b in ("node", "npm", "chromium") else None,
+        )
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(mod, "_ORACLE_ROOT", tmp_path / "cache")
+
+        tools = mod.register()
+        out = _run(
+            tools["mxss_probe"][1](
+                {"attachments_dir": str(blog), "payload": "<svg>...mutation...</svg>"}
+            )
+        )
+        data = _json.loads(out)
+        assert data["mxss"] is True  # 事件处理器在浏览器解析中复活
+        assert data["has_event_handlers"] is True
+
+    def test_missing_node_graceful(self, tmp_path, monkeypatch):
+        mod = self._load()
+        blog = self._mk_attachments(tmp_path)
+        monkeypatch.setattr(mod.shutil, "which", lambda b: None)
+        tools = mod.register()
+        out = _run(tools["sanitize_probe"][1]({"attachments_dir": str(blog), "payload": "x"}))
+        assert out.startswith("Error: 无 node")
+
+    def test_missing_dir_graceful(self, tmp_path, monkeypatch):
+        mod = self._load()
+        monkeypatch.setattr(mod.shutil, "which", lambda b: f"/usr/bin/{b}" if b == "node" else None)
+        tools = mod.register()
+        out = _run(
+            tools["sanitize_probe"][1]({"attachments_dir": str(tmp_path / "nope"), "payload": "x"})
+        )
+        assert out.startswith("Error: 附件目录不存在")

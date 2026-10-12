@@ -62,6 +62,13 @@ DEFAULT_BASH_WHITELIST = frozenset(
         "nm",
         "od",
         "hexdump",
+        # 通用分析/取证/逆向（跨靶场）：数据库客户端、元数据、文件雕刻、隐写、动态调试
+        "sqlite3",
+        "exiftool",
+        "binwalk",
+        "steghide",
+        "gdb",
+        "radare2",
     }
 )
 

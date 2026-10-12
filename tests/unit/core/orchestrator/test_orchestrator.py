@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from typing import ClassVar
 
 import pytest
 import yaml as _yaml
@@ -324,14 +325,12 @@ class TestRetryInheritsAnswers:
         from secpt.core.job.models import TaskBudget, TaskSpec
         from secpt.core.orchestrator.dag import run_single_chain
 
-        seen = {}
-
         class _R1:
             flag = None
             steps = 100
             wall_s = 600.0
             status = "step_exceeded"
-            messages = [
+            messages: ClassVar[list] = [
                 {"role": "assistant", "content": "ANSWER: 已通关 xben-005/006，flag{a} flag{b}"},
             ]
 
@@ -340,7 +339,7 @@ class TestRetryInheritsAnswers:
             steps = 1
             wall_s = 1.0
             status = "failed"
-            messages = []
+            messages: ClassVar[list] = []
 
         calls = []
 

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS intents (
     status TEXT DEFAULT 'open',        -- open/running/done/exhausted/blocked
     source TEXT DEFAULT 'planner',     -- planner | direct（人工直投：规划者见 direct 即暂停）
     depends_on TEXT DEFAULT '',        -- 逗号分隔 intent_id 或 fact:谓词（D2 依赖解锁）
+    max_steps INTEGER DEFAULT 0,       -- 意图级步数预算（0=不限；>0 硬止损，收益递减机械化）
     subgoal TEXT DEFAULT '',            -- Goals 层：本意图服务的子目标（跨轮方向一致性的锚点）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
@@ -55,6 +56,7 @@ class Intent:
     attempts: int
     source: str = "planner"
     depends_on: str = ""
+    max_steps: int = 0
 
 
 class Frontier:
@@ -76,6 +78,9 @@ class Frontier:
         if "depends_on" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN depends_on TEXT DEFAULT ''")
+        if "max_steps" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN max_steps INTEGER DEFAULT 0")
         if "subgoal" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN subgoal TEXT DEFAULT ''")
@@ -96,14 +101,15 @@ class Frontier:
         source: str = "planner",
         depends_on: str = "",
         subgoal: str = "",
+        max_steps: int = 0,  # 意图级步数预算（0=不限；>0 硬止损）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
         with self._conn() as c:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
-                                        source,depends_on,subgoal,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?)""",
+                                        source,depends_on,subgoal,max_steps,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -114,6 +120,7 @@ class Frontier:
                     source,
                     depends_on[:300],
                     subgoal[:300],
+                    int(max_steps),
                     now,
                     now,
                 ),
@@ -193,6 +200,7 @@ class Frontier:
             # sqlite3.Row 的 `in` 按值迭代不按键——必须 dict 化后 get（老库缺列兼容）
             source=dict(row).get("source", "planner"),
             depends_on=dict(row).get("depends_on", "") or "",
+            max_steps=int(dict(row).get("max_steps", 0) or 0),
         )
 
     def refund_attempt(self, iid: str) -> None:
@@ -536,6 +544,8 @@ async def run_frontier(
 
     async def _run_one(intent: Intent) -> str | None:
         """执行单条意图并结算。返回 answer（有成果时非空）。"""
+        # 意图级步数预算：硬止损（收益递减机械化）——意图预算优先于全局 profile
+        _kw = {"max_steps": intent.max_steps} if getattr(intent, "max_steps", 0) > 0 else {}
         result = await asyncio.to_thread(
             run_engine,
             objective=build_intent_objective(objective, intent, fr.recent_results(4)),
@@ -543,10 +553,13 @@ async def run_frontier(
             job_id=f"{base}-i{intent.id[-4:]}",
             llm=llm,
             model_primary=model,
+            **_kw,
         )
         answer = result.flag or ""
         if answer:
             status, why = "done", ""
+        elif getattr(intent, "max_steps", 0) > 0 and result.status == "step_exceeded":
+            status, why = "exhausted", f"超意图步数预算（{intent.max_steps} 步硬止损）"
         elif result.status in ("step_exceeded", "wallclock_exceeded") and intent.attempts >= 2:
             status, why = "exhausted", f"{result.status}（尝试 {intent.attempts} 次）"
         elif result.status == "error":

@@ -28,6 +28,7 @@ class LearnedExperience:
     what_worked: str = ""  # 行之有效的做法
     pitfalls: list[str] = field(default_factory=list)  # 踩过的坑/无效尝试
     outcome: str = "partial"  # success | fail | partial
+    importance: float = 5.0  # 蒸馏时 LLM 打 1-10（三维检索的权重轴）
     task_type: str = "generic"
     job_id: str = ""
     id: str = ""
@@ -42,6 +43,7 @@ class LearnedExperience:
             "what_worked": self.what_worked,
             "pitfalls": self.pitfalls,
             "outcome": self.outcome,
+            "importance": self.importance,
             "task_type": self.task_type,
             "job_id": self.job_id,
             "ts": self.ts,

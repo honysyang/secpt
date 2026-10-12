@@ -260,6 +260,14 @@ def solve(
 
     async def _run() -> dict:
         store = JobStore()
+        # benchmark 评测：并行跑分器（3 题并发 × 意图级止损）
+        if prof.name == "benchmark" and run_mode in ("auto", "single"):
+            from secpt.core.orchestrator.benchmark import run_benchmark
+
+            try:
+                return await run_benchmark(spec, llm=None, model=model)
+            except RuntimeError as e:
+                print(f"[solve] 并行跑分器初始化失败（{e}），回退单链")
         if run_mode == "stages":
             from secpt.core.orchestrator.stages import run_stages
 

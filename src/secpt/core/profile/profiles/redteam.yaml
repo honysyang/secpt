@@ -1,7 +1,7 @@
 name: redteam
 role: 红队操作员
 tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei]
-bash_whitelist_extra: [nmap, httpx, gobuster, nuclei]
+bash_whitelist_extra: [nmap, httpx, gobuster, nuclei, hydra, john, hashcat, sqlmap, wfuzz, ffuf, nc, tcpdump]
 prior: redteam.md
 terminator:
   kind: budget

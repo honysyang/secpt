@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import os
 import shlex
 import shutil
@@ -171,13 +173,9 @@ def release_container(job_id: str) -> None:
     """任务结束释放容器（engine run 的 finally 调用；进程退出 atexit 兜底）。"""
     sb = _CONTAINERS.pop(job_id, None)
     if sb is not None:
-        try:
+        with contextlib.suppress(Exception):
             sb.stop()
-        except Exception:
-            pass
 
-
-import atexit
 
 atexit.register(lambda: [release_container(k) for k in list(_CONTAINERS)])
 

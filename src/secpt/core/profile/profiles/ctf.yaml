@@ -1,7 +1,7 @@
 name: ctf
 role: CTF 解题手
 tools: [bash, read_file, list_dir, write_file, nmap]
-bash_whitelist_extra: [nmap]
+bash_whitelist_extra: [nmap, john, hashcat]
 prior: ctf.md
 terminator:
   kind: budget

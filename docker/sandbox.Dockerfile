@@ -6,11 +6,16 @@ FROM debian:bookworm-slim
 # 默认 deb.debian.org 源即可（构建环境实测通畅）；如需内网镜像在此 sed 切换
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates openssl \
-        nmap whatweb \
-        python3 \
+        nmap whatweb dnsutils whois \
+        python3 python3-pip sqlite3 \
         grep sed mawk findutils coreutils file \
         unzip \
-        dnsutils whois \
+        # 暴力破解 / 注入自动化
+        hydra john hashcat sqlmap wfuzz ffuf \
+        # 隐写 / 取证 / 逆向
+        steghide binwalk exiftool gdb radare2 \
+        # 网络链路 / 流量
+        netcat-openbsd tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

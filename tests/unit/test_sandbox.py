@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from typing import ClassVar
 
 import pytest
 
@@ -203,7 +204,7 @@ class TestWallZeroSemantics:
             steps = 1
             wall_s = 1.0
             status = "step_exceeded"
-            messages = []
+            messages: ClassVar[list] = []
 
         import secpt.cli.engine_runner as er
 

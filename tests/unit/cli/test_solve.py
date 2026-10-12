@@ -199,12 +199,13 @@ class TestCredentialPreflight:
         assert solve(str(d)) == 2  # 未设置 → 退出码 2，未运行
 
     def test_env_set_proceeds(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("BENCHMARK_TOKEN", "tk")
-        monkeypatch.setenv("BENCHMARK_BASE_URL", "http://x")
+        # 变量名不能含 benchmark（会触发并行路由）——本测试只验证预检通过后
+        # 能进入运行，走 ctf 单链
+        monkeypatch.setenv("MY_TASK_TOKEN", "tk")
         monkeypatch.setenv("SECPT_FAKE_LLM", "1")
         d = tmp_path / "bench2"
         d.mkdir()
-        (d / "test.md").write_text("用 $BENCHMARK_TOKEN 跑", encoding="utf-8")
+        (d / "test.md").write_text("用 $MY_TASK_TOKEN 跑", encoding="utf-8")
         from secpt.cli.solve import solve
 
         code = solve(str(d), steps=2, judge_enable=False, learn_enable=False)
