@@ -1290,3 +1290,5 @@ Transcript: var/jobs/9bebaf1b/ws/transcript.json  (98 messages)
 📌 状态: step_exceeded
 [progress] 已用 10 步 / 已过 23s / 最近工具有新信息
 [progress] 已用 20 步 / 已过 72s / 最近工具无新信息
+[progress] 已用 30 步 / 已过 135s / 最近工具无新信息
+[progress] 已用 40 步 / 已过 195s / 最近工具有新信息

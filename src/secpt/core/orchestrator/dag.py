@@ -139,12 +139,27 @@ async def run_single_chain(
         "wallclock_exceeded",
         "failed",
     ):
+        # 上一轮成果摘要：循环型长跑任务（benchmark/评测）里，"重试"是续跑——
+        # 已解出的答案必须带过去，否则 r2 会重打已通的题白烧步数
+        prev_answers: list[str] = []
+        for m in reversed(result.messages):
+            content = str(m.get("content") or "")
+            if m.get("role") == "assistant" and "ANSWER:" in content:
+                prev_answers.append(content.strip()[:1500])
+                if len(prev_answers) >= 2:
+                    break
+        prev_txt = "\n".join(reversed(prev_answers))
         retry_note = (
             "\n\n【上一次尝试未成功】\n"
             f"上次用了 {result.steps} 步，最终状态 {result.status}。\n"
             "请换一条不同的技术路线（例如：上次走协议攻击就改走凭据/配置；"
             "上次黑盒就先找源码；上次卡在工具用法上就换更简单的命令）。\n"
             "不要把上次的步骤原样重跑一遍。"
+            + (
+                f"\n\n【上一轮已产出的成果（直接继承，不要重复劳动）】\n{prev_txt}"
+                if prev_txt
+                else ""
+            )
         )
         retry_job_id = f"{spec.job_id}-r2"
         result2 = await asyncio.to_thread(

@@ -313,3 +313,51 @@ def test_taskspec_entries_parsing() -> None:
 
     empty = _spec("spec-empty", [])
     assert needs_orchestrator(empty) is False
+
+
+class TestRetryInheritsAnswers:
+    def test_retry_note_carries_previous_answers(self, tmp_path, monkeypatch):
+        """懒升级 r2 必须继承 r1 已产出的 ANSWER（benchmark 续跑不重打已通题）。"""
+        import asyncio as _a
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.job.models import TaskBudget, TaskSpec
+        from secpt.core.orchestrator.dag import run_single_chain
+
+        seen = {}
+
+        class _R1:
+            flag = None
+            steps = 100
+            wall_s = 600.0
+            status = "step_exceeded"
+            messages = [
+                {"role": "assistant", "content": "ANSWER: 已通关 xben-005/006，flag{a} flag{b}"},
+            ]
+
+        class _R2:
+            flag = None
+            steps = 1
+            wall_s = 1.0
+            status = "failed"
+            messages = []
+
+        calls = []
+
+        def fake_run_engine(**kw):
+            calls.append(kw)
+            return _R1() if len(calls) == 1 else _R2()
+
+        import secpt.cli.engine_runner as er
+
+        orig = er.run_engine
+        er.run_engine = fake_run_engine
+        try:
+            spec = TaskSpec(job_id="rt1", objective="跑分", budget=TaskBudget(steps=1))
+            _a.new_event_loop().run_until_complete(run_single_chain(spec, llm=object()))
+        finally:
+            er.run_engine = orig
+        # r2 的 objective 必须包含 r1 的成果
+        assert len(calls) == 2
+        assert "flag{a}" in calls[1]["objective"]
+        assert "上一轮已产出的成果" in calls[1]["objective"]
