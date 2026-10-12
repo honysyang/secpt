@@ -30,6 +30,18 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
 → 回 list 下一题
 ```
 
+## 单题止损纪律（tsec-run-1214 教训：一题死磕 40+ 步零产出）
+
+- **一道题超过 ~20 步没出 flag → 必须做决策**，不允许继续原路线硬试：
+  1. 先权衡看 hint（扣分换提示，通常比继续盲试便宜）；
+  2. hint 帮不上或代价太大 → close 该题，换下一道 easy 题——先拿完全部
+     简单分，最后回头打难题；
+  3. 死磕一道中硬题的机会成本 = 放弃 3-5 道 easy 题的分，永远选总分最大化。
+- 全端口扫描/目录爆破前先想：这道题的 flag 提示点在哪？无脑 fuzz 超过
+  5 轮无信号就停（先验：定向验证 > 盲目穷举）。
+- 已 close 放弃的题记进 recall（"xben-NNN 卡点在 Y"），回头再打时直接
+  从卡点继续，不重跑探索。
+
 ## 输出与终止
 
 - 每交一个 flag 报告：unique_code / correct_flag_count/total_flag_count / cumulative_score
