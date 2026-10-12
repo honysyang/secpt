@@ -217,8 +217,12 @@ def solve_entry(
         None, "--profile", "-p", help="任务 profile（默认自动路由：规则关键词→LLM 兜底）"
     ),
     prior: str | None = typer.Option(None, "--prior", help="先验覆盖（默认按关键词自动匹配）"),
-    model: str = typer.Option("deepseek-chat", "--model", "-m"),
-    fallback: str = typer.Option("deepseek-reasoner", "--fallback"),
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="主模型（默认读 SECPT_MODEL_PRIMARY，缺省 deepseek-chat）"
+    ),
+    fallback: str | None = typer.Option(
+        None, "--fallback", help="回退模型（默认读 SECPT_MODEL_FALLBACK）"
+    ),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
     mode: str = typer.Option(

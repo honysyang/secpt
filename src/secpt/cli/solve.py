@@ -156,8 +156,8 @@ def solve(
     *,
     profile: str | None = None,
     prior: str | None = None,
-    model: str = "deepseek-chat",
-    fallback: str = "deepseek-reasoner",
+    model: str | None = None,
+    fallback: str | None = None,
     wall: int = -1,
     steps: int = 0,
     mode: str = "auto",
@@ -345,8 +345,17 @@ def solve_cmd(
         None, "--profile", "-p", help="任务 profile（默认自动路由：规则关键词→LLM 兜底）"
     ),
     prior: str | None = typer.Option(None, "--prior", help="先验覆盖（默认自动匹配）"),
-    model: str = typer.Option("deepseek-chat", "--model", "-m"),
-    fallback: str = typer.Option("deepseek-reasoner", "--fallback"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="主模型（默认 SECPT_MODEL_PRIMARY 环境变量，缺省 deepseek-chat；支持 provider/model）",
+    ),
+    fallback: str | None = typer.Option(
+        None,
+        "--fallback",
+        help="回退模型（默认 SECPT_MODEL_FALLBACK 环境变量，缺省 deepseek-reasoner）",
+    ),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
     mode: str = typer.Option(

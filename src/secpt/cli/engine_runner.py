@@ -35,6 +35,17 @@ def _api_key() -> str:
     return key
 
 
+def resolve_models(primary: str | None, fallback: str | None) -> tuple[str, str]:
+    """模型名解析：显式参数 > 环境变量 > 内置默认。
+
+    SECPT_MODEL_PRIMARY / SECPT_MODEL_FALLBACK 让模型选择在 .env 里统一配置，
+    与 SECPT_MODEL_BASE_/KEY_/POOL 生态一致（provider/model 形式同样可用）。
+    """
+    primary = primary or os.environ.get("SECPT_MODEL_PRIMARY") or "deepseek-chat"
+    fallback = fallback or os.environ.get("SECPT_MODEL_FALLBACK") or "deepseek-reasoner"
+    return primary, fallback
+
+
 def _prod_llm():
     """生产 LLM 入口：SECPT_MODEL_POOL 设置时走多 provider 故障转移链。"""
     if os.environ.get("SECPT_MODEL_POOL"):
@@ -84,8 +95,8 @@ def run_engine(
     artifacts: list[str] | None = None,
     max_steps: int | None = None,
     max_wall_s: int | None = None,
-    model_primary: str = "deepseek-chat",
-    model_fallback: str = "deepseek-reasoner",
+    model_primary: str | None = None,
+    model_fallback: str | None = None,
     job_store: JobStore | None = None,
     llm=None,
     stage=None,
@@ -158,6 +169,7 @@ def run_engine(
     store = job_store or JobStore()
 
     # 构造 RunConfig + system
+    model_primary, model_fallback = resolve_models(model_primary, model_fallback)
     cfg = _engine.RunConfig(
         job_id=job_id,
         objective=objective,

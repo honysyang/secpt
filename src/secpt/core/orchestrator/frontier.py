@@ -354,7 +354,7 @@ async def run_frontier(
     max_rounds: int = 20,
     max_intents: int = 60,
     llm=None,
-    model: str = "deepseek-chat",
+    model: str | None = None,  # 缺省 SECPT_MODEL_PRIMARY > deepseek-chat
     planner_llm=None,  # 缺省与 worker 同模型；可分开（强模型规划+便宜模型执行）
     frontier: Frontier | None = None,
     max_workers: int = 1,  # D2.2 并发 worker 数（ARTEX 默认 3；>1 需事件唤醒）
@@ -369,7 +369,9 @@ async def run_frontier(
     """
     import asyncio
 
-    from secpt.cli.engine_runner import run_engine
+    from secpt.cli.engine_runner import resolve_models, run_engine
+
+    model, _fb = resolve_models(model, None)
 
     # llm 缺省时解析生产 LLM——planner 与 worker 共用（懒升级路径此前传 None 导致
     # planner 静默死亡：plan_round 捕获 AttributeError 返回 0 意图）

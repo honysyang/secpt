@@ -67,3 +67,21 @@ SECPT_TEST_D='single'
 
         _base, key, _mid = resolve_model("deepseek-chat")
         assert key == "sk-test-from-dotenv"
+
+
+class TestModelEnvConfig:
+    def test_primary_fallback_from_env(self, monkeypatch):
+        monkeypatch.setenv("SECPT_MODEL_PRIMARY", "openai/gpt-4o")
+        monkeypatch.setenv("SECPT_MODEL_FALLBACK", "mygw/qwen3-32b")
+        from secpt.cli.engine_runner import resolve_models
+
+        assert resolve_models(None, None) == ("openai/gpt-4o", "mygw/qwen3-32b")
+        # 显式参数优先于环境变量
+        assert resolve_models("deepseek-chat", None) == ("deepseek-chat", "mygw/qwen3-32b")
+
+    def test_defaults_without_env(self, monkeypatch):
+        monkeypatch.delenv("SECPT_MODEL_PRIMARY", raising=False)
+        monkeypatch.delenv("SECPT_MODEL_FALLBACK", raising=False)
+        from secpt.cli.engine_runner import resolve_models
+
+        assert resolve_models(None, None) == ("deepseek-chat", "deepseek-reasoner")
