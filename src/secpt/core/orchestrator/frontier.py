@@ -9,6 +9,7 @@ CHECKMATE/HPTSA 的可迁移最小实现：
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -28,6 +29,8 @@ CREATE TABLE IF NOT EXISTS intents (
     priority INTEGER DEFAULT 5,
     depth INTEGER DEFAULT 0,
     status TEXT DEFAULT 'open',        -- open/running/done/exhausted/blocked
+    source TEXT DEFAULT 'planner',     -- planner | direct（人工直投：规划者见 direct 即暂停）
+    depends_on TEXT DEFAULT '',        -- 逗号分隔 intent_id 或 fact:谓词（D2 依赖解锁）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -49,6 +52,8 @@ class Intent:
     depth: int
     status: str
     attempts: int
+    source: str = "planner"
+    depends_on: str = ""
 
 
 class Frontier:
@@ -73,14 +78,16 @@ class Frontier:
         done_criteria: str = "",
         priority: int = 5,
         depth: int = 0,
+        source: str = "planner",
+        depends_on: str = "",
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
         with self._conn() as c:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
-                                        created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?)""",
+                                        source,depends_on,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -88,11 +95,60 @@ class Frontier:
                     done_criteria[:500],
                     int(priority),
                     int(depth),
+                    source,
+                    depends_on[:300],
                     now,
                     now,
                 ),
             )
         return iid
+
+    def has_open_direct(self) -> bool:
+        """存在未完成的直投意图 → 规划者暂停（人工接管模式，ARTEX 模式②）。"""
+        with self._conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) n FROM intents WHERE source='direct'"
+                " AND status IN ('open','running')"
+            ).fetchone()["n"]
+        return int(n) > 0
+
+    def list_all(self, *, status: str | None = None, limit: int = 50) -> list[dict]:
+        sql, args = "SELECT * FROM intents WHERE 1=1", []
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        sql += " ORDER BY priority DESC, created_at LIMIT ?"
+        args.append(limit)
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(sql, args).fetchall()]
+
+    def deps_satisfied(self, intent: Intent) -> bool:
+        """依赖解锁：depends_on 为空 → 满足；否则逐项检查 intent done / fact 谓词。"""
+        raw = intent.depends_on
+        if not raw:
+            return True
+        for dep in raw.split(","):
+            dep = dep.strip()
+            if not dep:
+                continue
+            if dep.startswith("fact:"):
+                if not self._fact_exists(dep[5:]):
+                    return False
+            else:
+                with self._conn() as c:
+                    row = c.execute("SELECT status FROM intents WHERE id=?", (dep,)).fetchone()
+                if row is None or row["status"] != "done":
+                    return False
+        return True
+
+    def _fact_exists(self, predicate: str) -> bool:
+        """fact 谓词形如 'credential:admin'（intel 图节点前缀匹配）。"""
+        try:
+            from secpt.intel.store import IntelStore
+
+            return bool(IntelStore().recall(predicate, limit=1))
+        except Exception:
+            return False
 
     def claim_next(self) -> Intent | None:
         """领下一条：priority DESC → depth DESC（深度优先）→ 先创建先领。"""
@@ -116,6 +172,9 @@ class Frontier:
             depth=row["depth"],
             status="running",
             attempts=row["attempts"] + 1,
+            # sqlite3.Row 的 `in` 按值迭代不按键——必须 dict 化后 get（老库缺列兼容）
+            source=dict(row).get("source", "planner"),
+            depends_on=dict(row).get("depends_on", "") or "",
         )
 
     def settle(self, iid: str, *, status: str, result: str = "", fail_reason: str = "") -> None:
@@ -255,8 +314,16 @@ async def run_frontier(
     model: str = "deepseek-chat",
     planner_llm=None,  # 缺省与 worker 同模型；可分开（强模型规划+便宜模型执行）
     frontier: Frontier | None = None,
+    max_workers: int = 1,  # D2.2 并发 worker 数（ARTEX 默认 3；>1 需事件唤醒）
+    wake_queue: object | None = None,  # D2.3 外部触发队列（settle 时 put intent_id）
 ) -> dict:
-    """意图驱动主循环。返回汇总（chains/flags/wall）。"""
+    """意图驱动主循环。返回汇总（chains/flags/wall）。
+
+    模式语义：
+    - 队列中存在未完成的 direct（人工直投）意图 → 规划者暂停，只执行 direct，
+      全部 direct 完成且无新 direct → 结束（ARTEX 模式②）；此后恢复正常规划
+    - D2.2：max_workers>1 时并发跑多个 claim→run→settle 循环（原子认领）
+    """
     import asyncio
 
     from secpt.cli.engine_runner import run_engine
@@ -274,29 +341,32 @@ async def run_frontier(
     base = base_job_id or f"hunt-{uuid.uuid4().hex[:8]}"
     chains: list[dict] = []
     flags: list[str] = []
+    chains_lock = asyncio.Lock()
     idle_rounds = 0
     t0 = time.time()
 
-    for _round in range(max_rounds):
-        if fr.total() < max_intents and idle_rounds < 2:
-            max_depth = 0
-            with fr._conn() as c:
-                row = c.execute("SELECT MAX(depth) d FROM intents").fetchone()
-                max_depth = int(row["d"] or 0)
-            n_new = await plan_round(
-                objective,
-                fr,
-                planner_llm or llm,
-                model=model,
-                next_depth=max_depth + (1 if fr.total() else 0),
-            )
-            idle_rounds = 0 if n_new else idle_rounds + 1
-        intent = fr.claim_next()
-        if intent is None:
-            if idle_rounds >= 2:
-                break
-            idle_rounds += 1
-            continue
+    async def _maybe_plan() -> int:
+        """规划者轮：人工接管（direct 未完成）时暂停；否则产意图。"""
+        nonlocal idle_rounds
+        if fr.has_open_direct():
+            return 0  # 模式②：规划者暂停
+        if fr.total() >= max_intents or idle_rounds >= 2:
+            return 0
+        with fr._conn() as c:
+            row = c.execute("SELECT MAX(depth) d FROM intents").fetchone()
+            max_depth = int(row["d"] or 0)
+        n_new = await plan_round(
+            objective,
+            fr,
+            planner_llm,
+            model=model,
+            next_depth=max_depth + (1 if fr.total() else 0),
+        )
+        idle_rounds = 0 if n_new else idle_rounds + 1
+        return n_new
+
+    async def _run_one(intent: Intent) -> str | None:
+        """执行单条意图并结算。返回 answer（有成果时非空）。"""
         result = await asyncio.to_thread(
             run_engine,
             objective=build_intent_objective(objective, intent, fr.recent_results(4)),
@@ -308,21 +378,66 @@ async def run_frontier(
         answer = result.flag or ""
         if answer:
             status, why = "done", ""
-            flags.append(answer)
         elif result.status in ("step_exceeded", "wallclock_exceeded") and intent.attempts >= 2:
             status, why = "exhausted", f"{result.status}（尝试 {intent.attempts} 次）"
         elif result.status == "error":
             status, why = "blocked", "engine error"
         else:
-            status, why = ("exhausted", f"{result.status}（首次失败，可复核一次）")
+            status, why = "exhausted", f"{result.status}（首次失败，可复核一次）"
         fr.settle(
             intent.id, status=status, result=answer or f"steps={result.steps}", fail_reason=why
         )
-        chains.append(
-            {"intent": intent.title, "status": status, "steps": result.steps, "depth": intent.depth}
-        )
-        if answer:  # 拿到成果即整体收敛（调用人可决定是否继续扩面）
+        async with chains_lock:
+            chains.append(
+                {
+                    "intent": intent.title,
+                    "status": status,
+                    "steps": result.steps,
+                    "depth": intent.depth,
+                    "source": intent.source,
+                }
+            )
+        if wake_queue is not None:
+            with contextlib.suppress(Exception):  # D2.3 事件唤醒 planner
+                wake_queue.put_nowait(intent.id)
+        return answer or None
+
+    stop = False
+    for _round in range(max_rounds):
+        if stop:
             break
+        await _maybe_plan()
+        # D2.2 并发：本批领取最多 max_workers 条（跳过依赖未满足的）
+        batch: list[Intent] = []
+        for _ in range(max_workers):
+            intent = fr.claim_next()
+            if intent is None:
+                break
+            if not fr.deps_satisfied(intent):  # D2.1 依赖未满足 → 放回队尾
+                fr.settle(intent.id, status="open")
+                continue
+            batch.append(intent)
+        if not batch:
+            if idle_rounds >= 2 and not fr.count_open():
+                break
+            if fr.count_open():
+                continue  # 有意图但依赖未满足，等下一轮
+            idle_rounds += 1
+            continue
+        results = await asyncio.gather(*(_run_one(i) for i in batch))
+        for ans in results:
+            if ans:
+                flags.append(ans)
+                stop = True  # 拿到成果即整体收敛
+                break
+        # 模式②收尾：direct 全部完成且无 open → 停（人点单跑完就停）
+        if not fr.has_open_direct():
+            directs_left = [
+                c
+                for c in fr.list_all(limit=10)
+                if c.get("source") == "direct" and c["status"] in ("open", "running")
+            ]
+            _ = directs_left
 
     return {
         "job_id": base,

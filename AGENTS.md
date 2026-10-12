@@ -50,6 +50,8 @@ secpt solve challenges/rois-saml-sso
    `core/orchestrator/policy.py` DEPRECATED_MODULES
 5. **学习/评判是 best-effort**：learning 与 evaluation 任何失败静默降级，
    绝不让观测层打断主链路
+6. **审批/操舵是硬机制**：拦截规则求值在 run_bash 执行前（SECPT_INTERCEPT=0 可关）；
+   steer 经 SQLite 跨进程注入（hooks.on_step 返回字符串约定）
 
 ## 目录速查
 
@@ -59,7 +61,8 @@ src/secpt/
   runtime/       engine.py(★主循环) / llm/client(多模型路由+池) / sandbox(Docker沙箱) / stuck(卡死检测)
   core/
     job/         作业层：TaskSpec/JobRecord/store/event/resume/rounds/manager/worker
-    orchestrator/ dag 分流(默认单链) / stages 多阶段 / frontier 意图调度 / specialist(DAG,默认关)
+    orchestrator/ dag 分流(默认单链) / stages 多阶段 / frontier 意图调度(source=direct
+                人工直投) / steer.py 人在环路操舵 / specialist(DAG,默认关)
     profile/     profile YAML loader + render（system_extra 渲染）
     context/     S3 四件套：estimator/compaction(0.72)/roundpool(0.95)/budget/summarize
     memory/      warroom 共享作战记忆（SQLite 四表，作业内暂存）
@@ -72,7 +75,7 @@ src/secpt/
   evidence/      内容寻址证据快照（SHA-256 blob）+ 四角色绑定 + 证据包导出
   report/        CWE 映射（内置字典+幻觉校验）+ 报告交付（md/md-zip/json + 一致性快照）
   tools/         plugin_loader（tools/plugins/*.yaml|py 外部能力集成）
-  governance/    scope/ratelimit/risk/audit
+  governance/    scope/ratelimit/risk/audit + intercept.py 拦截审批(ask 阻塞人工放行)
   challenge/     挑战加载（题面/入口抽取/附件解压，solve 的原材料）
   config/        pydantic-settings 配置（app/llm/logging/audit/pricing）
   knowledge/     priors/（先验打法 md）+ prior_map.yaml（关键词→先验路由表）

@@ -279,6 +279,17 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             )
         argv: list[str] = [exe, "-c", command] if uses_shell else parts
 
+        # 人在环路-审批：白名单/元字符之后、执行之前（SECPT_INTERCEPT=0 可全局关）
+        if os.environ.get("SECPT_INTERCEPT", "1") != "0":
+            try:
+                from secpt.governance.intercept import Interceptor
+
+                ok, why = Interceptor().eval(tool="bash", command=command, job_id=cfg.job_id)
+                if not ok:
+                    return why
+            except Exception as e:
+                print(f"[intercept] 求值失败（放行）: {e}", file=sys.stderr)
+
         # 流量录制（B3）代理 env：宿主与容器两条执行路径共用
         proxy_env: dict | None = None
         _proxy = os.environ.get("SECPT_PROXY_URL")
@@ -524,7 +535,13 @@ class Engine:
                 elapsed = time.time() - t0
 
                 if self.hooks and hasattr(self.hooks, "on_step"):
-                    self.hooks.on_step(steps, elapsed)
+                    # 人在环路（steer）：hook 返回字符串则注入为 user 消息
+                    # （SteerHook 从 SQLite 队列拉人工操舵提示，下一轮即生效）
+                    _steer = self.hooks.on_step(steps, elapsed)
+                    if isinstance(_steer, str) and _steer.strip():
+                        messages.append({"role": "user", "content": _steer})
+                        if _v:
+                            print(f"  [steer] {_steer[:80]}...", file=sys.stderr)
 
                 # 每 10 步打印进度行（常驻，不进 verbose 门控）
                 if steps % 10 == 0:

@@ -16,6 +16,7 @@ import os
 
 import typer
 
+from secpt.cli import cmd_ops
 from secpt.cli.cmd_findings import (
     coverage_cmd,
     evidence_cmd,
@@ -92,6 +93,66 @@ def doctor() -> None:
 
 app.command("run")(run_cmd)
 app.command("resume")(resume_cmd)
+
+
+@app.command("steer")
+def steer_entry(
+    job_id: str = typer.Argument(..., help="目标 job_id"),
+    msg: str = typer.Argument(..., help="操舵提示（不打断任务，下一步即生效）"),
+) -> None:
+    """人在环路-中途纠偏：给正在运行的任务注入提示（ARTEX SteerWork 同款）。"""
+    from secpt.cli.cmd_ops import steer_cmd
+
+    steer_cmd(job_id, msg)
+
+
+@app.command("pending")
+def pending_entry() -> None:
+    """查看等待人工审批的拦截请求（配合 secpt approve/deny）。"""
+    from secpt.cli.cmd_ops import pending_cmd
+
+    pending_cmd()
+
+
+@app.command("approve")
+def approve_entry(pending_id: str = typer.Argument(...)) -> None:
+    """放行被 ask 规则拦截的命令。"""
+    from secpt.cli.cmd_ops import decide_cmd
+
+    decide_cmd(pending_id, True)
+
+
+@app.command("deny")
+def deny_entry(pending_id: str = typer.Argument(...)) -> None:
+    """拒绝被 ask 规则拦截的命令。"""
+    from secpt.cli.cmd_ops import decide_cmd
+
+    decide_cmd(pending_id, False)
+
+
+@app.command("metrics")
+def metrics_entry(
+    fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
+) -> None:
+    """运营指标：成功率/确认率/误报率/成本/人在环路干预次数。"""
+    from secpt.cli.cmd_ops import metrics_cmd
+
+    metrics_cmd(fmt)
+
+
+app.add_typer(cmd_ops.intent_app, name="intent")
+app.add_typer(cmd_ops.intercept_app, name="intercept")
+
+
+@app.command("graph")
+def graph_entry(
+    gtype: str = typer.Option("assets", "--type", "-t", help="assets|exploration"),
+    fmt: str = typer.Option("mermaid", "--format", "-f", help="mermaid|dot"),
+) -> None:
+    """双图可视化导出（贴进 Markdown/Typora 即看图；exploration=血缘链）。"""
+    from secpt.cli.cmd_ops import graph_export_cmd
+
+    graph_export_cmd(gtype, fmt)
 
 
 @app.command("solve")

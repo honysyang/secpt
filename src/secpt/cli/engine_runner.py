@@ -249,6 +249,9 @@ def run_engine(
     from secpt.intel.scribe import GraphScribe
 
     hooks = GraphScribe(hooks, job_id=job_id)
+    from secpt.core.orchestrator.steer import SteerHook
+
+    hooks = SteerHook(hooks, job_id=job_id)
 
     # JobRecord
     write_attachments_index(cfg.work_dir, artifacts or [])
@@ -371,6 +374,9 @@ def resume_engine(
     from secpt.intel.scribe import GraphScribe
 
     hooks = GraphScribe(hooks, job_id=job_id)
+    from secpt.core.orchestrator.steer import SteerHook
+
+    hooks = SteerHook(hooks, job_id=job_id)
     from secpt.core.profile.loader import load_profile as _load_profile
     from secpt.traffic.harness import traffic_scope
 

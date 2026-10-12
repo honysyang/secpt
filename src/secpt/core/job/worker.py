@@ -207,6 +207,9 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         from secpt.intel.scribe import GraphScribe
 
         hooks = GraphScribe(hooks, job_id=job_id)
+        from secpt.core.orchestrator.steer import SteerHook
+
+        hooks = SteerHook(hooks, job_id=job_id)
         from secpt.core.profile.loader import load_profile as _load_profile
         from secpt.traffic.harness import traffic_scope
 

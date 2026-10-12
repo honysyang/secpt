@@ -92,7 +92,7 @@ class TestTools:
     def test_tool_flow(self, tmp_path):
         st = IntelStore(tmp_path / "i.db")
         tools = make_intel_tools(st, job_id="j1")
-        assert set(tools) == {"observe_asset", "record_fact", "recall"}
+        assert set(tools) == {"observe_asset", "record_fact", "recall", "search_traces"}
 
         out = _run(tools["observe_asset"][1]({"asset_type": "endpoint", "value": "http://t/x"}))
         assert out.startswith("OK: asset#")

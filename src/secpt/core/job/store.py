@@ -174,6 +174,46 @@ class JobStore:
             )
             return int(cur.lastrowid)
 
+    def search_traces(
+        self, query: str, *, limit: int = 10, exclude_job: str | None = None
+    ) -> list[dict]:
+        """跨 job 过程级检索（ARTEX 原则 5：worker 互查执行过程）。
+
+        在 events 表的 tool_result/assistant 内容里 LIKE 匹配，返回
+        "哪个 job 哪一步见过类似响应"——线索先出现在中间日志里、
+        未必已形成正式 fact 时，这是拼回完整画面的通道。
+        """
+        like = f"%{query[:80]}%"
+        with self._conn() as conn:
+            sql = (
+                "SELECT job_id, seq, type, payload_json FROM events"
+                " WHERE (type IN ('tool_result','assistant','finding'))"
+                " AND payload_json LIKE ?"
+            )
+            args: list = [like]
+            if exclude_job:
+                sql += " AND job_id != ?"
+                args.append(exclude_job)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            args.append(limit)
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload_json"])
+            except json.JSONDecodeError:
+                payload = {}
+            preview = payload.get("preview") or payload.get("content") or payload.get("value") or ""
+            out.append(
+                {
+                    "job_id": r["job_id"],
+                    "seq": r["seq"],
+                    "type": r["type"],
+                    "preview": str(preview)[:200],
+                }
+            )
+        return out
+
     def get_events(self, job_id: str, limit: int = 1000) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(

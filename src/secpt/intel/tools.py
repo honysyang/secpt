@@ -49,12 +49,21 @@ RECALL_SCHEMA = {
     "required": ["query"],
 }
 
+TRACES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "检索词（跨任务执行过程里的响应片段）"},
+    },
+    "required": ["query"],
+}
+
 INTEL_TOOL_DOCS = (
     "- observe_asset(asset_type, value, parent?, parent_type?)  提交资产观察"
     "（域名/IP/服务/端点；程序自动去重建关系）\n"
     "- record_fact(node_type, content, related?, assets?)  记录事实/发现/线索/"
     "失败尝试（否定结论同样有价值，防重复踩坑）\n"
-    "- recall(query)  全文检索历史事实与发现（跨任务记忆）"
+    "- recall(query)  联想检索：图记忆 + 跨任务执行过程（命中标记 #图/🔗联想/≣过程）\n"
+    "- search_traces(query)  专查其他任务的过程日志（哪一步见过类似响应）"
 )
 
 
@@ -97,17 +106,41 @@ def make_intel_tools(store: IntelStore | None = None, *, job_id: str, box: dict 
             return f"Error: {e}"
 
     async def recall(args: dict) -> str:
+        """联想召回：intel 图 + 跨 job 执行过程（过程记忆排在图记忆后）。"""
+        q = str(args.get("query") or "")
+        lines: list[str] = []
         try:
-            hits = st.recall_graph(str(args.get("query") or ""), limit=8)
+            hits = st.recall_graph(q, limit=8)
+            for h in hits[:8]:
+                tag = "🔗" if h.get("associated") else "#"
+                lines.append(f"{tag}{h['id']} [{h['type']}] {h['content'][:160]}")
         except Exception as e:
             return f"Error: {e}"
-        if not hits:
+        try:
+            from secpt.core.job.store import JobStore
+
+            for t in JobStore().search_traces(q, limit=4, exclude_job=job_id)[:4]:
+                lines.append(f"≣{t['job_id']}:{t['seq']} [{t['type']}] {t['preview'][:160]}")
+        except Exception:
+            pass
+        if not lines:
             return "（无匹配记忆）"
-        lines = []
-        for h in hits[:8]:
-            tag = "🔗" if h.get("associated") else "#"
-            lines.append(f"{tag}{h['id']} [{h['type']}] {h['content'][:160]}")
         return "\n".join(lines)
+
+    async def search_traces(args: dict) -> str:
+        """专查跨任务执行过程（ARTEX 原则 5：worker 互查中间日志）。"""
+        q = str(args.get("query") or "")
+        try:
+            from secpt.core.job.store import JobStore
+
+            traces = JobStore().search_traces(q, limit=8, exclude_job=job_id)
+        except Exception as e:
+            return f"Error: {e}"
+        if not traces:
+            return "（无匹配过程记录）"
+        return "\n".join(
+            f"≣{t['job_id']}:{t['seq']} [{t['type']}] {t['preview'][:180]}" for t in traces[:8]
+        )
 
     return {
         "observe_asset": (
@@ -137,11 +170,22 @@ def make_intel_tools(store: IntelStore | None = None, *, job_id: str, box: dict 
                 "type": "function",
                 "function": {
                     "name": "recall",
-                    "description": "全文检索跨任务的历史事实与发现（过程级记忆）",
+                    "description": "联想检索：跨任务历史事实/发现 + 执行过程",
                     "parameters": RECALL_SCHEMA,
                 },
             },
             recall,
+        ),
+        "search_traces": (
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_traces",
+                    "description": "跨任务执行过程检索（其他 job 哪一步见过类似响应）",
+                    "parameters": TRACES_SCHEMA,
+                },
+            },
+            search_traces,
         ),
     }
 
@@ -151,6 +195,8 @@ def maybe_attach_intel(
 ) -> dict:
     """names 声明 intel 即装配三件套（与 report_finding 同一装配通道）。"""
     tools = dict(extra_tools)
-    if any(t in names for t in ("intel", "observe_asset", "record_fact", "recall")):
+    if any(
+        t in names for t in ("intel", "observe_asset", "record_fact", "recall", "search_traces")
+    ):
         tools.update(make_intel_tools(job_id=job_id, box=box))
     return tools
