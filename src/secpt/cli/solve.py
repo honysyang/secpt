@@ -202,6 +202,21 @@ def solve(
     )  # 绝对化：附件路径注入 objective 后不能被 bash 工作目录影响
     objective = doc.read_text(encoding="utf-8", errors="replace").strip()
 
+    # 凭证预检：题面引用的环境变量必须在（tsec-run-1129 教训：BENCHMARK_TOKEN 为空，
+    # agent 烧 75 步逆向猜 token + 扫内网 + 错把本地靶场当题目）。
+    # 匹配 $VAR / ${VAR} / "环境变量中读取（VAR）" 三种提法；缺失即报错退出。
+    import re as _re
+
+    _mentioned = set(_re.findall(r"\$\{?([A-Z][A-Z0-9_]{3,})\}?", objective))
+    _mentioned |= set(_re.findall(r"环境变量中读取[（(]([A-Z][A-Z0-9_]{3,})[）)]", objective))
+    _skip = {"SECPT_FAKE_LLM"}  # 系统自有开关，不视作任务凭证
+    _missing = sorted(v for v in _mentioned if v not in _skip and not os.environ.get(v))
+    if _missing:
+        print("Error: 题面引用的环境变量未设置，已中止（避免无凭证空跑）：")
+        for v in _missing:
+            print(f"  export {v}=<值>    # 或写入 .env")
+        return 2
+
     entries = _extract_entries(objective)
     artifacts = _prepare_attachments(challenge_dir) if challenge_dir.is_dir() else []
     prior_name = prior or _auto_prior(objective)

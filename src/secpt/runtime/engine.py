@@ -56,6 +56,12 @@ DEFAULT_BASH_WHITELIST = frozenset(
         "unzip",
         "zipinfo",
         "mkdir",
+        # 二进制/取证分析（只读、跨靶场通用）：反汇编/符号表/字节查看
+        "objdump",
+        "readelf",
+        "nm",
+        "od",
+        "hexdump",
     }
 )
 
@@ -350,16 +356,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
                             return f"Error: exit {rc}"
                         return _truncate_output(text)
             except SandboxUnavailable as e:
-                if cfg.sandbox == "docker":
-                    return f"Error: sandbox 不可用: {e}"
-                # auto 模式：容器起不来就回退宿主执行（观测层不阻断主链路），
-                # 告警只打一次，错误信息截断防刷屏
-                if not getattr(run_bash, "_sb_warned", False):
-                    run_bash._sb_warned = True
-                    print(
-                        f"[engine] 沙箱不可用，回退宿主执行: {str(e).splitlines()[0][:120]}",
-                        file=sys.stderr,
-                    )
+                return f"Error: sandbox 不可用: {e}"
 
         env = os.environ.copy()
         if proxy_env:

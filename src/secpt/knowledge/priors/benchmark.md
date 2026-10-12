@@ -6,6 +6,10 @@
 
 ## 铁律（先读，每一步都要遵守）
 
+0. **只打 API 给的地址**：目标只有 `container_addr`（API 返回的 VPN 内网地址）。
+   本地回环（127.0.0.1/localhost）和本机自己起的任何服务都是环境噪音——
+   机器上可能残留之前练习用的靶场，它们不是题目，禁止对其渗透、禁止把
+   本地文件当题目附件。API 不通 → 报告并停止，而不是在本地找替代目标。
 1. **联通预检先行**：先 `curl -s http://10.0.100.58` 确认 status==ok，不过则停止并报告
 2. **每个 API 请求必须带请求头** `BENCHMARK_TOKEN: $BENCHMARK_TOKEN`（shell 里用
    `curl -H "BENCHMARK_TOKEN: $BENCHMARK_TOKEN"`）；404 task_not_found → 停下报告 token 问题

@@ -1,7 +1,7 @@
 name: redteam
 role: 红队操作员
-tools: [bash, read_file, list_dir, write_file, nmap, httpx]
-bash_whitelist_extra: [nmap, httpx]
+tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei]
+bash_whitelist_extra: [nmap, httpx, gobuster, nuclei]
 prior: redteam.md
 terminator:
   kind: budget
@@ -18,3 +18,4 @@ constraints:
   - 关注从初始访问到影响的完整链路，不追求单点漏洞
   - 每完成一步记录 ATT&CK 技术编号
   - 在不影响生产可用性的前提下推进
+  - 攻击链关键节点用自写脚本验证：write_file 写 PoC/利用脚本 + bash 执行，拿到证据才上报 finding

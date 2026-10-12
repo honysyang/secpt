@@ -141,6 +141,47 @@ class SandboxUnavailable(RuntimeError):
     """沙箱不可用（docker 缺失/启动失败）。"""
 
 
+_CONTAINERS: dict[str, DockerSandbox] = {}
+
+
+def _container_alive(sb: DockerSandbox) -> bool:
+    try:
+        r = subprocess.run(["docker", "exec", sb.name, "true"], capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def get_container(job_id: str, *, work_dir: str) -> DockerSandbox:
+    """取该 job 的常驻容器（幂等：已有且存活则复用，否则新建）。
+
+    性能关键：tsec-run-1129 实测每步 ~4s 中 2-3s 是"每次 bash 都 docker run +
+    就绪轮询 + rm"的容器churn——持久化后每次命令只剩 docker exec（~50ms）。
+    """
+    sb = _CONTAINERS.get(job_id)
+    if sb is not None and _container_alive(sb):
+        return sb
+    sb = DockerSandbox(job_id, work_dir=work_dir)
+    sb.start()
+    _CONTAINERS[job_id] = sb
+    return sb
+
+
+def release_container(job_id: str) -> None:
+    """任务结束释放容器（engine run 的 finally 调用；进程退出 atexit 兜底）。"""
+    sb = _CONTAINERS.pop(job_id, None)
+    if sb is not None:
+        try:
+            sb.stop()
+        except Exception:
+            pass
+
+
+import atexit
+
+atexit.register(lambda: [release_container(k) for k in list(_CONTAINERS)])
+
+
 def sandbox_scope(job_id: str, *, work_dir: str, mode: str = "auto"):
     """上下文管理器：mode=docker/auto 且有 docker → 容器执行；否则 None（宿主）。
 
@@ -164,12 +205,8 @@ def sandbox_scope(job_id: str, *, work_dir: str, mode: str = "auto"):
                 raise SandboxUnavailable("docker 不可用但强制容器模式（SECPT_SANDBOX_MODE=docker）")
             yield None
             return
-        sb = DockerSandbox(job_id, work_dir=work_dir)
-        try:
-            sb.start()
-            yield sb
-        finally:
-            sb.stop()
+        # 持久化复用：同一 job 的所有 bash 命令共享一个容器（退出 scope 不销毁）
+        yield get_container(job_id, work_dir=work_dir)
 
     return _ctx()
 

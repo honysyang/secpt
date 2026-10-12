@@ -175,3 +175,30 @@ class TestAttachmentIndex:
 
         write_attachments_index(tmp_path / "ws", [])  # 不炸
         assert not (tmp_path / "ws" / "ATTACHMENTS.md").exists()
+
+
+class TestCredentialPreflight:
+    def test_missing_env_var_aborts(self, tmp_path, monkeypatch):
+        """题面引用未设置的凭证变量 → 启动前报错退出（不烧步数）。"""
+        monkeypatch.delenv("BENCHMARK_TOKEN", raising=False)
+        monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)
+        d = tmp_path / "bench"
+        d.mkdir()
+        (d / "test.md").write_text(
+            "调用 $BENCHMARK_TOKEN 与 环境变量中读取（BENCHMARK_BASE_URL）", encoding="utf-8"
+        )
+        from secpt.cli.solve import solve
+
+        assert solve(str(d)) == 2  # 未设置 → 退出码 2，未运行
+
+    def test_env_set_proceeds(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BENCHMARK_TOKEN", "tk")
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "http://x")
+        monkeypatch.setenv("SECPT_FAKE_LLM", "1")
+        d = tmp_path / "bench2"
+        d.mkdir()
+        (d / "test.md").write_text("用 $BENCHMARK_TOKEN 跑", encoding="utf-8")
+        from secpt.cli.solve import solve
+
+        code = solve(str(d), steps=2, judge_enable=False, learn_enable=False)
+        assert code in (0, 1)  # 正常进入运行（fake 模式）

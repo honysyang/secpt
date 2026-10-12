@@ -10,6 +10,8 @@ from secpt.runtime.sandbox import (
     DEFAULT_IMAGE,
     DockerSandbox,
     SandboxUnavailable,
+    get_container,
+    release_container,
     sandbox_scope,
 )
 
@@ -221,3 +223,30 @@ class TestWallZeroSemantics:
     def test_wall_zero_is_profile_default(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         assert self._capture(0.0) is None  # None → run_engine 用 profile
+
+
+class TestPersistentContainer:
+    def test_reuse_across_calls(self, tmp_path, monkeypatch):
+        """同一 job 多次取容器只创建一次（tsec-run-1129 性能修复）。"""
+        import subprocess
+
+        monkeypatch.setenv("SECPT_SANDBOX", "1")
+        monkeypatch.setattr("secpt.runtime.sandbox.docker_available", lambda: True)
+        monkeypatch.setattr(DockerSandbox, "_image_exists", staticmethod(lambda img: True))
+        starts = []
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["docker", "run"]:
+                starts.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "cid", "")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        sb1 = get_container("pj1", work_dir=str(tmp_path / "w"))
+        sb2 = get_container("pj1", work_dir=str(tmp_path / "w"))
+        assert sb1 is sb2 and len(starts) == 1  # 只建一次
+        release_container("pj1")
+        sb3 = get_container("pj1", work_dir=str(tmp_path / "w"))
+        assert sb3 is not sb1 and len(starts) == 2  # 释放后重建
+
+    def test_release_idempotent(self, tmp_path, monkeypatch):
+        release_container("nonexistent")  # 不炸

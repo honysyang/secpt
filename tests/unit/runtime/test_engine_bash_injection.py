@@ -123,6 +123,32 @@ class TestLegitCommandsWork:
         out = _run(tools["bash"]({"command": "ls *.py"}))
         assert out.startswith("Error:")
 
+    def test_binary_analysis_tools_available(self, tools):
+        """二进制/取证工具进默认白名单：objdump 等可直接调用。"""
+        out = _run(tools["bash"]({"command": "objdump --version"}))
+        assert not out.startswith("Error:"), out
+        assert "GNU objdump" in out
+        out2 = _run(tools["bash"]({"command": "readelf --version"}))
+        assert not out2.startswith("Error:"), out2
+
+    def test_write_script_then_verify(self, tools):
+        """自写脚本验证链路：write_file 写校验脚本 → bash python3 执行取结果。"""
+        tools["write_file"](
+            {
+                "path": "verify_probe.py",
+                "content": (
+                    "import sys, hashlib\n"
+                    "secret = open('needle.txt').read().strip()\n"
+                    "print('PROBE', hashlib.sha256(secret.encode()).hexdigest()[:8])\n"
+                    "sys.exit(0 if secret == 'p0c' else 1)\n"
+                ),
+            }
+        )
+        tools["write_file"]({"path": "needle.txt", "content": "p0c\n"})
+        out = _run(tools["bash"]({"command": "python3 verify_probe.py"}))
+        assert not out.startswith("Error:"), out
+        assert out.startswith("PROBE ")  # 脚本按预期执行并输出结果
+
     def test_empty_command(self, tools):
         assert _run(tools["bash"]({"command": "   "})).startswith("Error:")
 
