@@ -311,3 +311,39 @@ class TestVerdictChain:
         v = _run(evaluate_job("ji", jobs_dir=tmp_path, llm=bad))
         assert v.method == "heuristic"
         assert v.complete is False
+
+
+class TestEvidenceFallbackToEventStore:
+    def test_answer_found_in_full_events_after_rollover(self, tmp_path, monkeypatch):
+        """33 次 rollover 后尾部链丢失答案证据 → 从全量事件库回溯（tsec-run-1214）。"""
+        from secpt.core.job.models import JobRecord, TaskSpec
+        from secpt.core.job.store import JobStore
+        from secpt.evaluation.evidence import collect_evidence
+
+        job_dir = _make_job(tmp_path, "ev1", ["无关输出"], "已通关68题总分15900")
+        # 尾部 transcript 不含答案（模拟 rollover 截断）——重建一个
+        import json as _json
+
+        ws = job_dir / "ws"
+        (ws / "transcript.json").write_text(
+            _json.dumps(
+                [
+                    {"role": "system", "content": "s"},
+                    {"role": "assistant", "content": "ANSWER: 已通关68题总分15900"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        # 全量事件库里有答案证据（中途提交的正确响应）
+        store = JobStore(str(tmp_path / "jobs.sqlite"))
+        store.upsert_job(JobRecord(job_id="ev1", spec=TaskSpec(job_id="ev1", objective="o")))
+        store.add_event(
+            "ev1", "tool_result", {"status": "ok", "preview": "提交成功 已通关68题总分15900"}
+        )
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        # collect_evidence 的 JobStore 默认库是 var/secpt.sqlite——指向测试库
+        monkeypatch.setattr(
+            "secpt.core.job.store.JobStore", lambda *a, **k: JobStore(str(tmp_path / "jobs.sqlite"))
+        )
+        ev = collect_evidence("ev1", tmp_path)
+        assert ev.answer_in_outputs is True

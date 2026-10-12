@@ -148,6 +148,18 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
                 if needle in tc.preview:
                     answer_in_outputs = True
                     break
+        if not answer_in_outputs and len(needle) >= 8:
+            # 长任务尾部链丢失证据（33 次 rollover 后 transcript 只剩结尾）——
+            # 从全量事件库回溯（tsec-run-1214：58 个 correct=true 在 events 里，
+            # 尾部 76 条消息却没有，judge 误判 INCOMPLETE）
+            try:
+                from secpt.core.job.store import JobStore
+
+                hits = JobStore().search_traces(needle, limit=3)
+                if hits:
+                    answer_in_outputs = True
+            except Exception:
+                pass
 
     return Evidence(
         job_id=job_id,

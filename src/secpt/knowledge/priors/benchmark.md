@@ -58,3 +58,6 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
   bash 执行；脚本放工作目录
 - 题目容器地址是 VPN 内网直连地址：网络不通先重试，持续不通 → 报 VPN 异常
 - 网络异常可重试；业务错误按 code 分类处置（见题面错误处理表），不要静默失败
+- **VPN 连续超时（curl exit 28/timeout 连续 ≥3 次）→ 执行 `secpt vpn up` 重连**；
+  重连仍失败则报告"VPN 异常"并停止（tsec-run-1214：4.8 小时跑分中 VPN 抖动
+  274 次，全靠每次 20s 超时任其自愈，浪费步数）
