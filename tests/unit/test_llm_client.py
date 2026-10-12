@@ -168,7 +168,7 @@ class TestRequestParams:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "dk")
         for v in ("SECPT_LLM_TEMPERATURE", "SECPT_LLM_MAX_TOKENS"):
             monkeypatch.delenv(v, raising=False)
-        # config.yaml 里有默认值 0.2/2048 → 也会进 payload（配置即生效）
+        # 环境变量是唯一配置源：不配则参数不进 payload（用服务端默认）
         captured = {}
 
         class _Resp:
@@ -185,8 +185,8 @@ class TestRequestParams:
 
         monkeypatch.setattr(m, "_get_client", lambda: _Client())
         _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat", "dk"))
-        assert captured.get("temperature") == 0.2  # config.yaml llm.temperature
-        assert captured.get("max_tokens") == 2048  # config.yaml llm.max_tokens
+        assert "temperature" not in captured
+        assert "max_tokens" not in captured
 
     def test_base_url_override_for_default_provider(self, monkeypatch):
         """默认 deepseek 的 base_url 也可被 env 覆盖（自建网关场景）。"""

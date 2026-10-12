@@ -89,7 +89,8 @@ archive/         历史资料（v0.3 文档/旧格式数据），仅供考古
 
 ## 配置与环境变量
 
-- 配置优先级：环境变量 `SECPT_xxx__yyy` > `config.yaml` > pydantic 默认值
+- **环境变量是唯一配置源**（config.yaml 已移除）：项目根 `.env` 自动加载，
+  真实 export 优先于 .env；全部可调项见 `.env.example`
 - 数据根统一 `var/`（SECPT_VAR 可覆盖）；模型路由 `SECPT_MODEL_BASE_<PREFIX>` /
   `_KEY_<PREFIX>`；上下文窗口 `SECPT_CONTEXT_WINDOW`
 - API key 只从环境变量读取，**绝不写入仓库**（含 YAML/测试/fixture）

@@ -97,20 +97,14 @@ def doctor(
     """检查环境与配置（--stores 追加存储面体检）。"""
     if stores:
         _doctor_stores()
-    from secpt.config.settings import get_settings
+    import secpt
     from secpt.runtime.llm.client import resolve_model
 
-    settings = get_settings()
-
-    typer.echo(f"app.name          = {settings.app.name}")
-    typer.echo(f"app.version       = {settings.app.version}")
-    typer.echo(f"llm.planning      = {settings.llm.planning_model}")
-    typer.echo(f"llm.eval          = {settings.llm.eval_model}")
+    typer.echo(f"app.version       = {secpt.__version__}")
 
     # 模型路由检查（多 provider / 故障转移池）
-    key_env = settings.llm.api_key_env
-    has_key = bool(os.environ.get(key_env))
-    typer.echo(f"llm.api_key_env   = {key_env}  {'✓ set' if has_key else '✗ NOT SET'}")
+    has_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    typer.echo(f"llm.api_key_env   = DEEPSEEK_API_KEY  {'✓ set' if has_key else '✗ NOT SET'}")
     if os.environ.get("SECPT_MODEL_POOL"):
         typer.echo(f"llm.pool          = {os.environ['SECPT_MODEL_POOL']}")
     from secpt.cli.engine_runner import resolve_models
@@ -139,7 +133,7 @@ def doctor(
         "（tools/plugins/ 声明即装配）"
     )
 
-    if settings.llm.fake:
+    if os.environ.get("SECPT_FAKE_LLM"):
         typer.echo("llm.adapter       = FakeLLM (dry-run)")
     elif not has_key:
         typer.echo("llm.adapter       = ✗ missing API key")

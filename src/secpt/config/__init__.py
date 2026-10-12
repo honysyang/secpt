@@ -1,5 +1,1 @@
-"""pydantic-settings 配置层。
-
-加载顺序：env (SECPT_xxx__yyy) > config.yaml > 模型默认值。
-详见 :mod:`secpt.config.settings`。
-"""
+"""配置包：唯一配置源是环境变量（.env 自动加载，见 envfile.py）。"""

@@ -62,22 +62,14 @@ def resolve_model(model: str) -> tuple[str, str, str]:
 
 
 def _llm_param(env_name: str, attr: str, default):
-    """请求参数解析：环境变量 > config.yaml 的 llm 段 > 默认。
+    """请求参数解析：环境变量 > 默认（环境变量是唯一配置源，见 docs/系统速览）。
 
     SECPT_LLM_TEMPERATURE / SECPT_LLM_MAX_TOKENS / SECPT_LLM_TIMEOUT_S
-    与 SECPT_MODEL_* 生态一致；config.yaml 的 llm.temperature 等同名项同样生效。
+    与 SECPT_MODEL_* 生态一致。attr 参数保留仅为调用点签名兼容。
     """
     v = os.environ.get(env_name)
     if v not in (None, ""):
         return type(default)(v) if default is not None else v
-    try:
-        from secpt.config.settings import get_settings
-
-        cfg_val = getattr(get_settings().llm, attr, None)
-        if cfg_val is not None:
-            return cfg_val
-    except Exception:
-        pass
     return default
 
 

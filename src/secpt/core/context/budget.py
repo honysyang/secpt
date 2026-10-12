@@ -1,7 +1,8 @@
 """S3 预算追踪 BudgetTracker。
 
 累计 prompt_tokens / completion_tokens / cost_cny / wall_s。
-单价从 config.yaml 的 pricing 段读取（per 1K input/output），不写死。
+单价从环境变量读取（per 1K input/output），不写死：
+SECPT_PRICING_INPUT_PER_1K（默认 0.002）/ SECPT_PRICING_OUTPUT_PER_1K（默认 0.008）。
 
 阈值行为：
 - 达到 warn_pct（默认 80%）→ check() 返回 "warn"，由 Engine 往 messages
@@ -12,9 +13,16 @@
 
 from __future__ import annotations
 
+import os
 import time
 
-from secpt.config.settings import get_settings
+
+def _pricing() -> tuple[float, float]:
+    """token 单价（CNY/1K）：env 可覆盖，默认 deepseek-chat 价。"""
+    inp = float(os.environ.get("SECPT_PRICING_INPUT_PER_1K", "0.002"))
+    out = float(os.environ.get("SECPT_PRICING_OUTPUT_PER_1K", "0.008"))
+    return inp, out
+
 
 WARN_80_MSG = "预算已用 80%。请停止探索，把你已确认的事实整理成结构化结论输出。"
 
@@ -28,9 +36,9 @@ class BudgetTracker:
         input_per_1k: float | None = None,
         output_per_1k: float | None = None,
     ) -> None:
-        prices = get_settings().pricing
-        self.input_per_1k = prices.input_per_1k if input_per_1k is None else input_per_1k
-        self.output_per_1k = prices.output_per_1k if output_per_1k is None else output_per_1k
+        _inp, _out = _pricing()
+        self.input_per_1k = _inp if input_per_1k is None else input_per_1k
+        self.output_per_1k = _out if output_per_1k is None else output_per_1k
         self.cost_limit_cny = float(cost_limit_cny or 0.0)
         self.warn_pct = float(warn_pct)
         self.prompt_tokens = 0
@@ -70,9 +78,6 @@ class BudgetTracker:
 
 
 def tokens_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """按 config 单价估算一次调用的成本（CNY），供 EventSink 记账。"""
-    prices = get_settings().pricing
-    return (
-        max(0, prompt_tokens) / 1000.0 * prices.input_per_1k
-        + max(0, completion_tokens) / 1000.0 * prices.output_per_1k
-    )
+    """按 env 单价估算一次调用的成本（CNY），供 EventSink 记账。"""
+    inp, out = _pricing()
+    return max(0, prompt_tokens) / 1000.0 * inp + max(0, completion_tokens) / 1000.0 * out

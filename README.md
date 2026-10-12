@@ -64,13 +64,11 @@ make recheck REPORT=<report.json>      # 可选：复跑判据门禁
 > 开发约定与架构红线见 [AGENTS.md](AGENTS.md)；文档导航见 [docs/README.md](docs/README.md)；
 > 权威架构描述见 [docs/架构现状.md](docs/架构现状.md)。
 
-## 配置优先级
+## 配置
 
-```
-环境变量 (SECPT_xxx__yyy)  >  config.yaml  >  pydantic 模型默认值
-```
-
-例：环境变量 `SECPT_LLM__MODEL=deepseek-reasoner` 会覆盖 `config.yaml` 里的 `llm.model`。
+**环境变量是唯一配置源**（`config.yaml` 已移除）：复制 `.env.example` 为 `.env` 填入
+`DEEPSEEK_API_KEY` 即可；全部可调项见 `.env.example`（模型路由/请求参数/沙箱/人在环路）。
+优先级：真实 `export` > `.env` 文件 > 内置默认。
 
 ## 目录约定
 
