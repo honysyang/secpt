@@ -19,5 +19,5 @@ constraints:
   - 有附件必须先下载解压读源码（白盒优先于黑盒）
   - 不要扫描题面外的网段
   - 深度优先于覆盖度：一个点打穿再打下一个，禁止浅层铺开
-  - Web 目标先读 knowledge/skills/api-recon/SKILL.md，按手册收割 API 面再动手
+  - Web 目标先读 src/secpt/knowledge/skills/api-recon/SKILL.md，按手册收割 API 面再动手
 note: 0day 狩猎 profile：验证纪律在 stop_condition + report_finding 工具契约双层强制

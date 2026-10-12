@@ -52,7 +52,7 @@ class TestCveDedup:
         assert _run(dedup_known("x", "y", llm=None)) == []
 
     def test_skill_manual_exists(self):
-        p = Path(__file__).resolve().parents[2] / "knowledge/skills/api-recon/SKILL.md"
+        p = Path(__file__).resolve().parents[2] / "src/secpt/knowledge/skills/api-recon/SKILL.md"
         text = p.read_text(encoding="utf-8")
         assert "完成定义" in text and "流程门禁" in text and "pitfalls" in text.lower()
 
