@@ -146,7 +146,8 @@ class Frontier:
         try:
             from secpt.intel.store import IntelStore
 
-            return bool(IntelStore().recall(predicate, limit=1))
+            st = IntelStore(Path(os.environ.get("SECPT_VAR", "var")) / "intel.sqlite")
+            return bool(st.recall(predicate, limit=1))
         except Exception:
             return False
 
@@ -205,6 +206,40 @@ class Frontier:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def situation_report(self, *, limit: int = 6) -> dict:
+        """结构化态势：planner 的决策原材料（对齐 ARTEX 双图注入）。
+
+        比文本摘要多的三样：intel 图最新事实/发现（跨任务记忆）、
+        未触达资产（覆盖度缺口）、否定记录（防重复踩坑已有）。
+        """
+        report: dict = {
+            "open_intents": self.open_summary(limit),
+            "recent_results": self.recent_results(limit),
+        }
+        try:
+            from secpt.intel.store import IntelStore
+
+            # 调用时读 SECPT_VAR（模块级 DEFAULT_DB 是 import 期快照，测试/多实例会漂移）
+            st = IntelStore(Path(os.environ.get("SECPT_VAR", "var")) / "intel.sqlite")
+            with st._conn() as c:
+                rows = c.execute(
+                    """SELECT id,type,content FROM nodes
+                       WHERE type IN ('fact','finding','hint') AND COALESCE(cold,0)=0
+                       ORDER BY ts DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            report["recent_facts"] = [
+                {"id": r["id"], "type": r["type"], "content": str(r["content"])[:200]} for r in rows
+            ]
+            report["untested_assets"] = [
+                {"id": a["id"], "value": str(a["value"])[:100]}
+                for a in st.untested_assets(atype="endpoint", limit=5)
+            ]
+        except Exception:
+            report["recent_facts"] = []
+            report["untested_assets"] = []
+        return report
+
     def open_summary(self, limit: int = 10) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
@@ -232,6 +267,12 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 【当前待办】
 {opens}
 
+【图记忆·最新事实/发现（跨任务）】
+{facts}
+
+【覆盖度缺口·未触达资产（优先派这里）】
+{untested}
+
 只输出 JSON：[{{"title": "...", "goal": "...", "done_criteria": "...",
 "priority": 1-10, "depth": {next_depth}}}]"""
 
@@ -246,14 +287,16 @@ async def plan_round(
     next_depth: int = 0,
 ) -> int:
     """planner 新会话产意图。解析失败/无 llm 返回 0（调度继续，不阻塞）。"""
-    results = frontier.recent_results(5)
-    opens = frontier.open_summary(10)
+    situation = frontier.situation_report()
     prompt = _PLANNER_PROMPT.format(
         max_new=max_new,
         objective=objective[:1500],
-        results=json.dumps(results, ensure_ascii=False)[:1500] or "（无）",
-        opens=json.dumps(opens, ensure_ascii=False)[:800] or "（无）",
+        results=json.dumps(situation["recent_results"], ensure_ascii=False)[:1200] or "（无）",
+        opens=json.dumps(situation["open_intents"], ensure_ascii=False)[:600] or "（无）",
         next_depth=next_depth,
+        facts=json.dumps(situation.get("recent_facts", []), ensure_ascii=False)[:900] or "（无）",
+        untested=json.dumps(situation.get("untested_assets", []), ensure_ascii=False)[:400]
+        or "（无）",
     )
     try:
         if hasattr(llm, "call"):
@@ -403,41 +446,56 @@ async def run_frontier(
         return answer or None
 
     stop = False
-    for _round in range(max_rounds):
-        if stop:
-            break
-        await _maybe_plan()
-        # D2.2 并发：本批领取最多 max_workers 条（跳过依赖未满足的）
-        batch: list[Intent] = []
-        for _ in range(max_workers):
+    wake_q: asyncio.Queue = wake_queue if wake_queue is not None else asyncio.Queue()
+    stop_ev = asyncio.Event()
+
+    async def _worker_loop() -> None:
+        nonlocal stop
+        while not stop_ev.is_set():
             intent = fr.claim_next()
             if intent is None:
-                break
-            if not fr.deps_satisfied(intent):  # D2.1 依赖未满足 → 放回队尾
-                fr.settle(intent.id, status="open")
+                await asyncio.sleep(0.5)
                 continue
-            batch.append(intent)
-        if not batch:
-            if idle_rounds >= 2 and not fr.count_open():
-                break
-            if fr.count_open():
-                continue  # 有意图但依赖未满足，等下一轮
-            idle_rounds += 1
-            continue
-        results = await asyncio.gather(*(_run_one(i) for i in batch))
-        for ans in results:
+            if not fr.deps_satisfied(intent):  # D2.1 依赖未满足 → 放回
+                fr.settle(intent.id, status="open")
+                await asyncio.sleep(0.5)
+                continue
+            ans = await _run_one(intent)
             if ans:
                 flags.append(ans)
-                stop = True  # 拿到成果即整体收敛
+                stop = True
+                stop_ev.set()  # 拿到成果即整体收敛
+
+    workers = [asyncio.create_task(_worker_loop()) for _ in range(max_workers)]
+
+    # 事件驱动 planner：worker settle / 心跳 唤醒（对齐 ARTEX"数据库变化唤醒"）
+    idle_rounds = 0
+    rounds = 0
+    while rounds < max_rounds and not stop:
+        if fr.has_open_direct():
+            # 模式②：只执行 direct；队列清空且无 running → 结束
+            if fr.count_open() == 0:
                 break
-        # 模式②收尾：direct 全部完成且无 open → 停（人点单跑完就停）
-        if not fr.has_open_direct():
-            directs_left = [
-                c
-                for c in fr.list_all(limit=10)
-                if c.get("source") == "direct" and c["status"] in ("open", "running")
-            ]
-            _ = directs_left
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(wake_q.get(), timeout=2.0)
+            continue
+        starving = fr.count_open() < max_workers
+        if fr.total() < max_intents and idle_rounds < 2 and (starving or fr.count_open() == 0):
+            await _maybe_plan()
+            rounds += 1
+        if fr.count_open() == 0:
+            if fr.total() == 0 and rounds == 0:
+                continue  # 首盘：等 worker 空转也无妨，继续 plan
+            if idle_rounds >= 2:
+                break
+            timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）
+        else:
+            timeout = float(os.environ.get("SECPT_FRONTIER_HEARTBEAT", "60"))
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(wake_q.get(), timeout=timeout)
+
+    stop_ev.set()
+    await asyncio.gather(*workers, return_exceptions=True)
 
     return {
         "job_id": base,

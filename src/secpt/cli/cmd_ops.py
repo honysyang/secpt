@@ -9,6 +9,8 @@ ARTEX 三种工作模式在 CLI 上的落点：
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import typer
 
@@ -159,13 +161,15 @@ def decide_cmd(pending_id: str, approve: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def metrics_cmd(
-    fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
-    *,
-    _job_store=None,
-    _finding_store=None,
-) -> None:
-    """运营指标：成功率/确认率/误报率/成本/干预次数/恢复能力（ARTEX 原则 10）。"""
+METRICS_HISTORY = "metrics_history.jsonl"
+
+
+def _history_path() -> Path:
+    return Path(os.environ.get("SECPT_VAR", "var")) / METRICS_HISTORY
+
+
+def collect_metrics(*, _job_store=None, _finding_store=None) -> dict:
+    """聚合运营指标（metrics/report/snapshot/trend 共用）。"""
     from secpt.core.job.store import JobStore
     from secpt.findings.store import FindingStore
 
@@ -173,7 +177,6 @@ def metrics_cmd(
     jobs = store.list_jobs(limit=10000)
     total = len(jobs)
     succeeded = sum(1 for j in jobs if j.status == "succeeded")
-    failed = sum(1 for j in jobs if j.status == "failed")
     cancelled = sum(1 for j in jobs if j.status == "cancelled")
     budgetish = sum(
         1 for j in jobs if j.status in ("budget_exceeded", "step_exceeded", "wallclock_exceeded")
@@ -190,38 +193,33 @@ def metrics_cmd(
     reproduced = sum(1 for f in all_f for r in f.reproduced_by if r.get("verdict") == "reproduced")
     fixed = sum(1 for f in all_f for r in f.reproduced_by if r.get("verdict") == "fixed")
 
-    # 人工干预次数（steer + 审批事件）
-    import os
-    from pathlib import Path
-
-    var = Path(os.environ.get("SECPT_VAR", "var"))
     n_steer = 0
     n_approval = 0
     try:
         import sqlite3
 
+        var = Path(os.environ.get("SECPT_VAR", "var"))
         sp = var / "steer.sqlite"
         if sp.is_file():
             with sqlite3.connect(str(sp)) as c:
                 n_steer = c.execute("SELECT COUNT(*) FROM steer_msgs").fetchone()[0]
-        ip = var / "intercept.sqlite"
-        if ip.is_file():
-            with sqlite3.connect(str(ip)) as c:
+        ipath = var / "intercept.sqlite"
+        if ipath.is_file():
+            with sqlite3.connect(str(ipath)) as c:
                 n_approval = c.execute(
                     "SELECT COUNT(*) FROM intercept_pending WHERE status!='pending'"
                 ).fetchone()[0]
     except sqlite3.Error:
         pass
 
-    data = {
+    return {
         "tasks": {
             "total": total,
             "succeeded": succeeded,
-            "failed": failed,
             "cancelled": cancelled,
             "resource_exhausted": budgetish,
-            "success_rate": round(succeeded / total, 3) if total else 0.0,
             "resumed_after_interrupt": resumed,
+            "success_rate": round(succeeded / total, 3) if total else 0.0,
             "total_cost_cny": round(cost, 4),
             "avg_steps": round(sum(steps) / len(steps), 1) if steps else 0.0,
         },
@@ -236,80 +234,73 @@ def metrics_cmd(
         },
         "human_loop": {"steer_msgs": n_steer, "approvals": n_approval},
     }
-    if fmt == "json":
-        typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
-        return
+
+
+def _render_metrics(data: dict) -> str:
     t = data["tasks"]
     f = data["findings"]
     h = data["human_loop"]
-    typer.echo("== 任务 ==")
-    typer.echo(
+    lines = [
+        "== 任务 ==",
         f"  总数 {t['total']}  成功 {t['succeeded']} ({t['success_rate'] * 100:.1f}%)"
-        f"  资源耗尽 {t['resource_exhausted']}  中断后续跑 {t['resumed_after_interrupt']}"
-    )
-    typer.echo(f"  平均步数 {t['avg_steps']}  累计成本 ¥{t['total_cost_cny']}")
-    typer.echo("== 发现 ==")
-    typer.echo(
+        f"  资源耗尽 {t['resource_exhausted']}  中断后续跑 {t['resumed_after_interrupt']}",
+        f"  平均步数 {t['avg_steps']}  累计成本 ¥{t['total_cost_cny']}",
+        "== 发现 ==",
         f"  总数 {f['total']}  confirmed {f['confirmed']}  inferred {f['inferred']}"
-        f"  误报率 {f['fp_rate'] * 100:.1f}%  复现成功 {f['retest_reproduced']} 已修复 {f['retest_fixed']}"
-    )
-    typer.echo("== 人在环路 ==")
-    typer.echo(f"  操舵 {h['steer_msgs']} 次  审批 {h['approvals']} 次")
+        f"  误报率 {f['fp_rate'] * 100:.1f}%  复现成功 {f['retest_reproduced']} 已修复 {f['retest_fixed']}",
+        "== 人在环路 ==",
+        f"  操舵 {h['steer_msgs']} 次  审批 {h['approvals']} 次",
+    ]
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# 图可视化导出（D3.2，CLI 级——贴进 Markdown/Typora 即看图，不做 Web）
-# ---------------------------------------------------------------------------
-
-
-def graph_export_cmd(
-    gtype: str = typer.Option("assets", "--type", "-t", help="assets|exploration"),
-    fmt: str = typer.Option("mermaid", "--format", "-f", help="mermaid|dot"),
+def metrics_cmd(
+    fmt: str = "table",
+    snapshot: bool = False,
+    trend: int = 0,
+    *,
+    _job_store=None,
+    _finding_store=None,
 ) -> None:
-    """把 intel 双图导出为 mermaid（或 dot），人看覆盖、AI 贴报告。"""
-    from secpt.intel.store import IntelStore
+    """运营指标：成功率/确认率/误报率/成本/干预次数/恢复能力（ARTEX 原则 10）。
 
-    st = IntelStore()
-    lines = ["graph TD" if fmt == "mermaid" else "digraph G {"]
+    --snapshot 记录历史；--trend N 打印与最近 N 次快照的关键指标增量。
+    """
+    import time as _time
 
-    def esc(text: str) -> str:
-        return text.replace('"', "'")[:40]
-
-    if gtype == "assets":
-        rows = st.assets(limit=500)
-        by_id = {r["id"]: r for r in rows}
-        for r in rows:
-            label = f"{r['type']}:{esc(str(r['value']))}"
-            node = f"A{r['id']}"
-            if fmt == "mermaid":
-                lines.append(f'  {node}["{label}"]')
-            else:
-                lines.append(f'  {node} [label="{label}"];')
-            if r.get("parent_id") and r["parent_id"] in by_id:
-                edge = "-->" if fmt == "mermaid" else "->"
-                lines.append(f"  A{r['parent_id']} {edge} {node}")
+    data = collect_metrics(_job_store=_job_store, _finding_store=_finding_store)
+    if fmt == "json":
+        typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
     else:
-        with st._conn() as c:
-            nodes = c.execute(
-                "SELECT id,type,content FROM nodes WHERE COALESCE(cold,0)=0 LIMIT 300"
-            ).fetchall()
-            edges = c.execute("SELECT src,dst,kind FROM edges LIMIT 500").fetchall()
-        for n in nodes:
-            label = f"{n['type']}:{esc(str(n['content']))}"
-            node = f"N{n['id']}"
-            if fmt == "mermaid":
-                lines.append(f'  {node}["{label}"]')
-            else:
-                lines.append(f'  {node} [label="{label}"];')
-        for e in edges:
-            edge = "-->" if fmt == "mermaid" else "->"
-            lines.append(
-                f"  N{e['src']} {edge} N{e['dst']}"
-                + ("" if fmt == "mermaid" else f' [label="{e["kind"]}"];')
-            )
-            if fmt == "mermaid":
-                lines.append(f"  N{e['src']} -. {e['kind']} .-> N{e['dst']}")
-                lines.pop(-2)  # 去掉普通边，保留带 kind 的标注边
-    if fmt == "dot":
-        lines.append("}")
-    typer.echo("\n".join(lines))
+        typer.echo(_render_metrics(data))
+
+    hp = _history_path()
+    if trend > 0:
+        history: list[dict] = []
+        if hp.is_file():
+            history = [
+                json.loads(line)
+                for line in hp.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        if not history:
+            typer.echo("（无历史快照；先 --snapshot 记录几轮）")
+        else:
+            base = history[-trend]
+            typer.echo(f"\n== 趋势（相对 {-trend} 次前）==")
+            for dim, keys in (
+                ("tasks", ("total", "succeeded", "success_rate", "total_cost_cny")),
+                ("findings", ("total", "confirmed", "fp_rate")),
+            ):
+                for k in keys:
+                    delta = data[dim].get(k, 0) - base["data"].get(dim, {}).get(k, 0)
+                    sign = "+" if delta > 0 else ""
+                    typer.echo(
+                        f"  {dim}.{k}: {base['data'].get(dim, {}).get(k, 0)} → "
+                        f"{data[dim].get(k, 0)}（{sign}{round(delta, 3) if isinstance(delta, float) else delta}）"
+                    )
+    if snapshot:
+        hp.parent.mkdir(parents=True, exist_ok=True)
+        with open(hp, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": _time.time(), "data": data}, ensure_ascii=False) + "\n")
+        typer.echo(f"（已记录快照 → {hp}）")

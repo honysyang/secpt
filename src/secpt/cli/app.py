@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import typer
 
@@ -41,9 +42,61 @@ from secpt.cli.cmd_run import resume_cmd, run_cmd
 app = typer.Typer(help="secpt — security penetration testing agent")
 
 
+def _doctor_stores() -> None:
+    """存储面体检：每个 SQLite 可打开/有 WAL/表计数；跨库一致性警示。"""
+    import sqlite3
+
+    from secpt.config.envfile import project_env_file
+
+    var = Path(os.environ.get("SECPT_VAR", "var"))
+    dbs = {
+        "jobs/events": var / "secpt.sqlite",
+        "findings": var / "findings.sqlite",
+        "intel(双图)": var / "intel.sqlite",
+        "frontier(意图)": var / "frontier.sqlite",
+        "steer(操舵)": var / "steer.sqlite",
+        "intercept(审批)": var / "intercept.sqlite",
+    }
+    typer.echo("== 存储体检 ==")
+    all_ok = True
+    for name, path in dbs.items():
+        if not path.is_file():
+            typer.echo(f"  {name:16s} ○ 不存在（首次使用前正常）")
+            continue
+        try:
+            with sqlite3.connect(str(path), timeout=5) as c:
+                n = c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+                wal = path.with_suffix(path.suffix + "-wal")
+                typer.echo(
+                    f"  {name:16s} ✓ {path.stat().st_size // 1024}KB {n}表"
+                    f"{' (WAL活跃)' if wal.is_file() else ''}"
+                )
+        except sqlite3.Error as exc:
+            all_ok = False
+            typer.echo(f"  {name:16s} ✗ {exc}")
+    jobs_dir = var / "jobs"
+    n_jobs = len(list(jobs_dir.glob("*"))) if jobs_dir.is_dir() else 0
+    blob_dir = var / "evidence" / "blobs"
+    n_blobs = sum(1 for _ in blob_dir.rglob("*.bin")) if blob_dir.is_dir() else 0
+    typer.echo(f"  事件流/工作区   {'✓' if jobs_dir.is_dir() else '○'} {n_jobs} 个 job")
+    typer.echo(f"  证据 blob       {'✓' if blob_dir.is_dir() else '○'} {n_blobs} 个")
+    typer.echo(
+        "  一致性边界：跨库写已按幂等设计（sha1/内容寻址/原子认领），"
+        "无跨库事务——doctor 只做可开/可写体检，业务一致性靠幂等兜底。"
+    )
+    if not project_env_file().is_file() and not os.environ.get("DEEPSEEK_API_KEY"):
+        typer.echo("  ⚠️ 无 .env 且无 DEEPSEEK_API_KEY（export 或 cp .env.example .env）")
+    if not all_ok:
+        raise typer.Exit(1)
+
+
 @app.command()
-def doctor() -> None:
-    """检查环境与配置。"""
+def doctor(
+    stores: bool = typer.Option(False, "--stores", help="各 SQLite 存储健康/一致性检查"),
+) -> None:
+    """检查环境与配置（--stores 追加存储面体检）。"""
+    if stores:
+        _doctor_stores()
     from secpt.config.settings import get_settings
     from secpt.runtime.llm.client import resolve_model
 
@@ -133,11 +186,13 @@ def deny_entry(pending_id: str = typer.Argument(...)) -> None:
 @app.command("metrics")
 def metrics_entry(
     fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
+    snapshot: bool = typer.Option(False, "--snapshot", help="记录本次指标到历史"),
+    trend: int = typer.Option(0, "--trend", "-n", help="与最近 N 次快照对比"),
 ) -> None:
-    """运营指标：成功率/确认率/误报率/成本/人在环路干预次数。"""
+    """运营指标：成功率/误报率/成本/干预次数；--snapshot 记历史，--trend N 看趋势。"""
     from secpt.cli.cmd_ops import metrics_cmd
 
-    metrics_cmd(fmt)
+    metrics_cmd(fmt, snapshot=snapshot, trend=trend)
 
 
 app.add_typer(cmd_ops.intent_app, name="intent")

@@ -65,5 +65,5 @@ SECPT_TEST_D='single'
         load_env_file(p)
         from secpt.runtime.llm.client import resolve_model
 
-        base, key, mid = resolve_model("deepseek-chat")
+        _base, key, _mid = resolve_model("deepseek-chat")
         assert key == "sk-test-from-dotenv"
