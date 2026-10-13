@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import ClassVar
 
 import pytest
 
@@ -103,7 +104,7 @@ class TestLLMFallbackCoversNewProfiles:
             content = "pwn"
 
         class _Resp:
-            choices = [type("c", (), {"message": _Msg()})()]
+            choices: ClassVar[list] = [type("c", (), {"message": _Msg()})()]
 
         class _LLM:
             async def call(self, m, t, model):
@@ -131,7 +132,7 @@ class TestLLMFirstRouting:
             content = "pwn"
 
         class _Resp:
-            choices = [type("c", (), {"message": _Msg()})()]
+            choices: ClassVar[list] = [type("c", (), {"message": _Msg()})()]
 
         class _LLM:
             async def call(self, m, t, model):

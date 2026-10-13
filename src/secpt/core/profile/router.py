@@ -154,14 +154,17 @@ def _match_rules(text: str) -> list[str]:
 async def _llm_classify(objective: str, llm, api_key: str) -> str:
     """deepseek-chat 一次分类，temperature=0；失败回退默认。"""
     try:
-        from secpt.runtime.llm.client import call_llm
+        messages = [{"role": "user", "content": _CLASSIFY_PROMPT.format(text=objective[:2000])}]
+        if llm is not None:
+            # 调用方注入的 LLM（测试/分模型场景）优先
+            if hasattr(llm, "call"):
+                resp = await llm.call(messages, [], "deepseek-chat")
+            else:
+                resp = await llm(messages, [], "deepseek-chat", api_key)
+        else:
+            from secpt.runtime.llm.client import call_llm
 
-        resp = await call_llm(
-            [{"role": "user", "content": _CLASSIFY_PROMPT.format(text=objective[:2000])}],
-            [],
-            "deepseek-chat",
-            api_key,
-        )
+            resp = await call_llm(messages, [], "deepseek-chat", api_key)
         ans = (resp.choices[0].message.content or "").strip().lower()
         for name, _ in RULES:
             if name in ans:
