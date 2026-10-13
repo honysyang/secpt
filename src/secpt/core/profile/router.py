@@ -137,8 +137,11 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
 DEFAULT_PROFILE = "pentest"
 
 _CLASSIFY_PROMPT = (
-    "把下面的任务文本归类到五类之一，只输出一个词：ctf / pentest / redteam / "
-    "assessment / codeaudit。不要解释。\n任务文本：\n{text}"
+    "把下面的任务文本归类到一类，只输出一个词：ctf / pentest / redteam / "
+    "assessment / codeaudit / pwn / crypto / benchmark / hunter。不要解释。\n"
+    "各类特征：pwn=二进制利用(溢出/ROP/ncat/ELF)；crypto=密码学(RSA/AES/密文)；"
+    "benchmark=评测跑分(API 拉题交 flag)；hunter=0day 挖洞找新漏洞；"
+    "ctf=夺旗解题；pentest=授权渗透。\n任务文本：\n{text}"
 )
 
 
@@ -162,8 +165,10 @@ async def _llm_classify(objective: str, llm, api_key: str) -> str:
         for name, _ in RULES:
             if name in ans:
                 return name
-        if "pentest" in ans:
-            return "pentest"
+        # 规则外的合法 profile 名也接受（LLM 兜底可达 pwn/crypto/benchmark/hunter）
+        for extra in ("pwn", "crypto", "benchmark", "hunter"):
+            if extra in ans:
+                return extra
         return DEFAULT_PROFILE
     except Exception:
         return DEFAULT_PROFILE

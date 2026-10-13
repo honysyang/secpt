@@ -86,3 +86,26 @@ def test_routed_event_written(tmp_path) -> None:
     assert ep.is_file()
     lines = [ln for ln in ep.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert any('"routed"' in ln and '"profile": "redteam"' in ln for ln in lines)
+
+
+class TestLLMFallbackCoversNewProfiles:
+    def test_fallback_accepts_pwn_crypto(self, monkeypatch):
+        """LLM 兜底可路由 pwn/crypto/benchmark/hunter（此前只能五类）。"""
+        from secpt.core.profile import router as R
+
+        class _Msg:
+            content = "pwn"
+
+        class _Resp:
+            choices = [type("c", (), {"message": _Msg()})()]
+
+        class _LLM:
+            async def call(self, m, t, model):
+                return _Resp()
+
+        import asyncio
+
+        out = asyncio.new_event_loop().run_until_complete(
+            R._llm_classify("一道 nc 连上去的二进制题", _LLM())
+        )
+        assert out == "pwn"

@@ -1381,3 +1381,999 @@ Command 3 (at 497a06):
 📥 [ok] 0xcd6984 e1147cffb90e7cff100f7cffdd0f7cff82107cffe1147cffbd147cff5669727453656320504349204465766963653a20436c65616e696e672075702e2e2e0a00
 0xcd665c c40d7cffc40e7cffc40e7cffc40e7cffdd0d7cffc40e7cffc40e7cffc40e7cfff20d7cffc40e7cffc40e7cffc40e7cff070e7cffc40e7cffc40e7cffc40e7cff
 0xcd6600 68656c6c6f00000077656c636f6d6520746f2052435446323032352154686973206973206d7
+
+── step 85 · 23:27:16 (+470.5s) ──────────────────────────────
+💭 思考: Jump table at cd6984 (relative offsets added to cd6984):
+- entry 0: 0xff7c14e1 → signed = -(0x83a2??). Let's compute: 0xff7c14e1 as int32 = -8665887... Let me compute: 0x100000000 - 0xff7c14e1 = 0x83EB1F = 8637215. So entry0 = cd6984 - 0x83eb1f = ?
+  cd6984 = 13461956. minus 8637
+🔧 write_file: {"content": "import elfdump, struct\nfor v in [0x497819, 0x497824, 0x497830, 0x49783a]:\n    b = elfdump.dump_hex(v, 8)\n    print(hex(v), b.hex())\nprint(\"table:\")\nfor i in range(8):\n    b = elfdump.dump_hex(0xcd698
+📥 [ok] OK: wrote 305 bytes to var/jobs/7a921ace/ws/jt2.py
+
+── step 86 · 23:27:26 (+480.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 jt2.py"}
+📥 [ok] 0x497819 8b45b4488d148500
+0x497824 488d0559f183008b
+0x497830 488d154df1830048
+0x49783a 3effe0488b45b8c7
+table:
+0 0xff7c14e1 -8645407 -> 0x497e65
+1 0xff7c0eb9 -8646983 -> 0x49783d
+2 0xff7c0f10 -8646896 -> 0x497894
+3 0xff7c0fdd -8646691 -> 0x497961
+4 0xff7c1082 -8646526 -> 0x497a06
+5 0xff7c14e1 -8645407 -> 0x497e65
+6 0xff7c14bd -8645443 -> 0x497e41
+7 0x7472695
+
+── step 87 · 23:27:27 (+482.1s) ──────────────────────────────
+💭 思考: I made an arithmetic error before. Now corrected:
+- command 0 → 0x497e65 (default! unknown command)
+- command 1 → 0x49783d (init session)
+- command 2 → 0x497894 (allocate)
+- command 3 → 0x497961 (prepare read)
+- command 4 → 0x497a06 (merge)
+- command 5 → 0x497e65 (default)
+- comm
+🔧 bash: {"command": "sed -n \"440,478p\" dis_execute_command.txt"}
+📥 [ok]   497e48:	e8 2a ed ff ff       	call   496b77 <DEVICE>
+  497e4d:	48 89 c7             	mov    rdi,rax
+  497e50:	e8 86 09 00 00       	call   4987db <virtsec_reset>
+  497e55:	48 8b 45 b8          	mov    rax,QWORD PTR [rbp-0x48]
+  497e59:	c7 80 d8 0b 00 00 00 	mov    DWORD PTR [rax+0xbd8],0x0
+  497e60:	00 00 00 
+  497e63:	eb 48                	jmp    497ead <
+
+── step 88 · 23:27:34 (+488.6s) ──────────────────────────────
+💭 思考: Command 6 = reset (calls virtsec_reset). Default logs unknown.
+
+Now let me read the mmio_write register jump table to figure out which register triggers execute_command and how parameters are passed.
+
+The mmio_write register range is 0xc..0x38 (sub 0xc, cmp 0x2c). The table at cd
+🔧 write_file: {"content": "import elfdump, struct\ndef tbl(base, n):\n    for i in range(n):\n        b = elfdump.dump_hex(base+i*4, 4)\n        e = struct.unpack(\"<i\", b)[0]\n        print(hex(base+i*4), \"reg\", hex(0xc+i*4), \"->
+📥 [ok] OK: wrote 271 bytes to var/jobs/7a921ace/ws/jt3.py
+
+── step 89 · 23:27:38 (+492.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 jt3.py"}
+📥 [ok] mmio_write reg table @cd665c
+0xcd665c reg 0xc -> 0x497420
+0xcd6660 reg 0x10 -> 0x497520
+0xcd6664 reg 0x14 -> 0x497520
+0xcd6668 reg 0x18 -> 0x497520
+0xcd666c reg 0x1c -> 0x497439
+0xcd6670 reg 0x20 -> 0x497520
+0xcd6674 reg 0x24 -> 0x497520
+0xcd6678 reg 0x28 -> 0x497520
+0xcd667c reg 0x2c -> 0x49744e
+0xcd6680 reg 0x30 -> 0x497520
+0xcd6684 reg 0x34 -> 0x497520
+0x
+[progress] 已用 90 步 / 已过 494s / 最近工具无新信息
+
+── step 90 · 23:27:39 (+494.2s) ──────────────────────────────
+💭 思考: Now let me read the rest of mmio_write (lines 160-227) to see registers 0xc, 0x1c, 0x2c handlers and the default.
+🔧 bash: {"command": "sed -n \"160,227p\" dis_mmio_write.txt"}
+📥 [ok]   497452:	89 c2                	mov    edx,eax
+  497454:	48 8b 45 f0          	mov    rax,QWORD PTR [rbp-0x10]
+  497458:	89 90 8c 0d 00 00    	mov    DWORD PTR [rax+0xd8c],edx
+  49745e:	e9 f0 00 00 00       	jmp    497553 <virtsec_mmio_write+0x353>
+  497463:	48 8b 45 b8          	mov    rax,QWORD PTR [rbp-0x48]
+  497467:	89 c2                	mov    edx,eax
+
+
+── step 91 · 23:27:44 (+498.5s) ──────────────────────────────
+💭 思考: Now I found the crucial part! Register 0x1c (index4, target 0x497439) → let me look at lines 155-160 to see the code at 497439, 497420, 49744e.
+
+Let me view lines 145-165.
+🔧 bash: {"command": "sed -n \"140,165p\" dis_mmio_write.txt"}
+📥 [ok]   497406:	00 
+  497407:	48 8d 05 4e f2 83 00 	lea    rax,[rip+0x83f24e]        # cd665c <__func__.2+0x39c>
+  49740e:	8b 04 02             	mov    eax,DWORD PTR [rdx+rax*1]
+  497411:	48 98                	cdqe
+  497413:	48 8d 15 42 f2 83 00 	lea    rdx,[rip+0x83f242]        # cd665c <__func__.2+0x39c>
+  49741a:	48 01 d0             	add    rax,rdx
+  49741d:	3
+
+── step 92 · 23:27:46 (+500.9s) ──────────────────────────────
+💭 思考: Now I have the register map for MMIO writes (register offsets relative to BAR base):
+- 0x00..0x08: ?
+- 0x0c (idx0) → execute_command(value) — command register
+- 0x1c (idx4) → s+0xbd4 = value (session id)
+- 0x2c (idx8) → s+0xd8c = value (current block id)
+- 0x10? no, those are def
+🔧 write_file: {"content": "import elfdump, struct\ndef entries(base, n):\n    out=[]\n    for i in range(n):\n        b = elfdump.dump_hex(base+i*4, 4)\n        e = struct.unpack(\"<i\", b)[0]\n        out.append((i,hex(e & 0xffffffff
+📥 [ok] OK: wrote 337 bytes to var/jobs/7a921ace/ws/jt4.py
+
+── step 93 · 23:28:01 (+515.5s) ──────────────────────────────
+🔧 bash: {"command": "python3 jt4.py"}
+📥 [ok] mmio_write reg table @cd665c, 16 entries:
+0 0xff7c0dc4 0x497420
+1 0xff7c0ec4 0x497520
+2 0xff7c0ec4 0x497520
+3 0xff7c0ec4 0x497520
+4 0xff7c0ddd 0x497439
+5 0xff7c0ec4 0x497520
+6 0xff7c0ec4 0x497520
+7 0xff7c0ec4 0x497520
+8 0xff7c0df2 0x49744e
+9 0xff7c0ec4 0x497520
+10 0xff7c0ec4 0x497520
+11 0xff7c0ec4 0x497520
+12 0xff7c0e07 0x497463
+13 0xff7c0ec4 0x497520
+14 0xf
+
+── step 94 · 23:28:03 (+517.6s) ──────────────────────────────
+💭 思考: So there ARE 16 entries in the table but the cmp is 0x2c which allows index up to 11. Hmm. Unless the cmp is different. Wait, `cmp rax, 0x2c; ja` → if index > 0x2c (44) jump to default. But index = addr - 0xc, and addr can be up to... If addr were 0x3c → index 0x30 = 48 > 44 → de
+🔧 bash: {"command": "python3 elfdump.py 4973ed 49752d"}
+📥 [ok] 0x4973ed 488b45c04883e80c4883f82c0f8721010000488d148500000000488d054ef283008b04024898488d1542f283004801d03effe0488b45b889c2488b45f089d648
+0x49752d 4885c07420488b45c04889c6488d05f0f083004889c7b800000000e8c18c7800eb0390eb0190c931c031d231c931f631ffc3f30f1efa554889e54883ec204889
+
+
+── step 95 · 23:28:10 (+525.3s) ──────────────────────────────
+💭 思考: Yes: `48 8d 14 85 00 00 00 00` = lea rdx,[rax*4+0x0]. So index byte offset = (addr-0xc)*4.
+
+So register addr maps to table entry number (addr-0xc), and each entry is 4 bytes. For addr=0x10, entry 4 → cd666c → 0x497439 (writes 0xbd4). For addr=0x14 → entry 8 → cd667c → 49744e (wri
+🔧 write_file: {"content": "import elfdump, struct\nbase=0xcd665c\nfor i in range(45):\n    b = elfdump.dump_hex(base+i*4, 4)\n    e = struct.unpack(\"<i\", b)[0]\n    addr = 0xc + i\n    mark = \"  <== reg\" if addr%4==0 else \"\"\n  
+📥 [ok] OK: wrote 254 bytes to var/jobs/7a921ace/ws/jt5.py
+
+── step 96 · 23:28:21 (+535.7s) ──────────────────────────────
+🔧 bash: {"command": "python3 jt5.py"}
+📥 [ok] idx 0 addr 0xc -> 0x497420   <== reg
+idx 1 addr 0xd -> 0x497520 
+idx 2 addr 0xe -> 0x497520 
+idx 3 addr 0xf -> 0x497520 
+idx 4 addr 0x10 -> 0x497439   <== reg
+idx 5 addr 0x11 -> 0x497520 
+idx 6 addr 0x12 -> 0x497520 
+idx 7 addr 0x13 -> 0x497520 
+idx 8 addr 0x14 -> 0x49744e   <== reg
+idx 9 addr 0x15 -> 0x497520 
+idx 10 addr 0x16 -> 0x497520 
+idx 11 addr 0x17 
+
+── step 97 · 23:28:23 (+537.7s) ──────────────────────────────
+💭 思考: Now it's clear. Register map (MMIO write, BAR offset base 0):
+- 0x0c: command = value → virtsec_execute_command(value)
+- 0x10: s+0xbd4 = value (session id)
+- 0x14: s+0xd8c = value (current block id)
+- 0x18: s+0xbfc = value (block size for allocation)
+- 0x1c: s+0xc04 = value (?)
+-
+🔧 read_file: {"path": "dis_swap_blocks.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000004983ce <virtsec_swap_blocks>:
+  4983ce:	f3 0f 1e fa          	endbr64
+  4983d2:	55                   	push   rbp
+  4983d3:	48 89 e5             	mov    rbp,rsp
+  4983d6:	48 83 ec 70          	sub    rsp,0x70
+  4983da:	48 89 7d 98          	mov    QWORD PTR [rbp-
+
+── step 98 · 23:28:39 (+554.2s) ──────────────────────────────
+💭 思考: swap_blocks(s, i, j): swaps the 0x18-byte descriptors at index i and j (plus the associated data buffers at 0xd98+off and 0xea8+off... actually 0xea0? let me check). 
+
+At 498479: blockptr1 = &blocks[i]. `mov eax, [blockptr1+0xc]` → off1. `s + 0xd98 + off1` load 16 bytes → [rbp-0x
+🔧 bash: {"command": "sed -n \"150,220p\" dis_execute_command.txt"}
+📥 [ok]   497a2b:	48 8b 45 b8          	mov    rax,QWORD PTR [rbp-0x48]
+  497a2f:	89 d6                	mov    esi,edx
+  497a31:	48 89 c7             	mov    rdi,rax
+  497a34:	e8 11 09 00 00       	call   49834a <virtsec_find_block_index>
+  497a39:	89 45 c4             	mov    DWORD PTR [rbp-0x3c],eax
+  497a3c:	83 7d c0 ff          	cmp    DWORD PTR [rbp-0x40],0xfff
+
+── step 99 · 23:28:45 (+559.5s) ──────────────────────────────
+💭 思考: Let me continue reading lines 220-300 to get the full merge logic.
+🔧 bash: {"command": "sed -n \"212,300p\" dis_execute_command.txt"}
+📥 [ok]   497b19:	e9 8f 03 00 00       	jmp    497ead <virtsec_execute_command+0x6dc>
+  497b1e:	8b 45 c0             	mov    eax,DWORD PTR [rbp-0x40]
+  497b21:	2b 45 c4             	sub    eax,DWORD PTR [rbp-0x3c]
+  497b24:	89 c2                	mov    edx,eax
+  497b26:	f7 da                	neg    edx
+  497b28:	0f 49 c2             	cmovns eax,edx
+  497b2b:	83 f8 0
+[progress] 已用 100 步 / 已过 562s / 最近工具无新信息
+
+── step 100 · 23:28:47 (+561.5s) ──────────────────────────────
+💭 思考: Now I have the full merge logic:
+
+Merge(idx1 = [rbp-0x40], idx2 = [rbp-0x3c]):
+1. blk1 = &blocks[idx1], blk2 = &blocks[idx2]
+2. if !blk1->valid || !blk2->valid → error 6 (log "blocks are not adjacent"? no) → bd8=6
+   Actually the log at 497b0b just sets bd8=6 and returns.
+   Hmm,
+🔧 bash: {"command": "python3 elfdump.py 1aa6e80 1aa6ec0; python3 elfdump.py 1aa6ee0 1aa6f20"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 bash: {"command": "python3 -c \"import elfdump,struct; b=elfdump.dump_hex(0x1aa6e80,0x60); print(b.hex()); print([hex(x) for x in struct.unpack('<12Q', b)])\""}
+📥 [ok] 116e49000000000000724900000000000000000000000000000000000000000000000000000000000400000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+['0x496e11', '0x497200', '0x0', '0x0', '0x0', '0x400000004', '0x0', '0x0', '0x0', '0x0', '0x0', '0x0']
+
+
+── step 101 · 23:29:52 (+626.7s) ──────────────────────────────
+💭 思考: MemoryRegionOps: read = 0x496e11, write = 0x497200. So virtsec_mmio_read is at 0x496e11. Let me disassemble it.
+🔧 write_file: {"content": "import subprocess\nr = subprocess.run([\"objdump\",\"-d\",\"--start-address=0x496d00\",\"--stop-address=0x497200\",\"chal/qemu-system-x86_64\"], capture_output=True)\nopen(\"dis_read.txt\",\"w\").write(r.std
+📥 [ok] OK: wrote 289 bytes to var/jobs/7a921ace/ws/dis2.py
+
+── step 102 · 23:29:54 (+628.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 dis2.py"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000496d00 <pci_config_set_class+0x26>:
+  496d00:	ff                   	(bad)
+  496d01:	ff 90 c9 31 c0 31 
+19757
+
+
+── step 103 · 23:29:56 (+630.7s) ──────────────────────────────
+🔧 bash: {"command": "grep -n \"virtsec_mmio_read\" dis_read.txt; wc -l dis_read.txt"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+
+── step 104 · 23:29:58 (+632.6s) ──────────────────────────────
+🔧 bash: {"command": "grep -n virtsec_mmio_read dis_read.txt"}
+📥 [ok] 107:0000000000496e11 <virtsec_mmio_read>:
+127:  496e57:	0f 86 eb 01 00 00    	jbe    497048 <virtsec_mmio_read+0x237>
+130:  496e65:	0f 87 dd 01 00 00    	ja     497048 <virtsec_mmio_read+0x237>
+142:  496e98:	0f 84 22 01 00 00    	je     496fc0 <virtsec_mmio_read+0x1af>
+146:  496ea8:	0f 84 12 01 00 00    	je     496fc0 <virtsec_mmio_read+0x1af>
+150:  496eb8:	
+🔧 bash: {"command": "wc -l dis_read.txt"}
+📥 [ok] 369 dis_read.txt
+
+
+── step 105 · 23:30:00 (+634.9s) ──────────────────────────────
+🔧 bash: {"command": "sed -n \"107,215p\" dis_read.txt"}
+📥 [ok] 0000000000496e11 <virtsec_mmio_read>:
+  496e11:	f3 0f 1e fa          	endbr64
+  496e15:	55                   	push   %rbp
+  496e16:	48 89 e5             	mov    %rsp,%rbp
+  496e19:	48 83 ec 50          	sub    $0x50,%rsp
+  496e1d:	48 89 7d c8          	mov    %rdi,-0x38(%rbp)
+  496e21:	48 89 75 c0          	mov    %rsi,-0x40(%rbp)
+  496e25:	89 55 bc         
+
+── step 106 · 23:30:02 (+637.2s) ──────────────────────────────
+💭 思考: The read path:
+```
+off = addr - 0x1000
+blk = find_block(s, s->0xd8c)
+if (!blk || !blk->valid) → return error
+if (blk->0x14) decrypt_block(s, blk)
+if (off >= blk->size) → log "Data offset >= block size" then... go to 49703e (default)
+read_size = 4
+if (off + 4 > blk->size) read_siz
+🔧 read_file: {"path": "dis_generate_key.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000004986b1 <virtsec_generate_key>:
+  4986b1:	f3 0f 1e fa          	endbr64
+  4986b5:	55                   	push   rbp
+  4986b6:	48 89 e5             	mov    rbp,rsp
+  4986b9:	48 89 7d e8          	mov    QWORD PTR [rbp-0x18],rdi
+  4986bd:	c7 45 fc 00 00 00 00 	mov  
+🔧 bash: {"command": "sed -n \"215,369p\" dis_read.txt"}
+📥 [ok]   496fa8:	89 c6                	mov    %eax,%esi
+  496faa:	48 8d 05 37 f4 83 00 	lea    0x83f437(%rip),%rax        # cd63e8 <__func__.2+0x128>
+  496fb1:	48 89 c7             	mov    %rax,%rdi
+  496fb4:	b8 00 00 00 00       	mov    $0x0,%eax
+  496fb9:	e8 50 92 78 00       	call   c2020e <qemu_log>
+  496fbe:	eb 7e                	jmp    49703e <virtsec_mmio_re
+
+── step 107 · 23:30:20 (+654.8s) ──────────────────────────────
+💭 思考: Now the read register jump table at cd64c0, indexed by addr (0..0x34), so table has 0x35 entries (53 entries). Let's map registers:
+- 0x0: target#1? entry at 497078: returns 0x524f4953 = "ROIS" (little endian "...") — magic.
+Let me decode the table.
+
+Actually from the code: at 49
+🔧 write_file: {"content": "import elfdump, struct\nbase=0xcd64c0\nfor i in range(0x35):\n    b = elfdump.dump_hex(base+i*4, 4)\n    e = struct.unpack(\"<i\", b)[0]\n    print(\"addr\",hex(i), \"->\", hex(base+e))\n", "path": "jt6.py"}
+📥 [ok] OK: wrote 175 bytes to var/jobs/7a921ace/ws/jt6.py
+
+── step 108 · 23:30:23 (+658.1s) ──────────────────────────────
+🔧 bash: {"command": "python3 jt6.py"}
+📥 [ok] addr 0x0 -> 0x497078
+addr 0x1 -> 0x497179
+addr 0x2 -> 0x497179
+addr 0x3 -> 0x497179
+addr 0x4 -> 0x497085
+addr 0x5 -> 0x497179
+addr 0x6 -> 0x497179
+addr 0x7 -> 0x497179
+addr 0x8 -> 0x497092
+addr 0x9 -> 0x497179
+addr 0xa -> 0x497179
+addr 0xb -> 0x497179
+addr 0xc -> 0x4970a7
+addr 0xd -> 0x497179
+addr 0xe -> 0x497179
+addr 0xf -> 0x497179
+addr 0x10 -> 0x4970b4
+ad
+
+── step 109 · 23:30:25 (+660.2s) ──────────────────────────────
+[progress] 已用 110 步 / 已过 688s / 最近工具有新信息
+💭 思考: Register read map:
+- 0x00 → 0x524f4953 ("ROIS")  — magic value
+- 0x04 → 0x100
+- 0x08 → status (0xbd0)
+- 0x0c → 0
+- 0x10 → session id (0xbd4)
+- 0x14 → block id (0xd8c)
+- 0x18 → size (0xbfc)
+- 0x1c → 0xc04
+- 0x20 → error (0xbd8)
+- 0x24 → count (0xd88)
+- 0x28 → s+0x10d0 (32 bits)
+- 
+🔧 write_file: {"content": "import subprocess, re\n# dynamic imports\nr = subprocess.run([\"readelf\",\"-s\",\"--wide\",\"chal/qemu-system-x86_64\"], capture_output=True)\nout = r.stdout.decode(errors=\"replace\")\nfor line in out.spli
+📥 [ok] OK: wrote 680 bytes to var/jobs/7a921ace/ws/find_imports.py
+
+── step 110 · 23:30:53 (+688.2s) ──────────────────────────────
+🔧 bash: {"command": "python3 find_imports.py"}
+📥 [ok]    183: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND g_spawn_close_pid
+   413: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND system@GLIBC_2.2.5 (2)
+   846: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND g_spawn_async_with_pipes
+  1905: 00000000003a63df   360 FUNC    LOCAL  DEFAULT   16 piix4_acpi_system_hot_add_init
+  3177: 00000000003d6f1f   
+[engine] compact #2: 删 41 条
+🗜 压缩 #1: 删 41 条
+
+── step 111 · 23:31:07 (+702.1s) ──────────────────────────────
+💭 思考: QEMU imports `system@GLIBC_2.2.5`! There is a PLT entry for system. So we can call system directly via its PLT stub, avoiding needing the libc base for the function. We still need the arg (command string).
+
+Let me find the system@plt address.
+
+Also, let me look for strings "/bin/
+🔧 bash: {"command": "python3 find_imports.py 2>/dev/null; echo DONE"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 bash: {"command": "objdump -d -j .plt chal/qemu-system-x86_64"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .plt:
+
+0000000000328020 <.plt>:
+  328020:	ff 35 c2 00 95 01    	push   0x19500c2(%rip)        # 1c780e8 <_GLOBAL_OFFSET_TABLE_+0x8>
+  328026:	f2 ff 25 c3 00 95 01 	bnd jmp *0x19500c3(%rip)        # 1c780f0 <_GLOBAL_OFFSET_TABLE_+0x10>
+  32802d:	0f 1f 00             	nopl   (%rax)
+
+── step 112 · 23:31:11 (+705.5s) ──────────────────────────────
+💭 思考: I need the specific PLT stub for `system`. Let me use `objdump -d -j .plt.sec` or check the relocation table. Actually the .plt entries have `push $index; jmp`. The relocation table (`.rela.plt`) maps index→symbol. Let me use `objdump -R` or readelf -r to get GOT offsets, and `ob
+🔧 write_file: {"content": "import subprocess\nr = subprocess.run([\"objdump\",\"-d\",\"chal/qemu-system-x86_64\"], capture_output=True)\nout = r.stdout.decode(errors=\"replace\")\nlines = out.splitlines()\nfor i,l in enumerate(lines):
+📥 [ok] OK: wrote 566 bytes to var/jobs/7a921ace/ws/find_sys_plt.py
+
+── step 113 · 23:31:15 (+710.2s) ──────────────────────────────
+🔧 bash: {"command": "python3 find_sys_plt.py"}
+📥 [ok] 000000000032d6d0 <system@plt>:
+  32d6d0:	f3 0f 1e fa          	endbr64
+  32d6d4:	f2 ff 25 c5 b6 94 01 	bnd jmp *0x194b6c5(%rip)        # 1c78da0 <system@GLIBC_2.2.5>
+  32d6db:	0f 1f 44 00 00       	nopl   0x0(%rax,%rax,1)
+
+000000000032d6e0 <g_data_output_stream_set_byte_order@plt>:
+0000000001c78da0  0000019d00000007 R_X86_64_JUMP_SLOT     0000000000000000 sy
+
+── step 114 · 23:31:30 (+724.9s) ──────────────────────────────
+💭 思考: `system@plt` = 0x32d6d0. So we can set fn ptr = 0x32d6d0 and call system(arg).
+
+Now, the arg: we want a command string. Options:
+1. Use a fixed-address string that is a valid command. Let's search the binary for useful command strings. Actually, we could use "sh" if present. Let 
+🔧 write_file: {"content": "import subprocess\ndata = open(\"chal/qemu-system-x86_64\",\"rb\").read()\ndef find(s):\n    out=[]\n    i=0\n    while True:\n        j = data.find(s, i)\n        if j<0: break\n        out.append(j)\n     
+📥 [ok] OK: wrote 348 bytes to var/jobs/7a921ace/ws/search_str.py
+
+── step 115 · 23:31:36 (+730.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 search_str.py"}
+📥 [ok] b'/bin/sh' ['0xd98f3f', '0xda5d1f', '0xe502c2']
+b'/bin/bash' []
+b'cat /flag' []
+b'/flag' ['0xe0abcb', '0xe0b402', '0xe0b51b', '0xe0b8aa', '0xe0ba20', '0xe0c351']
+b'sh\x00' ['0x7516', '0x77b5', '0x8267', '0x865d', '0x8d0c', '0x8f68', '0x93d3', '0x94b8', '0x99f5', '0x9e62']
+b'/bin/cat' []
+
+
+── step 116 · 23:31:38 (+732.6s) ──────────────────────────────
+💭 思考: "/bin/sh" exists at file offsets 0xd98f3f etc. These are file offsets; the vaddr for .rodata = file offset + (vaddr - offset). Let me compute vaddrs.
+
+The ELF has sections; for the read-only data segment, p_vaddr - p_offset = const. Let me compute with the segment mapping.
+
+For t
+🔧 write_file: {"content": "import struct\ndata = open(\"chal/qemu-system-x86_64\",\"rb\").read()\ne_phoff = struct.unpack_from(\"<Q\", data, 0x20)[0]\ne_phentsize = struct.unpack_from(\"<H\", data, 0x36)[0]\ne_phnum = struct.unpack_fr
+📥 [ok] OK: wrote 894 bytes to var/jobs/7a921ace/ws/o2v.py
+
+── step 117 · 23:31:42 (+736.5s) ──────────────────────────────
+🔧 bash: {"command": "python3 o2v.py"}
+📥 [ok] LOAD vaddr 0x0 off 0x0 filesz 0x3271c8 memsz 0x3271c8
+LOAD vaddr 0x328000 off 0x328000 filesz 0x93617d memsz 0x93617d
+LOAD vaddr 0xc5f000 off 0xc5f000 filesz 0x42ae40 memsz 0x42ae40
+LOAD vaddr 0x108bc98 off 0x108ac98 filesz 0xcef860 memsz 0xd187d8
+e_type 3
+0xd98f3f -> 0xd98f3f
+0xda5d1f -> 0xda5d1f
+0xe502c2 -> 0xe502c2
+0xcd6600 -> 0xcd6600
+0xcd6608 -> 0xcd660
+
+── step 118 · 23:31:44 (+738.6s) ──────────────────────────────
+💭 思考: file offsets equal vaddrs for the first segments (p_vaddr == p_offset). Good. So "/bin/sh" is at vaddr 0xd98f3f (and others). And the string "hello" at 0xcd6600, gift string at 0xcd6608, system@plt at 0x32d6d0.
+
+Wait, but 0xd98f3f is in segment 2 (0xc5f000..0x1089e40). Yes it's r
+🔧 read_file: {"path": "dis_allocate_block.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000049800d <virtsec_allocate_block>:
+  49800d:	f3 0f 1e fa          	endbr64
+  498011:	55                   	push   rbp
+  498012:	48 89 e5             	mov    rbp,rsp
+  498015:	48 83 ec 20          	sub    rsp,0x20
+  498019:	48 89 7d e8          	mov    QWORD PTR [r
+🔧 read_file: {"path": "dis_find_block.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000497f67 <virtsec_find_block>:
+  497f67:	f3 0f 1e fa          	endbr64
+  497f6b:	55                   	push   rbp
+  497f6c:	48 89 e5             	mov    rbp,rsp
+  497f6f:	48 89 7d e8          	mov    QWORD PTR [rbp-0x18],rdi
+  497f73:	89 75 e4             	mov    
+
+── step 119 · 23:31:52 (+746.5s) ──────────────────────────────
+💭 思考: allocate_block:
+- validates size via validate_block_size (1..0x10)
+- finds first slot with valid==0 (byte at descriptor+0x15). Note offset: `rax = i*0x18; rax += s; rax += 0xc1d` → s + 0xc1d + i*0x18. Blocks start at 0xc08 + 8 = 0xc10? Hmm. Let's see: descriptors at s + 0xc08 + i
+🔧 bash: {"command": "ls -la"}
+📥 [ok] total 34540
+drwxrwxr-x  7 pwntools pwntools     4096 Oct 13 03:31 .
+drwxr-xr-x  1 root     root         4096 Oct 13 03:19 ..
+drwxrwxr-x  2 pwntools pwntools     4096 Oct 13 03:19 attachments
+-rw-rw-r--  1 pwntools pwntools      212 Oct 13 03:19 ATTACHMENTS.md
+-rw-r--r--  1 pwntools pwntools 35044039 Oct 13 03:20 attach.zip
+-rw-r--r--  1 pwntools pwntools    
+🔧 bash: {"command": "ls -la initrd"}
+📥 [ok] total 56
+drwxr-xr-x 14 pwntools pwntools 4096 Oct 13 03:21 .
+drwxrwxr-x  7 pwntools pwntools 4096 Oct 13 03:31 ..
+drwxr-xr-x  2 pwntools pwntools 4096 Oct 13 03:21 bin
+drwxr-xr-x  2 pwntools pwntools 4096 Oct 13 03:21 dev
+drwxr-xr-x  3 pwntools pwntools 4096 Oct 13 03:21 etc
+drwxr-xr-x  3 pwntools pwntools 4096 Oct 13 03:21 home
+drwxr-xr-x  3 pwntools pwntoo
+
+── step 120 · 23:32:07 (+762.0s) ──────────────────────────────
+[progress] 已用 120 步 / 已过 762s / 最近工具无新信息
+💭 思考: The initrd is extracted. Let me explore home/ and root/ and etc/init.d/rcS.
+🔧 bash: {"command": "find initrd/home initrd/root initrd/etc -type f"}
+📥 [ok] initrd/etc/inittab
+initrd/etc/init.d/rcS
+initrd/etc/fstab
+initrd/etc/group
+initrd/etc/passwd
+
+🔧 bash: {"command": "cat initrd/etc/init.d/rcS; echo ====; cat initrd/etc/inittab"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+[engine] rollover → session 2（max_steps）
+🔁 会话轮转 → round 2（新上下文链）
+
+── step 121 · 23:32:17 (+772.0s) ──────────────────────────────
+💭 思考: Let me continue from where I left off. Let me first look at the workspace to understand what's already there.
+💬 说: 基于交接，我将继续分析 VirtSec PCI 设备二进制，先查看当前工作区已有文件与分析产物。
+🔧 bash: {"command": "pwd; ls -la"}
+⚠️  [error] Error: 'pwd;' 不在白名单。可用命令：['ROPgadget', 'awk', 'base64', 'binwalk', 'cat', 'checksec', 'curl', 'cyclic', 'diff', 'echo', 'exiftool', 'file', 'find', 'gdb', 'grep', 'head', 'hexdump', 'intel', 'ls', 'mkdir', 'nc', 'nm', 'nmap', 'objdump', 'od', 'openssl', 'patchelf', 'pwd', 'python3', 'radare2', 'readelf', 'report_finding', 'sed', 'sha256sum', 'sort', 'sqlite3
+🔧 list_dir: {"path": "."}
+📥 [ok] . (54 items):
+  ATTACHMENTS.md  212
+  __pycache__/  0
+  attach.zip  35044039
+  attachments/  0
+  bootlog.bin  28539
+  chal/  0
+  cpio_extract.py  1317
+  dis2.py  289
+  dis_allocate_block.txt  7813
+  dis_class_init.txt  2712
+  dis_cleanup_all_blocks.txt  2490
+  dis_decrypt_block.txt  3340
+  dis_execute_command.txt  27476
+  dis_find_block.txt  2901
+  dis_find_
+
+── step 122 · 23:32:18 (+773.4s) ──────────────────────────────
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+💭 思考: Let me review the existing analysis. Let me look at the key disassembly files and the mmio_write, execute_command. Let me also check the chal and initrd directories.
+💬 说: 工作区已有大量分析产物。让我查看关键文件：mmio_write、execute_command，以及 chal/initrd 目录结构。
+🔧 bash: {"command": "ls -R chal; echo \"=====INITRD=====\"; ls -R initrd; echo \"=====ATTACHMENTS=====\"; ls -R attachments"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 read_file: {"path": "ATTACHMENTS.md"}
+📥 [ok] # 附件源码索引（绝对路径为准；同名 symlink 已建在本目录下）
+
+- /home/kali/secpt/challenges/bbox/attachments
+- /home/kali/secpt/challenges/bbox/attachments/b6b28b6e5923be09006dc10e6db4c16f
+
+🔧 read_file: {"path": "dis_mmio_write.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000497200 <virtsec_mmio_write>:
+  497200:	f3 0f 1e fa          	endbr64
+  497204:	55                   	push   rbp
+  497205:	48 89 e5             	mov    rbp,rsp
+  497208:	48 83 ec 50          	sub    rsp,0x50
+  49720c:	48 89 7d c8          	mov    QWORD PTR [rbp-0
+🔀 [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚你现在在哪一层、为什么卡住，再决定换到哪一层。
+
+── step 123 · 23:32:20 (+774.9s) ──────────────────────────────
+💭 思考: Let me reassess where I am. I'm in the static analysis layer of a QEMU PCI device challenge. I've been disassembling functions but haven't gotten to the actual exploitation or connecting to the remote.
+
+Let me think about this differently. This is a QEMU escape challenge "Let's e
+💬 说: 我在**静态反汇编层**卡住了——做了大量反汇编，但从未实际连接远程看协议，也没看 initrd 里的 guest 侧代码。先换层：查看目录结构 + 实际连接远程探协议。
+🔧 bash: {"command": "ls -R chal"}
+📥 [ok] chal:
+core.cpio
+Dockerfile
+pc-bios
+qemu-system-x86_64
+run.sh
+start.sh
+vmlinuz
+
+chal/pc-bios:
+bios-256k.bin
+bios.bin
+descriptors
+edk2-aarch64-code.fd
+edk2-arm-code.fd
+edk2-arm-vars.fd
+edk2-i386-code.fd
+edk2-i386-secure-code.fd
+edk2-i386-vars.fd
+edk2-loongarch64-code.fd
+edk2-loongarch64-vars.fd
+edk2-riscv-code.fd
+edk2-riscv-vars.fd
+edk2-x86_64-code.fd
+edk2-x86
+🔧 bash: {"command": "ls -R initrd"}
+📥 [ok] initrd:
+bin
+dev
+etc
+home
+lib
+lib64
+proc
+root
+sbin
+sys
+tmp
+usr
+
+initrd/bin:
+busybox
+
+initrd/dev:
+
+initrd/etc:
+fstab
+group
+init.d
+inittab
+passwd
+
+initrd/etc/init.d:
+rcS
+
+initrd/home:
+ctf
+
+initrd/home/ctf:
+
+initrd/lib:
+x86_64-linux-gnu
+
+initrd/lib/x86_64-linux-gnu:
+
+initrd/lib64:
+
+initrd/proc:
+
+initrd/root:
+
+initrd/sbin:
+
+initrd/sys:
+
+initrd/tmp:
+
+initrd/usr:
+b
+🔧 bash: {"command": "ls -la attachments"}
+📥 [ok] total 12
+drwxrwxr-x 2 pwntools pwntools 4096 Oct 13 03:19 .
+drwxrwxr-x 7 pwntools pwntools 4096 Oct 13 03:31 ..
+lrwxrwxrwx 1 pwntools pwntools   44 Oct 13 03:19 attachments -> /home/kali/secpt/challenges/bbox/attachments
+lrwxrwxrwx 1 pwntools pwntools   77 Oct 13 03:19 b6b28b6e5923be09006dc10e6db4c16f -> /home/kali/secpt/challenges/bbox/attachments/b6b28b6e5
+
+── step 124 · 23:32:25 (+780.0s) ──────────────────────────────
+💭 思考: Let me look at the run.sh, start.sh, Dockerfile, and the initrd content. Also look at core.cpio (the initrd) and the init script. Let me read those text files.
+💬 说: 关键：查看 run.sh/start.sh/Dockerfile 和 initrd 里的 init 脚本（guest 侧驱动逻辑），这决定攻击面。
+🔧 read_file: {"path": "chal/run.sh"}
+📥 [ok] #!/bin/sh
+./qemu-system-x86_64 \
+    -m 512M \
+    -kernel ./vmlinuz \
+    -initrd  ./core.cpio \
+    -L pc-bios \
+    -monitor /dev/null \
+    -append "root=/dev/ram rdinit=/sbin/init console=ttyS0 oops=panic panic=1 loglevel=7 kaslr" \
+    -cpu qemu64,+smep \
+    -smp cores=2,threads=1 \
+    -device virtsec-device \
+    -nographic
+🔧 read_file: {"path": "chal/start.sh"}
+📥 [ok] #!/bin/sh
+# 限制执行时间为 5 分钟，防止卡死
+timeout 300 /home/ctf/run.sh
+🔧 read_file: {"path": "chal/Dockerfile"}
+📥 [ok] FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    socat \
+    libglib2.0-0 \
+    libpixman-1-0 \
+    libslirp0 \
+    qemu-system-x86 \
+    libxen-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash ctf
+
+WORKDIR /home/ctf
+
+COPY ./qemu-system-x86_64 ./core.cpio ./vmli
+🔧 read_file: {"path": "initrd/etc/init.d/rcS"}
+📥 [ok] #!/bin/sh
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+mkdir /dev/pts
+mount -t devpts devpts /dev/pts
+
+echo -e "\nBoot took $(cut -d' ' -f1 /proc/uptime) seconds\n"
+setsid cttyhack sh
+
+poweroff -d 0  -f
+🔧 read_file: {"path": "initrd/etc/inittab"}
+📥 [ok] ::sysinit:/etc/init.d/rcS
+::askfirst:/bin/ash
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/swapoff -a
+::shutdown:/bin/umount -a -r
+::restart:/sbin/init
+
+── step 125 · 23:32:27 (+781.9s) ──────────────────────────────
+💭 思考: So the setup:
+- The remote service gives us a shell inside the guest VM (busybox sh via console=ttyS0).
+- We're `ctf` user in guest? Actually rcS runs as init, `setsid cttyhack sh` gives a root shell in the guest.
+- We need to escape QEMU to read `/flag` on the host (which is at 
+💬 说: 远程服务给的是 guest 内 shell（busybox），目标是逃逸 QEMU 读宿主 `/flag`。先看 initrd 里是否有驱动/工具，同时连接远程探接口。
+🔧 bash: {"command": "find initrd -type f -o -type l"}
+📥 [ok] initrd/bin/busybox
+initrd/etc/inittab
+initrd/etc/init.d/rcS
+initrd/etc/fstab
+initrd/etc/group
+initrd/etc/passwd
+
+🔧 bash: {"command": "find initrd -type d"}
+📥 [ok] initrd
+initrd/lib
+initrd/lib/x86_64-linux-gnu
+initrd/root
+initrd/sys
+initrd/bin
+initrd/tmp
+initrd/home
+initrd/home/ctf
+initrd/lib64
+initrd/proc
+initrd/etc
+initrd/etc/init.d
+initrd/dev
+initrd/sbin
+initrd/usr
+initrd/usr/bin
+initrd/usr/sbin
+
+🔧 read_file: {"path": "probe_remote.py"}
+📥 [ok] #!/usr/bin/env python3
+from pwn import *
+context.log_level='debug'
+HOST="oj-10-30-15-1-46347.adworld.xctf.org.cn"
+PORT=9999
+try:
+    io=remote(HOST,PORT,ssl=True)
+    io.recv(timeout=8)
+    io.sendline(b"id")
+    print(io.recv(timeout=5))
+    io.sendline(b"ls -la /")
+    print(io.recv(timeout=5))
+    io.sendline(b"uname -a")
+    print(io.recv(timeout=5))
+   
+🔧 read_file: {"path": "bootlog.bin"}
+📥 [ok] qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.01H:EDX.ht [bit 28]
+qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.80000001H:ECX.cmp-legacy [bit 1]
+qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.01H:EDX.ht [bit 28]
+qemu-system-x86_64: warning: TCG doesn't support requested featur
+
+── step 126 · 23:32:33 (+788.3s) ──────────────────────────────
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+💭 思考: The initrd is minimal busybox with no driver. So how do we interact with the virtsec PCI device from userspace? We could use /dev/mem to map the PCI BAR. But we need to find the BAR address. Actually, we can use busybox's `devmem`? Or we can write a small program.
+
+Hmm, but there
+💬 说: initrd 极简，无驱动。目标应是 guest→QEMU host 逃逸读 `/flag`。先连远程拿到 guest shell，并检查内核是否内建 virtsec 驱动。
+🔧 bash: {"command": "strings -a chal/vmlinuz | grep -i virtsec"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 bash: {"command": "strings -a chal/core.cpio | head -50"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 read_file: {"path": "probe_boot.py"}
+📥 [ok] #!/usr/bin/env python3
+from pwn import *
+context.log_level='info'
+HOST="oj-10-30-15-1-46347.adworld.xctf.org.cn"
+PORT=9999
+io=remote(HOST,PORT,ssl=True)
+buf=b""
+import time
+t=time.time()
+while time.time()-t<40:
+    try:
+        d=io.recv(timeout=3)
+    except EOFError:
+        break
+    if not d: continue
+    buf+=d
+open("bootlog.bin","wb").write(buf)
+print(
+🔀 [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚你现在在哪一层、为什么卡住，再决定换到哪一层。
+
+── step 127 · 23:32:38 (+793.4s) ──────────────────────────────
+💭 思考: I keep hitting shell metacharacter issues. Let me write a grep helper script and use write_file. Also let me actually connect to remote to get the guest shell and run recon.
+
+Let me write a combined script: connect remote, get shell, run recon commands. And a separate script to a
+💬 说: 我被 shell 元字符限制卡住了（管道/重定向被拒），这是**工具层**问题。换层：写 Python 脚本执行分析，并实际连远程跑 guest recon。
+🔧 write_file: {"path": "s_grep.py", "content": "#!/usr/bin/env python3\nimport subprocess, sys\n# search a pattern in a binary via strings\ntarget = sys.argv[1]\npat = sys.argv[2].lower()\ndata = open(target,'rb').read()\nout = subpro
+📥 [ok] OK: wrote 444 bytes to var/jobs/7a921ace/ws/s_grep.py
+🔧 write_file: {"path": "guest_recon.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='info'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"\nPORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.recv
+📥 [ok] OK: wrote 715 bytes to var/jobs/7a921ace/ws/guest_recon.py
+
+── step 128 · 23:32:43 (+797.7s) ──────────────────────────────
+🔧 bash: {"command": "python3 s_grep.py chal/vmlinuz virtsec"}
+📥 [ok] total strings lines: 144104
+hits: 0
+
+🔧 bash: {"command": "python3 guest_recon.py"}
+📥 [ok] [x] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999
+[x] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999: Trying 61.147.171.103
+[+] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999: Done
+[+] got shell
+### CMD: id
+id
+uid=0(root) gid=0(root)
+/ # echo ===MARK===
+### CMD: uname -a
+
+==
+
+── step 129 · 23:33:13 (+828.1s) ──────────────────────────────
+💭 思考: We have a guest shell as root. lspci shows `00:04.0 Class 0580: 1234:5678` — that's the virtsec device (class 0580 = memory controller, vendor 1234, device 5678). Its BAR is at febf0000-febf1fff (0x2000 = 8KB BAR).
+
+We need a way to access the PCI device. Without a driver, we can
+💬 说: 拿到 guest root shell，确认 virtsec 设备是 `00:04.0 1234:5678`，BAR0 = `febf0000-febf1fff`（8KB）。现在系统分析设备逻辑。
+🔧 write_file: {"path": "p.py", "content": "#!/usr/bin/env python3\nimport sys\nf=sys.argv[1]; a=int(sys.argv[2]); b=int(sys.argv[3])\nlines=open(f).read().splitlines()\nfor i,l in enumerate(lines[a:b], start=a):\n    print(f\"{i:4d} {
+📥 [ok] OK: wrote 190 bytes to var/jobs/7a921ace/ws/p.py
+🔧 write_file: {"path": "syms.py", "content": "#!/usr/bin/env python3\nimport subprocess,re\nout=subprocess.run(['nm','-C','chal/qemu-system-x86_64'],capture_output=True).stdout.decode(errors='replace')\nfor l in out.splitlines():\n   
+📥 [ok] OK: wrote 229 bytes to var/jobs/7a921ace/ws/syms.py
+[progress] 已用 130 步 / 已过 836s / 最近工具有新信息
+
+── step 130 · 23:33:21 (+836.1s) ──────────────────────────────
+🔧 bash: {"command": "python3 syms.py"}
+📥 [ok] 00000000004989b3 t do_qemu_init_virtsec_register_types
+000000000049800d t virtsec_allocate_block
+00000000004988dc t virtsec_class_init
+00000000004982be t virtsec_cleanup_all_blocks
+000000000049870d t virtsec_decrypt_block
+0000000000496d65 t VIRTSEC_DEVICE
+0000000001aa6ee0 d virtsec_device_info
+00000000004977d1 t virtsec_execute_command
+0000000000497f67 t vir
+🔧 bash: {"command": "python3 p.py dis_mmio_write.txt 100 227"}
+📥 [ok]  100   497360:	c1 e0 04             	shl    eax,0x4
+ 101   497363:	89 45 ec             	mov    DWORD PTR [rbp-0x14],eax
+ 102   497366:	8b 45 e8             	mov    eax,DWORD PTR [rbp-0x18]
+ 103   497369:	8b 55 e4             	mov    edx,DWORD PTR [rbp-0x1c]
+ 104   49736c:	48 8d 4d b8          	lea    rcx,[rbp-0x48]
+ 105   497370:	48 8d 34 11          	lea  
+
+── step 131 · 23:33:24 (+839.0s) ──────────────────────────────
+💭 思考: Found it! **gift_flag** global. At 4974b7 handler (jump table for offset... let's compute: `addr - 0xc`, index. The jump table base is cd665c. The handler at 4974b7 is invoked when writing to a specific register offset.
+
+Let's map: index = addr - 0xc. The 7th entry (index?) — let
+💬 说: **重大发现**：mmio_write 中有一个 "gift" 处理函数（0x4974b7）——它调用 `printf(dev->[0xea0])`，其中 `dev->[0xea0]` 和 `dev->[0xe98]`（函数指针）都在设备结构体里。这是格式化字符串/函数指针劫持的入口。先 dump 跳转表和字符串。
+🔧 write_file: {"path": "vaddr.py", "content": "#!/usr/bin/env python3\nimport sys, struct\nfrom elftools.elf.elffile import ELFFile\nf=open('chal/qemu-system-x86_64','rb')\ne=ELFFile(f)\nva=int(sys.argv[1],16); n=int(sys.argv[2],16)\n
+📥 [ok] OK: wrote 743 bytes to var/jobs/7a921ace/ws/vaddr.py
+
+── step 132 · 23:33:38 (+853.4s) ──────────────────────────────
+🔧 bash: {"command": "python3 vaddr.py cd665c 30"}
+📥 [ok] section .rodata
+00cd665c: c4 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd666c: dd 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd667c: f2 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+as u32: ['0xff7c0dc4', '0xff7c0ec4', '0xff7c0ec4', '0xff7c0ec4', '0xff7c0ddd', '0xff7c0ec4', '0xff7c0ec4', '0xff7c0e
+🔧 bash: {"command": "python3 vaddr.py cd65e0 90"}
+📥 [ok] section .rodata
+00cd65e0: 30 78 25 78 5d 20 3d 20 30 78 25 6c 78 20 28 62  0x%x] = 0x%lx (b
+00cd65f0: 6c 6f 63 6b 20 73 69 7a 65 3a 20 25 75 29 0a 00  lock size: %u)..
+00cd6600: 68 65 6c 6c 6f 00 00 00 77 65 6c 63 6f 6d 65 20  hello...welcome 
+00cd6610: 74 6f 20 52 43 54 46 32 30 32 35 21 54 68 69 73  to RCTF2025!This
+00cd6620: 20 69 73 20 6d 79 20 67 69 66 
+
+── step 133 · 23:33:41 (+856.0s) ──────────────────────────────
+💭 思考: Now I have the jump table. Base = cd665c. Entry i (u32) is added to cd665c to get target. Let's compute:
+
+For address ranges, the handler offsets:
+- index 0: 0xff7c0dc4 → cd665c + (signed)0xff7c0dc4 = cd665c - 0x83f23c = 497420. ✓ that's execute_command handler (addr=0xc).
+- inde
+💬 说: 跳转表以 `(addr-0xc)*4` 为字节偏移索引。需要读完整表（最大偏移 0xb0+4）。
+🔧 bash: {"command": "python3 vaddr.py cd665c b8"}
+📥 [ok] section .rodata
+00cd665c: c4 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd666c: dd 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd667c: f2 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd668c: 07 0e 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd669c: 1c 0e 7c ff c4 0e 7c ff c4 0e 
+
+── step 134 · 23:33:54 (+869.1s) ──────────────────────────────
+💭 思考: Now let's map. Entry byte offset = (addr-0xc)*4, entries at each 4-byte slot. Let me compute targets:
+
+entry index k (byte offset 4k): value + cd665c.
+- k=0 (off 0): 0xff7c0dc4 → 497420 (execute_command) ← addr 0xc (rax=0 → off 0) ✓
+- k=4 (off 16): 0xff7c0ddd → 497439 (dev->[0xbd
+💬 说: 寄存器映射已恢复：BAR+0x0c=命令，0x14=块索引(dev->0xd8c)，0x30/0x34，**0x38=gift → 调用 `dev->[0xe98](dev->[0xea0])`**（任意调用原语）。现在读关键函数理解块结构与边界检查。
+🔧 bash: {"command": "python3 p.py dis_allocate_block.txt 0 200"}
+📥 [ok]    0 
+   1 chal/qemu-system-x86_64:     file format elf64-x86-64
+   2 
+   3 
+   4 Disassembly of section .text:
+   5 
+   6 000000000049800d <virtsec_allocate_block>:
+   7   49800d:	f3 0f 1e fa          	endbr64
+   8   498011:	55                   	push   rbp
+   9   498012:	48 89 e5             	mov    rbp,rsp
+  10   498015:	48 83 ec 20          	sub    rsp,0
+🔧 bash: {"command": "python3 p.py dis_find_block.txt 0 120"}
+📥 [ok]    0 
+   1 chal/qemu-system-x86_64:     file format elf64-x86-64
+   2 
+   3 
+   4 Disassembly of section .text:
+   5 
+   6 0000000000497f67 <virtsec_find_block>:
+   7   497f67:	f3 0f 1e fa          	endbr64
+   8   497f6b:	55                   	push   rbp
+   9   497f6c:	48 89 e5             	mov    rbp,rsp
+  10   497f6f:	48 89 7d e8          	mov    QWORD PTR
+🔧 bash: {"command": "python3 p.py dis_validate_block_size.txt 0 60"}
+📥 [ok]    0 
+   1 chal/qemu-system-x86_64:     file format elf64-x86-64
+   2 
+   3 
+   4 Disassembly of section .text:
+   5 
+   6 000000000049868a <virtsec_validate_block_size>:
+   7   49868a:	f3 0f 1e fa          	endbr64
+   8   49868e:	55                   	push   rbp
+   9   49868f:	48 89 e5             	mov    rbp,rsp
+  10   498692:	89 7d fc             	mov    
+🔧 bash: {"command": "python3 p.py dis_find_block_index.txt 0 100"}
+📥 [ok]    0 
+   1 chal/qemu-system-x86_64:     file format elf64-x86-64
+   2 
+   3 
+   4 Disassembly of section .text:
+   5 
+   6 000000000049834a <virtsec_find_block_index>:
+   7   49834a:	f3 0f 1e fa          	endbr64
+   8   49834e:	55                   	push   rbp
+   9   49834f:	48 89 e5             	mov    rbp,rsp
+  10   498352:	48 89 7d e8          	mov    QWO
+
+── step 135 · 23:34:10 (+885.4s) ──────────────────────────────
+💭 思考: Now I understand the block array. There are 16 blocks, each 24 bytes (0x18). Block array starts at dev+0xc00+8 = dev+0xc08.
+
+Block layout (block at dev+0xc00+ i*0x18 + 8):
+- +0x00 (dev+0xc08+i*0x18): block id/value (set to arg esi = block_id)
+- +0x04: size (validated 1..0x10, max
+💬 说: 块数组：16 个块 × 0x18 字节（dev+0xc08），每块数据 0x10 字节在 dev+0xd98+i*0x10，大小上限 0x10。ptr_e98 恰在数据区末端 0xe98。现在读 execute_command（各命令子逻辑）。
+🔧 bash: {"command": "python3 p.py dis_execute_command.txt 6 130"}
+📥 [ok]    6 00000000004977d1 <virtsec_execute_command>:
+   7   4977d1:	f3 0f 1e fa          	endbr64
+   8   4977d5:	55                   	push   rbp
+   9   4977d6:	48 89 e5             	mov    rbp,rsp
+  10   4977d9:	48 83 ec 50          	sub    rsp,0x50
+  11   4977dd:	48 89 7d b8          	mov    QWORD PTR [rbp-0x48],rdi
+  12   4977e1:	89 75 b4             	mov    
+
+── step 136 · 23:34:22 (+896.5s) ──────────────────────────────
+💭 思考: Let me read the rest of execute_command (the second part, addresses 497a01 onwards, which handle the 4th command index and the rest).
+
+Wait, the jump table in execute_command is at cd6984, entries for command 0..6. Let me dump it. Earlier recon said index 0→0x497e65, 1→0x49783d, 
+🔧 bash: {"command": "python3 p.py dis_execute_command.txt 130 290"}
+📥 [ok]  130   4979d8:	48 8d 05 21 ee 83 00 	lea    rax,[rip+0x83ee21]        # cd6800 <__func__.2+0x540>
+ 131   4979df:	48 89 c7             	mov    rdi,rax
+ 132   4979e2:	b8 00 00 00 00       	mov    eax,0x0
+ 133   4979e7:	e8 22 88 78 00       	call   c2020e <qemu_log>
+ 134   4979ec:	eb 13                	jmp    497a01 <virtsec_execute_command+0x230>
+ 135   4979ee
+
+── step 137 · 23:34:24 (+899.3s) ──────────────────────────────
+💭 思考: This is the swap/write command (cmd 4). It finds block indices for dev->[0xd90] and dev->[0xd94] (block ids), then swaps blocks. Then likely calls virtsec_decrypt_block. Let me continue reading. Let me read 255 to 478.
+
+But let me step back and think about the vulnerability. The 
+🔧 bash: {"command": "python3 p.py dis_execute_command.txt 255 400"}
+📥 [ok]  255   497ba6:	48 8b 4d b8          	mov    rcx,QWORD PTR [rbp-0x48]
+ 256   497baa:	8b 45 cc             	mov    eax,DWORD PTR [rbp-0x34]
+ 257   497bad:	48 63 d0             	movsxd rdx,eax
+ 258   497bb0:	48 89 d0             	mov    rax,rdx
+ 259   497bb3:	48 01 c0             	add    rax,rax
+ 260   497bb6:	48 01 d0             	add    rax,rdx
+ 261   497bb9:
+
+── step 138 · 23:34:33 (+907.5s) ──────────────────────────────
+💭 思考: This is the swap command. Let me read the tail 380-478.
+
+Key insight forming: the swap command does a memcpy from block B to block A with size = B->size + A->size?? Let's see line 363-378:
+```
+s1 = dst->[0x28]->size (block d8 = A)
+s2 = src->[0x20]->size (block e0 = B)
+total = s1 
+🔧 bash: {"command": "python3 p.py dis_execute_command.txt 380 478"}
+📥 [ok]  380   497d53:	8b 70 0c             	mov    esi,DWORD PTR [rax+0xc]
+ 381   497d56:	48 8b 45 d8          	mov    rax,QWORD PTR [rbp-0x28]
+ 382   497d5a:	8b 40 04             	mov    eax,DWORD PTR [rax+0x4]
+ 383   497d5d:	01 f0                	add    eax,esi
+ 384   497d5f:	89 c0                	mov    eax,eax
+ 385   497d61:	48 8d b0 90 0d 00 00 	lea    rsi,[ra
+
+── step 139 · 23:34:36 (+910.7s) ──────────────────────────────
