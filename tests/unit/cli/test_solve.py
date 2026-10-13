@@ -203,9 +203,10 @@ class TestCredentialPreflight:
         # 能进入运行，走 ctf 单链
         monkeypatch.setenv("MY_TASK_TOKEN", "tk")
         monkeypatch.setenv("SECPT_FAKE_LLM", "1")
+        monkeypatch.setenv("SECPT_ROUTE_RULES_FIRST", "1")  # 测试不走真 LLM 路由
         d = tmp_path / "bench2"
         d.mkdir()
-        (d / "test.md").write_text("用 $MY_TASK_TOKEN 跑", encoding="utf-8")
+        (d / "test.md").write_text("用 $MY_TASK_TOKEN 做渗透", encoding="utf-8")
         from secpt.cli.solve import solve
 
         code = solve(str(d), steps=2, judge_enable=False, learn_enable=False)
