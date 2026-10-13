@@ -985,3 +985,399 @@ drwxr-xr-x 4 pwntools pwntools     4096 Oct 13 03:20 pc-bios
 
 
 ── step 63 · 23:25:19 (+354.0s) ──────────────────────────────
+💭 思考: Let me look at the run.sh, start.sh, Dockerfile, and the init scripts to understand the challenge.
+🔧 bash: {"command": "cat chal/run.sh chal/start.sh chal/Dockerfile"}
+📥 [ok] #!/bin/sh
+./qemu-system-x86_64 \
+    -m 512M \
+    -kernel ./vmlinuz \
+    -initrd  ./core.cpio \
+    -L pc-bios \
+    -monitor /dev/null \
+    -append "root=/dev/ram rdinit=/sbin/init console=ttyS0 oops=panic panic=1 loglevel=7 kaslr" \
+    -cpu qemu64,+smep \
+    -smp cores=2,threads=1 \
+    -device virtsec-device \
+    -nographic#!/bin/sh
+# 限制执行时间为 5 分钟，防
+🔧 bash: {"command": "cat bootlog.bin"}
+📥 [ok] qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.01H:EDX.ht [bit 28]
+qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.80000001H:ECX.cmp-legacy [bit 1]
+qemu-system-x86_64: warning: TCG doesn't support requested feature: CPUID.01H:EDX.ht [bit 28]
+qemu-system-x86_64: warning: TCG doesn't support requested featur
+
+── step 64 · 23:25:21 (+356.1s) ──────────────────────────────
+💭 思考: This is a QEMU escape challenge (RCTF/ADWorld "Let's escape"). Let me look at the init scripts to understand the guest environment, and try to find the driver for the virtsec device in the initrd.
+
+Let me look at the initrd, particularly /root, /home, /etc/init.d, to find the mod
+🔧 bash: {"command": "find initrd -type f -o -type l | head -200"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+
+── step 65 · 23:25:22 (+357.3s) ──────────────────────────────
+🔧 bash: {"command": "find initrd -type f"}
+📥 [ok] initrd/bin/busybox
+initrd/etc/inittab
+initrd/etc/init.d/rcS
+initrd/etc/fstab
+initrd/etc/group
+initrd/etc/passwd
+
+🔧 bash: {"command": "find initrd -type l"}
+📥 [ok] (no output)
+
+── step 66 · 23:25:24 (+358.8s) ──────────────────────────────
+🔧 bash: {"command": "cat initrd/etc/inittab initrd/etc/init.d/rcS initrd/etc/passwd initrd/etc/group initrd/etc/fstab"}
+📥 [ok] ::sysinit:/etc/init.d/rcS
+::askfirst:/bin/ash
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/swapoff -a
+::shutdown:/bin/umount -a -r
+::restart:/sbin/init#!/bin/sh
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+mkdir /dev/pts
+mount -t devpts devpts /dev/pts
+
+echo -e "\nBoot took $(cut -d' ' -f1 /proc/up
+🔧 bash: {"command": "ls -la initrd/home initrd/root initrd/home/ctf initrd/tmp initrd/dev"}
+📥 [ok] initrd/dev:
+total 8
+drwxr-xr-x  2 pwntools pwntools 4096 Oct 13 03:21 .
+drwxr-xr-x 14 pwntools pwntools 4096 Oct 13 03:21 ..
+
+initrd/home:
+total 12
+drwxr-xr-x  3 pwntools pwntools 4096 Oct 13 03:21 .
+drwxr-xr-x 14 pwntools pwntools 4096 Oct 13 03:21 ..
+drwxr-xr-x  2 pwntools pwntools 4096 Oct 13 03:21 ctf
+
+initrd/home/ctf:
+total 8
+drwxr-xr-x 2 pwntools pwnto
+
+── step 67 · 23:25:25 (+360.2s) ──────────────────────────────
+💭 思考: The guest does not have the driver. Wait, the initrd doesn't have a module. Let me check the full initrd listing again - it only has bin/busybox, etc. Let me check lib.
+
+Hmm, but there must be a driver for the virtsec device. Actually the device might be accessed via a kernel mod
+🔧 bash: {"command": "grep -i -n virtsec bootlog.bin"}
+⚠️  [error] Error: exit 1
+🔧 bash: {"command": "grep -i -n -E \"virtio|pci|BAR|resource|/dev/|ttyS|ctf|flag\" bootlog.bin"}
+📥 [ok] 8:iPXE (http://ipxe.org) 00:03.0 C980 PCI2.10 PnP PMM+1FF91050+1FEF1050 C980
+9:Press Ctrl-B to configure iPXE (PCI 00:03.0)...
+                                                                               
+14:[    0.000000] Command line: root=/dev/ram rdinit=/sbin/init console=ttyS0 oops=panic panic=1 loglevel=7 kaslr
+84:[    0.000000] [mem 0x20000000-0xfff
+
+── step 68 · 23:25:37 (+371.7s) ──────────────────────────────
+💭 思考: The device is at 0000:00:04.0 [1234:5678] type 00 class 0x058000, reg 0x10 [mem 0xfebf0000-0xfebf1fff]. So it has a 0x2000 BAR. The guest kernel doesn't have a driver for it. So the user must mmap /sys/bus/pci/devices/0000:00:04.0/resource0 or /dev/mem.
+
+Actually wait, there is n
+🔧 bash: {"command": "tail -c 2000 bootlog.bin"}
+📥 [ok] b9'
+[    6.825174] zswap: loaded using pool lzo/zbud
+[    6.838852] Key type .fscrypt registered
+[    6.839201] Key type fscrypt-provisioning registered
+[    6.891348] Key type encrypted registered
+[    6.892038] AppArmor: AppArmor sha1 policy hashing enabled
+[    6.895078] ima: No TPM chip found, activating TPM-bypass!
+[    6.895847] Loading compiled-in mod
+🔧 bash: {"command": "cat probe_remote.py probe_boot.py recon.py"}
+📥 [ok] #!/usr/bin/env python3
+from pwn import *
+context.log_level='debug'
+HOST="oj-10-30-15-1-46347.adworld.xctf.org.cn"
+PORT=9999
+try:
+    io=remote(HOST,PORT,ssl=True)
+    io.recv(timeout=8)
+    io.sendline(b"id")
+    print(io.recv(timeout=5))
+    io.sendline(b"ls -la /")
+    print(io.recv(timeout=5))
+    io.sendline(b"uname -a")
+    print(io.recv(timeout=5))
+   
+
+── step 69 · 23:25:40 (+374.6s) ──────────────────────────────
+💭 思考: Good — we get a root shell (`/ #`). The environment is a guest shell as root. So we need to write a guest program that accesses the virtsec PCI device via /sys or /dev/mem.
+
+Now, the key task: find the vulnerability in the QEMU device. Let me re-read the disassembly carefully. Le
+🔧 bash: {"command": "strings -a -t x chal/qemu-system-x86_64 | grep -i -n -E \"virtsec|VirtSec|escape|flag\" "}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+[progress] 已用 70 步 / 已过 378s / 最近工具无新信息
+
+── step 70 · 23:25:43 (+378.0s) ──────────────────────────────
+🔧 write_file: {"path": "grep_virt.py", "content": "import subprocess, re, sys\np = subprocess.run([\"strings\",\"-a\",\"-t\",\"x\",\"chal/qemu-system-x86_64\"], capture_output=True)\nlines = p.stdout.decode(errors=\"replace\").splitli
+📥 [ok] OK: wrote 320 bytes to var/jobs/7a921ace/ws/grep_virt.py
+
+── step 71 · 23:25:46 (+380.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 grep_virt.py"}
+📥 [ok]    73e9 fdt_node_offset_by_compatible
+   7421 fdt_subnode_offset_namelen
+   7465 fdt_getprop_by_offset
+   747b fdt_path_offset
+   74aa fdt_next_property_offset
+   74ce fdt_first_property_offset
+   796f g_hash_table_get_keys_as_array
+   7a9b g_unix_set_fd_nonblocking
+   7b91 g_markup_printf_escaped
+   8b4a g_type_class_adjust_private_offset
+   9b32 g_markup_v
+
+── step 72 · 23:25:59 (+393.6s) ──────────────────────────────
+💭 思考: The strings output is huge. Let me focus on the virtsec-specific strings by searching a dumped rodata segment around 0xcd6380. Let me extract strings in that region.
+🔧 write_file: {"content": "import subprocess, re\np = subprocess.run([\"strings\",\"-a\",\"-t\",\"x\",\"chal/qemu-system-x86_64\"], capture_output=True)\nlines = p.stdout.decode(errors=\"replace\").splitlines()\npat = re.compile(r\"vi
+📥 [ok] OK: wrote 422 bytes to var/jobs/7a921ace/ws/grep_vs.py
+
+── step 73 · 23:26:20 (+415.1s) ──────────────────────────────
+🔧 bash: {"command": "python3 grep_vs.py"}
+📥 [ok]  cd5020 'unarmed' property must be 'on' since memdev %s is read-only
+ cd505d nvdimm-memory
+ cd5070 (nvdimm->label_size >= size + offset) && (offset + size > offset)
+ cd50b8 !is_write || !nvdimm->readonly
+ cd50d7 pmem
+ cd50dc unarmed
+ cd50e4 NVDIMM
+ cd50f0 nvdimm_set_label_size
+ cd5110 nvdimm_set_uuid
+ cd5120 nvdimm_prepare_memory_region
+ cd5140 PC_DIMM
+ cd51
+
+── step 74 · 23:26:28 (+422.7s) ──────────────────────────────
+💭 思考: Now I have the full set of strings. Key observations:
+- Device at 0000:00:04.0, BAR at 0xfebf0000, size 0x2000.
+- Strings for commands: execute_command, merge blocks, etc.
+- "VirtSec Device: Block %u freed (UAF possible)" — intentionally hints UAF!
+- "VirtSec Device: Merge failed
+🔧 read_file: {"path": "dis_realize.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000049755f <virtsec_realize>:
+  49755f:	f3 0f 1e fa          	endbr64
+  497563:	55                   	push   rbp
+  497564:	48 89 e5             	mov    rbp,rsp
+  497567:	48 83 ec 20          	sub    rsp,0x20
+  49756b:	48 89 7d e8          	mov    QWORD PTR [rbp-0x18
+
+── step 75 · 23:26:31 (+426.3s) ──────────────────────────────
+💭 思考: Let me reconstruct the device state struct from realize. Device state (s = VIRTSEC_DEVICE(dev)):
+
+- s+0xbd0 = 0 (dword): something
+- s+0xbd4 = 0
+- s+0xbd8 = 0
+- s+0xbfc = 0
+- s+0xc00 = 0
+- s+0xc04 = 0
+- loop i=0..15: memset(s + 0xc00 + i*0x18 + 8, 0, 0x18). Wait: rax = i*3; rax =
+🔧 read_file: {"path": "dis_validate_block_size.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000049868a <virtsec_validate_block_size>:
+  49868a:	f3 0f 1e fa          	endbr64
+  49868e:	55                   	push   rbp
+  49868f:	48 89 e5             	mov    rbp,rsp
+  498692:	89 7d fc             	mov    DWORD PTR [rbp-0x4],edi
+  498695:	83 7d fc 00          
+🔧 read_file: {"path": "dis_find_block.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000497f67 <virtsec_find_block>:
+  497f67:	f3 0f 1e fa          	endbr64
+  497f6b:	55                   	push   rbp
+  497f6c:	48 89 e5             	mov    rbp,rsp
+  497f6f:	48 89 7d e8          	mov    QWORD PTR [rbp-0x18],rdi
+  497f73:	89 75 e4             	mov    
+🔧 read_file: {"path": "dis_find_block_index.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000049834a <virtsec_find_block_index>:
+  49834a:	f3 0f 1e fa          	endbr64
+  49834e:	55                   	push   rbp
+  49834f:	48 89 e5             	mov    rbp,rsp
+  498352:	48 89 7d e8          	mov    QWORD PTR [rbp-0x18],rdi
+  498356:	89 75 e4             	m
+
+── step 76 · 23:26:36 (+431.2s) ──────────────────────────────
+💭 思考: Block descriptor at s+0xc08 + i*0x18:
+- +0x00 (i.e., s+0xc08+i*0x18): dword = block id
+- +0x15 (s+0xc1d + i*0x18): byte = valid flag
+- find_block returns pointer to block descriptor (s+0xc08+i*0x18). It checks valid flag at +0x15 and id at +0x00.
+
+So block struct (0x18 bytes):
+of
+🔧 read_file: {"path": "dis_allocate_block.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000049800d <virtsec_allocate_block>:
+  49800d:	f3 0f 1e fa          	endbr64
+  498011:	55                   	push   rbp
+  498012:	48 89 e5             	mov    rbp,rsp
+  498015:	48 83 ec 20          	sub    rsp,0x20
+  498019:	48 89 7d e8          	mov    QWORD PTR [r
+
+── step 77 · 23:26:39 (+433.7s) ──────────────────────────────
+💭 思考: Now block descriptor layout confirmed:
+- +0x00 (uint32): id (block_id)
+- +0x04 (uint32): size
+- +0x08 (uint32): 0
+- +0x0c (uint32): offset = index*0x10  (buffer slot offset, "at offset 0x%x")
+- +0x10 (uint32): offset2 = index*0x10
+- +0x14 (byte): 0
+- +0x15 (byte): 1 = valid
+- +0x
+🔧 read_file: {"path": "dis_free_block.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000004981fa <virtsec_free_block>:
+  4981fa:	f3 0f 1e fa          	endbr64
+  4981fe:	55                   	push   rbp
+  4981ff:	48 89 e5             	mov    rbp,rsp
+  498202:	48 83 ec 10          	sub    rsp,0x10
+  498206:	48 89 7d f8          	mov    QWORD PTR [rbp-0
+🔧 read_file: {"path": "dis_cleanup_all_blocks.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000004982be <virtsec_cleanup_all_blocks>:
+  4982be:	f3 0f 1e fa          	endbr64
+  4982c2:	55                   	push   rbp
+  4982c3:	48 89 e5             	mov    rbp,rsp
+  4982c6:	48 83 ec 20          	sub    rsp,0x20
+  4982ca:	48 89 7d e8          	mov    QWORD PT
+
+── step 78 · 23:26:44 (+439.3s) ──────────────────────────────
+💭 思考: free_block sets +0x16 = 1 (freed flag), +0x15 = 0 (valid=0), and decrements s+0xd88 (count).
+
+Now note: the block descriptor isn't reused/zeroed on free. So there might be UAF... but find_block checks valid flag. Hmm, but the "merge" command moves blocks around (rearrangement). L
+🔧 read_file: {"path": "dis_mmio_write.txt"}
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000497200 <virtsec_mmio_write>:
+  497200:	f3 0f 1e fa          	endbr64
+  497204:	55                   	push   rbp
+  497205:	48 89 e5             	mov    rbp,rsp
+  497208:	48 83 ec 50          	sub    rsp,0x50
+  49720c:	48 89 7d c8          	mov    QWORD PTR [rbp-0
+
+── step 79 · 23:26:50 (+444.6s) ──────────────────────────────
+💭 思考: The mmio_write has 2 regions: offset in [0x1000, 0x1fff] is the data buffer write. offset in the register range 0xc..0x38 (0xc to 0x38). Wait, `sub rax, 0xc; cmp rax, 0x2c; ja default`. So registers 0xc to 0x38.
+
+Data write path: 
+- off = addr - 0x1000 (data offset within block)
+
+🔧 bash: {"command": "wc -l dis_mmio_write.txt dis_execute_command.txt dis_swap_blocks.txt dis_decrypt_block.txt dis_generate_key.txt dis_reset.txt dis_unrealize.txt dis_class_init.txt dis_register_types.txt"}
+📥 [ok]   227 dis_mmio_write.txt
+  478 dis_execute_command.txt
+  199 dis_swap_blocks.txt
+   65 dis_decrypt_block.txt
+   42 dis_generate_key.txt
+   71 dis_reset.txt
+   53 dis_unrealize.txt
+   53 dis_class_init.txt
+   67 dis_register_types.txt
+ 1255 total
+
+🔧 bash: {"command": "head -160 dis_execute_command.txt"}
+[progress] 已用 80 步 / 已过 454s / 最近工具无新信息
+📥 [ok] 
+chal/qemu-system-x86_64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000004977d1 <virtsec_execute_command>:
+  4977d1:	f3 0f 1e fa          	endbr64
+  4977d5:	55                   	push   rbp
+  4977d6:	48 89 e5             	mov    rbp,rsp
+  4977d9:	48 83 ec 50          	sub    rsp,0x50
+  4977dd:	48 89 7d b8          	mov    QWORD PTR [
+
+── step 80 · 23:26:59 (+453.8s) ──────────────────────────────
+💭 思考: Let me understand the register semantics:
+
+From execute_command:
+- command 0 (case at 49783d): s+0xbd0 = 1, s+0xbd8 = 0; log "Session %u initialized" with s+0xbd4. Command "init session"? Actually 0xbd0 = status/state, 0xbd8 = error code.
+- command 1 (case at 497894): reads s+0xb
+🔧 bash: {"command": "sed -n \"160,300p\" dis_execute_command.txt"}
+📥 [ok]   497a4c:	c7 80 d8 0b 00 00 05 	mov    DWORD PTR [rax+0xbd8],0x5
+  497a53:	00 00 00 
+  497a56:	bf 00 08 00 00       	mov    edi,0x800
+  497a5b:	e8 ec f2 ff ff       	call   496d4c <qemu_loglevel_mask>
+  497a60:	0f b6 c0             	movzx  eax,al
+  497a63:	48 85 c0             	test   rax,rax
+  497a66:	0f 84 3a 04 00 00    	je     497ea6 <virtsec_execute_com
+
+── step 81 · 23:27:02 (+457.0s) ──────────────────────────────
+💭 思考: This is command 4 (merge). It's complex. Let me read the whole execute_command into a readable file. Let me read lines 300-478.
+🔧 bash: {"command": "sed -n \"300,478p\" dis_execute_command.txt"}
+📥 [ok]   497c37:	48 89 45 d8          	mov    QWORD PTR [rbp-0x28],rax
+  497c3b:	8b 45 c4             	mov    eax,DWORD PTR [rbp-0x3c]
+  497c3e:	48 63 d0             	movsxd rdx,eax
+  497c41:	48 89 d0             	mov    rax,rdx
+  497c44:	48 01 c0             	add    rax,rax
+  497c47:	48 01 d0             	add    rax,rdx
+  497c4a:	48 c1 e0 03          	shl    rax,0
+
+── step 82 · 23:27:04 (+459.2s) ──────────────────────────────
+💭 思考: Now I understand the merge command (command 4). Let me lay it out.
+
+Command 4 (merge): parameters at [rbp-0x40] and [rbp-0x3c]. These come from somewhere (probably registers). Let's see: command 4 case starts... let me find. The case for command 4 was at some address. Let me get 
+🔧 bash: {"command": "file chal/qemu-system-x86_64; readelf -h chal/qemu-system-x86_64"}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+🔧 bash: {"command": "sed -n \"130,160p\" dis_execute_command.txt"}
+📥 [ok]   4979d6:	89 c6                	mov    esi,eax
+  4979d8:	48 8d 05 21 ee 83 00 	lea    rax,[rip+0x83ee21]        # cd6800 <__func__.2+0x540>
+  4979df:	48 89 c7             	mov    rdi,rax
+  4979e2:	b8 00 00 00 00       	mov    eax,0x0
+  4979e7:	e8 22 88 78 00       	call   c2020e <qemu_log>
+  4979ec:	eb 13                	jmp    497a01 <virtsec_execute_comman
+
+── step 83 · 23:27:08 (+463.0s) ──────────────────────────────
+💭 思考: Now let me map out command 3 and 4.
+
+Command 3 (at 497a06): 
+- read s+0xd90 → block id 1 → index = find_block_index(s, id1) → [rbp-0x40]
+- read s+0xd94 → block id 2 → index = find_block_index(s, id2) → [rbp-0x3c]
+- if either is -1 → error 5, log "Merge failed - block %u or %u not
+🔧 write_file: {"content": "import struct, sys\n\nfn = \"chal/qemu-system-x86_64\"\ndata = open(fn, \"rb\").read()\n\n# parse ELF64 header\ne_phoff = struct.unpack_from(\"<Q\", data, 0x20)[0]\ne_phentsize = struct.unpack_from(\"<H\", d
+📥 [ok] OK: wrote 889 bytes to var/jobs/7a921ace/ws/elfdump.py
+
+── step 84 · 23:27:14 (+468.5s) ──────────────────────────────
+🔧 bash: {"command": "python3 elfdump.py cd6984 cd665c cd6600"}
+📥 [ok] 0xcd6984 e1147cffb90e7cff100f7cffdd0f7cff82107cffe1147cffbd147cff5669727453656320504349204465766963653a20436c65616e696e672075702e2e2e0a00
+0xcd665c c40d7cffc40e7cffc40e7cffc40e7cffdd0d7cffc40e7cffc40e7cffc40e7cfff20d7cffc40e7cffc40e7cffc40e7cff070e7cffc40e7cffc40e7cffc40e7cff
+0xcd6600 68656c6c6f00000077656c636f6d6520746f2052435446323032352154686973206973206d7
