@@ -245,6 +245,8 @@ def archive_entry(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(out_path, "w:gz") as tar:
         for f in sorted(jdir.rglob("*")):
+            if "__pycache__" in f.parts:
+                continue  # 缓存文件不入档
             if not keep_ws and ("rounds" in f.parts or f.name == "transcript.json"):
                 continue  # 断点快照与全量链可从 events 重建，归档剔除
             if f.is_file():
