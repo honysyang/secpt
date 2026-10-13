@@ -183,16 +183,31 @@ async def route_objective(
     job_id: str = "",
     round_: int = 0,
 ) -> str:
-    """返回 profile 名。两级：规则 → LLM 兜底。结果落 routed 事件。"""
+    """返回 profile 名。默认 **AI 语义优先**：LLM 理解题意选打法，关键词规则
+    只在 LLM 不可用（无 key/网络故障）时兜底——关键词是脆弱的（bbox 复盘：
+    题面没写"栈溢出"但语义是 pwn，规则曾漏判）。
+
+    确定性优先模式：SECPT_ROUTE_RULES_FIRST=1（无 LLM 的 CI/离线环境）。
+    结果落 routed 事件（含 via：llm / rule / rule(fallback) / default）。
+    """
     matched = _match_rules(objective)
-    if len(matched) == 1:
-        profile, via = matched[0], "rule"
-    elif matched:
-        profile, via = matched[0], "rule"  # 多命中：取优先级最高
-    elif llm is not None:
-        profile, via = await _llm_classify(objective, llm, api_key), "llm"
+    rules_first = os.environ.get("SECPT_ROUTE_RULES_FIRST") == "1"
+    llm_ready = llm is not None or bool(api_key) or bool(os.environ.get("DEEPSEEK_API_KEY"))
+
+    if rules_first or not llm_ready:
+        if matched:
+            profile, via = matched[0], "rule" + ("(fallback)" if not rules_first else "")
+        else:
+            profile, via = DEFAULT_PROFILE, "default"
     else:
-        profile, via = DEFAULT_PROFILE, "default"
+        try:
+            profile = await _llm_classify(objective, llm, api_key)
+            via = "llm"
+        except Exception:
+            if matched:
+                profile, via = matched[0], "rule(fallback)"
+            else:
+                profile, via = DEFAULT_PROFILE, "default"
 
     if sink is not None:
         with contextlib.suppress(Exception):

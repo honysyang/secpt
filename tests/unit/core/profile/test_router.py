@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
@@ -47,7 +48,12 @@ CASES: dict[str, list[str]] = {
 
 
 def _route(objective: str) -> str:
-    return asyncio.run(route_objective(objective))
+    # 规则测试必须强制确定性模式（否则有 key 的测试环境会真调 LLM）
+    os.environ["SECPT_ROUTE_RULES_FIRST"] = "1"
+    try:
+        return asyncio.run(route_objective(objective))
+    finally:
+        os.environ.pop("SECPT_ROUTE_RULES_FIRST", None)
 
 
 @pytest.mark.parametrize("expected,texts", [(k, v) for k, v in CASES.items()])
@@ -108,4 +114,41 @@ class TestLLMFallbackCoversNewProfiles:
         out = asyncio.new_event_loop().run_until_complete(
             R._llm_classify("一道 nc 连上去的二进制题", _LLM(), "")
         )
+        assert out == "pwn"
+
+
+class TestLLMFirstRouting:
+    def test_llm_semantic_beats_keywords(self, monkeypatch):
+        """AI 语义优先：无 pwn 关键词的题面，LLM 判 pwn → 路由 pwn（bbox 类场景）。"""
+        import asyncio
+
+        from secpt.core.profile.router import route_objective
+
+        monkeypatch.delenv("SECPT_ROUTE_RULES_FIRST", raising=False)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dummy")  # llm_ready
+
+        class _Msg:
+            content = "pwn"
+
+        class _Resp:
+            choices = [type("c", (), {"message": _Msg()})()]
+
+        class _LLM:
+            async def call(self, m, t, model):
+                return _Resp()
+
+        out = asyncio.new_event_loop().run_until_complete(
+            route_objective("让我们逃离这个沙箱，附件是一个虚拟机程序", llm=_LLM(), api_key="k")
+        )
+        assert out == "pwn"
+
+    def test_rule_fallback_when_no_llm(self, monkeypatch):
+        """无 key 无 llm → 规则兜底（CI/离线确定性）。"""
+        import asyncio
+
+        from secpt.core.profile.router import route_objective
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("SECPT_ROUTE_RULES_FIRST", raising=False)
+        out = asyncio.new_event_loop().run_until_complete(route_objective("栈溢出 ROP 拿 shell"))
         assert out == "pwn"
