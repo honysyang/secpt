@@ -379,16 +379,16 @@ def solve(
             f"chains={len(summary2.get('chains') or [])}"
         )
 
-    # 自动导出可读日志（best-effort）
+    # 自动导出可读日志（best-effort）：job 目录 run.log（归档副本）+ logs/<job_id>.log（集中存放）
     try:
         from secpt.cli.watch import export_log
 
-        log_path = export_log(
-            job_id,
-            Path(os.environ.get("SECPT_VAR", "var")) / "jobs" / job_id / "run.log",
-            fmt="txt",
-        )
-        print(f"[solve] 可读日志已保存: {log_path}")
+        var_dir = Path(os.environ.get("SECPT_VAR", "var"))
+        export_log(job_id, var_dir / "jobs" / job_id / "run.log", fmt="txt")
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        log_path = export_log(job_id, logs_dir / f"{job_id}.log", fmt="txt")
+        print(f"[solve] 可读日志已保存: {log_path}（另 var/jobs/{job_id}/run.log 归档副本）")
     except Exception as e:
         print(f"[solve] 日志导出失败（忽略）: {e}")
 
