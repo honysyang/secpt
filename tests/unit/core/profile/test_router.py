@@ -106,6 +106,6 @@ class TestLLMFallbackCoversNewProfiles:
         import asyncio
 
         out = asyncio.new_event_loop().run_until_complete(
-            R._llm_classify("一道 nc 连上去的二进制题", _LLM())
+            R._llm_classify("一道 nc 连上去的二进制题", _LLM(), "")
         )
         assert out == "pwn"
