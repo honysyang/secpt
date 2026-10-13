@@ -3,9 +3,11 @@
 FROM pwntools/pwntools:latest
 
 USER root
+# checksec 随 pwntools 自带（/usr/local/bin/checksec）；PEP668 环境需 --break-system-packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        checksec qemu-user \
-    && pip install --no-cache-dir pycryptodome sympy gmpy2 z3-solver \
+        qemu-user \
+    && pip install --no-cache-dir --break-system-packages \
+        pycryptodome sympy gmpy2 z3-solver \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

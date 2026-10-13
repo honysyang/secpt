@@ -17,8 +17,11 @@ from secpt.core.profile.router import route_objective
 CASES: dict[str, list[str]] = {
     "ctf": [
         "这道 CTF 有个 flag，帮我拿下它",
-        "逆向题目，pwn 一道，找出 flag{...}",
         "挑战：解题思路，目标拿到 RCTF{...}",
+    ],
+    "pwn": [
+        "逆向题目，pwn 一道，找出 flag{...}",
+        "栈溢出 ROP 拿 shell，附件 binary",
     ],
     "redteam": [
         "红队对抗演练，模拟 APT 攻击链",
