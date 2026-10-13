@@ -32,3 +32,7 @@ recheck:
 # 构建执行沙箱镜像（agent 的 bash 工具在容器内运行，宿主隔离）
 sandbox-image:
 	docker build -f docker/sandbox.Dockerfile -t secpt-sandbox .
+
+# 二进制/crypto 沙箱镜像（pwntools + 密码学库；pwn/crypto profile 自动选用）
+sandbox-pwn-image:
+	docker build -f docker/sandbox-pwn.Dockerfile -t secpt-sandbox-pwn .

@@ -210,3 +210,37 @@ class TestCredentialPreflight:
 
         code = solve(str(d), steps=2, judge_enable=False, learn_enable=False)
         assert code in (0, 1)  # 正常进入运行（fake 模式）
+
+
+class TestPwnCryptoRouting:
+    def test_pwn_route(self):
+        from secpt.core.profile.router import _match_rules
+
+        assert _match_rules("栈溢出 ROP 拿 shell")[0] == "pwn"
+
+    def test_crypto_route(self):
+        from secpt.core.profile.router import _match_rules
+
+        assert _match_rules("RSA 公钥 密文 解密")[0] == "crypto"
+
+    def test_profiles_load_with_image(self):
+        from secpt.core.profile.loader import load_profile
+
+        assert load_profile("pwn").sandbox_image == "secpt-sandbox-pwn"
+        assert load_profile("crypto").prior == "crypto.md"
+
+    def test_sandbox_image_env_switch(self, tmp_path, monkeypatch):
+        """profile.sandbox_image 运行期注入 SECPT_SANDBOX_IMAGE，结束恢复。"""
+        import os
+
+        from secpt.cli.engine_runner import run_engine
+        from secpt.core.profile.loader import load_profile
+
+        prof = load_profile("crypto")
+        assert prof.sandbox_image
+        monkeypatch.setenv("SECPT_FAKE_LLM", "1")
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        run_engine(objective="o", profile="crypto", job_id="img1", max_steps=1, llm=None)
+        assert os.environ.get("SECPT_SANDBOX_IMAGE") not in ("secpt-sandbox-pwn",), (
+            "运行结束后 env 应恢复（conftest 未设则为空）"
+        )

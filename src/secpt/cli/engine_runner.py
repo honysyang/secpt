@@ -229,6 +229,11 @@ def run_engine(
         budget=TaskBudget(wall_s=cfg.max_wall_s, steps=cfg.max_steps),
     )
     cfg.sandbox = sandbox
+    # profile 指定沙箱镜像（pwn/crypto 等重工具镜像）：运行期注入 env，结束恢复
+    _img_env = None
+    if getattr(prof, "sandbox_image", ""):
+        _img_env = os.environ.get("SECPT_SANDBOX_IMAGE")
+        os.environ["SECPT_SANDBOX_IMAGE"] = prof.sandbox_image
     run_cfg_dict = {
         "workspace": workspace,
         "max_steps": cfg.max_steps,
@@ -302,6 +307,11 @@ def run_engine(
         _apply_terminal_status(rec, result)
     store.upsert_job(rec)
     sink.status_change(rec.status)
+
+    if _img_env is None:
+        os.environ.pop("SECPT_SANDBOX_IMAGE", None)
+    else:
+        os.environ["SECPT_SANDBOX_IMAGE"] = _img_env
 
     result.job_id = job_id  # type: ignore[attr-defined]
     return result

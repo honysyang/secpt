@@ -11,6 +11,47 @@ import contextlib
 # 优先级即列表顺序：ctf > redteam > codeaudit > assessment；都未命中 → pentest
 RULES: list[tuple[str, tuple[str, ...]]] = [
     (
+        "pwn",
+        (
+            "pwn",
+            "二进制",
+            "栈溢出",
+            "堆",
+            "格式化字符串",
+            "elf",
+            "rop",
+            "canary",
+            "ret2",
+            "uaf",
+            "double free",
+            "tcache",
+            "pwntools",
+            "libc",
+            "reverse",
+            "逆向",
+        ),
+    ),
+    (
+        "crypto",
+        (
+            "crypto",
+            "密码",
+            "加密",
+            "rsa",
+            "aes",
+            "密文",
+            "明文",
+            "公钥",
+            "私钥",
+            "padding oracle",
+            "prng",
+            "随机数",
+            "维吉尼亚",
+            "base64 解码",
+            "取证",
+        ),
+    ),
+    (
         "benchmark",
         (
             "benchmark",
