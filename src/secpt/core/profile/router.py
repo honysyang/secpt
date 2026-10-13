@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 
 # 优先级即列表顺序：ctf > redteam > codeaudit > assessment；都未命中 → pentest
 RULES: list[tuple[str, tuple[str, ...]]] = [
