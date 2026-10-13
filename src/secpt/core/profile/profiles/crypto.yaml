@@ -4,8 +4,8 @@ tools: [bash, read_file, list_dir, write_file, report_finding, intel]
 prior: crypto.md
 sandbox_image: secpt-sandbox-pwn        # pycryptodome/sympy/gmpy2/z3（与 pwn 共用镜像）
 budget:
-  steps: 150
-  wall_s: 3600
+  steps: 0          # 不限：pwn/crypto/QEMU逃逸是长程单一任务，步数止损会拦腰斩断
+  wall_s: 7200
 constraints:
   - 先写数学推导再写代码（z3/脚本只是执行器）
   - 模运算用 gmpy2.mpz + 三参数 pow；每步小样例验证再上真数据

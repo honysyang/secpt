@@ -5,8 +5,8 @@ bash_whitelist_extra: [gdb, checksec, objdump, readelf, ROPgadget, cyclic, patch
 prior: pwn.md
 sandbox_image: secpt-sandbox-pwn        # pwntools+qemu+checksec（make sandbox-pwn-image 构建）
 budget:
-  steps: 200
-  wall_s: 5400
+  steps: 0          # 不限：pwn/crypto/QEMU逃逸是长程单一任务，步数止损会拦腰斩断
+  wall_s: 7200
 constraints:
   - 所有交互必须 pwntools 脚本化（write_file 写脚本，bash 执行）；不要裸 nc 手打
   - 本地 process() 调通再切 remote(host, port)

@@ -3407,3 +3407,55 @@ Transcript: var/jobs/7a921ace/ws/transcript.json  (58 messages)
   [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
 可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
 先说清楚...
+[progress] 已用 100 步 / 已过 432s / 最近工具无新信息
+[progress] 已用 110 步 / 已过 522s / 最近工具有新信息
+[engine] compact #2: 删 22 条
+[progress] 已用 120 步 / 已过 833s / 最近工具无新信息
+[engine] rollover → session 2（max_steps）
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+[progress] 已用 130 步 / 已过 880s / 最近工具无新信息
+[progress] 已用 140 步 / 已过 952s / 最近工具有新信息
+[progress] 已用 150 步 / 已过 1017s / 最近工具无新信息
+[progress] 已用 160 步 / 已过 1174s / 最近工具无新信息
+[engine] compact #3: 删 52 条
+[progress] 已用 170 步 / 已过 1341s / 最近工具有新信息
+[engine] compact #4: 删 28 条
+[progress] 已用 180 步 / 已过 1567s / 最近工具无新信息
+[engine] rollover → session 3（max_steps）
+[progress] 已用 190 步 / 已过 1599s / 最近工具无新信息
+[progress] 已用 200 步 / 已过 1638s / 最近工具有新信息
+
+==================================================
+总步数: 200
+墙钟:   1641.3s
+Flag:   未拿到
+卡死切换器触发: 4 次
+会话轮次: 3  压缩摘要数: 4
+Transcript: var/jobs/7a921ace-r2/ws/transcript.json  (54 messages)
+
+[engine] FAILED
+
+[solve] 运行结束：mode=single wall=3382.3s flag=未拿到
+[solve] 单链未拿到成果，自动升级到意图驱动（frontier）继续...
+[engine] job=7a921ace-id618 model=deepseek-v4-flash  max_steps=200  timeout=5400.0s
+[engine] workspace: var/jobs/7a921ace-id618/ws
+[engine] 插件工具: ['observe_asset', 'recall', 'record_fact', 'report_finding', 'search_traces']
+[progress] 已用 10 步 / 已过 41s / 最近工具有新信息
+[progress] 已用 20 步 / 已过 68s / 最近工具有新信息
+[progress] 已用 30 步 / 已过 88s / 最近工具无新信息
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+[progress] 已用 40 步 / 已过 128s / 最近工具无新信息
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+[progress] 已用 50 步 / 已过 169s / 最近工具有新信息
+[progress] 已用 60 步 / 已过 226s / 最近工具无新信息
+[engine] rollover → session 1（max_steps）
+  [nudge] 你已经连续多步没有获得新信息了。换一层再试，不要在同一层继续换参数。
+可选的层：读源码 / 猜凭据 / 换身份或会话 / 换协议字段 / 换目标端点。
+先说清楚...
+[progress] 已用 70 步 / 已过 276s / 最近工具有新信息
