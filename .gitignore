@@ -40,3 +40,6 @@ artifacts/
 
 # --- secpt runtime data（不入库） ---
 var/
+
+# 运行归档产物
+archive/runs/

@@ -222,6 +222,40 @@ app.add_typer(cmd_ops.intent_app, name="intent")
 app.add_typer(cmd_ops.intercept_app, name="intercept")
 
 
+@app.command("archive")
+def archive_entry(
+    job_id: str = typer.Argument(..., help="要归档的 job_id"),
+    out: str | None = typer.Option(
+        None, "--out", "-o", help="输出 tar.gz 路径（缺省 archive/runs/<id>.tar.gz）"
+    ),
+    keep_ws: bool = typer.Option(
+        False, "--keep-ws", help="保留 ws/ 全部内容（默认剔除 rounds 大快照）"
+    ),
+) -> None:
+    """归档一次运行：打包任务产物到 archive/runs/（日志存储标准动作，见 docs/操作手册.md §7）。"""
+    import tarfile
+
+    from secpt.core.job.resume import jobs_dir
+
+    jdir = jobs_dir() / job_id
+    if not jdir.is_dir():
+        typer.echo(f"Error: job {job_id} 不存在: {jdir}", err=True)
+        raise typer.Exit(2)
+    out_path = Path(out or f"archive/runs/{job_id}.tar.gz")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(out_path, "w:gz") as tar:
+        for f in sorted(jdir.rglob("*")):
+            if not keep_ws and ("rounds" in f.parts or f.name == "transcript.json"):
+                continue  # 断点快照与全量链可从 events 重建，归档剔除
+            if f.is_file():
+                tar.add(f, arcname=f"{job_id}/{f.relative_to(jdir)}")
+    size_kb = out_path.stat().st_size // 1024
+    typer.echo(
+        f"已归档: {out_path} ({size_kb}KB)"
+        + ("（含 ws 全量）" if keep_ws else "（已剔除 rounds/transcript，events.jsonl 可重建）")
+    )
+
+
 @app.command("logs")
 def logs_entry(
     action: str = typer.Argument("export", help="export（导出可读日志）"),
