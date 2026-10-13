@@ -244,3 +244,12 @@ class TestPwnCryptoRouting:
         assert os.environ.get("SECPT_SANDBOX_IMAGE") not in ("secpt-sandbox-pwn",), (
             "运行结束后 env 应恢复（conftest 未设则为空）"
         )
+
+
+class TestNcatRouting:
+    def test_ncat_remote_routes_pwn(self):
+        """pwn 题常见表述：ncat --ssl / remote(host, port)（bbox 复盘）。"""
+        from secpt.core.profile.router import _match_rules
+
+        assert _match_rules("ncat --ssl host 9999")[0] == "pwn"
+        assert _match_rules('remote("h", 1, ssl=True)')[0] == "pwn"

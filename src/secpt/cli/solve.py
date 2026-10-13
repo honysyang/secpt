@@ -60,6 +60,42 @@ def _extract_entries(objective: str) -> list[str]:
         return []
 
 
+_ATTACH_URL_RE = None
+
+
+def _download_attachment_urls(challenge_dir: Path, objective: str) -> int:
+    """题面里的附件 URL 自动下载到 <dir>/附件/（按文件名缓存，不重下）。
+
+    CTF 平台常规：附件是 zip URL（adworld/question_attachment、.zip?attname= 等）。
+    下不了（网络/鉴权）不阻断——引擎仍可按 URL 自行处理。
+    """
+    import re
+    import urllib.request
+
+    urls = re.findall(
+        r"https?://[^\s\"')]+?(?:\.zip[^\s\"')]*|question_attachment/[^\s\"')]+)", objective
+    )
+    if not urls:
+        return 0
+    dest_dir = challenge_dir / "附件"
+    dest_dir.mkdir(exist_ok=True)
+    n = 0
+    for url in dict.fromkeys(urls):  # 去重保序
+        name = url.split("/")[-1].split("?")[0] or f"attachment-{n}.zip"
+        dest = dest_dir / name
+        if dest.is_file() and dest.stat().st_size > 0:
+            n += 1
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                dest.write_bytes(resp.read())
+            print(f"[solve] 附件已下载: {name} ({dest.stat().st_size // 1024}KB)")
+            n += 1
+        except Exception as e:
+            print(f"[solve] 附件下载失败（忽略，可由引擎自行处理）: {e}")
+    return n
+
+
 def _prepare_attachments(challenge_dir: Path) -> list[str]:
     """解压挑战目录下的附件包到 <dir>/attachments/，返回**绝对路径**列表。
 
@@ -217,6 +253,7 @@ def solve(
             print(f"  export {v}=<值>    # 或写入 .env")
         return 2
 
+    _download_attachment_urls(challenge_dir, objective)
     entries = _extract_entries(objective)
     artifacts = _prepare_attachments(challenge_dir) if challenge_dir.is_dir() else []
     prior_name = prior or _auto_prior(objective)
