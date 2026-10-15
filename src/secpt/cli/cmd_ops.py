@@ -58,34 +58,107 @@ def worker_metrics(
 # ---------------------------------------------------------------------------
 
 
+def _candidate_task_dbs(limit: int = 5) -> list[tuple[str, float]]:
+    """扫描最近活跃的任务级意图库（F1 后按任务隔离，直投需指定目标任务）。
+
+    返回 [(base_job_id, mtime)]，按最近活动降序。
+    """
+    from secpt.core.job.resume import jobs_dir
+
+    out: list[tuple[str, float]] = []
+    for p in jobs_dir().glob("*/frontier.sqlite"):
+        try:
+            out.append((p.parent.name, p.stat().st_mtime))
+        except OSError:
+            continue
+    out.sort(key=lambda t: -t[1])
+    return out[:limit]
+
+
+def _require_job_or_hint(job: str) -> str:
+    """确保有目标任务 base（--job 或 SECPT_FRONTIER_DB 覆盖）；否则列出候选并退出。"""
+    if job:
+        return job
+    if os.environ.get("SECPT_FRONTIER_DB"):
+        return ""  # 环境覆盖模式：frontier_db_path 直接用 env 路径
+    import time as _time
+
+    cands = _candidate_task_dbs()
+    now = _time.time()
+    lines = [
+        f'  secpt intent add --job {b} "<要测什么>"   （最近活动 {max(0, now - mt):.0f}s 前）'
+        for b, mt in cands
+    ]
+    hint = "\n".join(lines) if lines else "  （暂无任务级意图库：先启动 secpt hunt 或 secpt solve）"
+    typer.echo(
+        "Error: 需要 --job <base>（F1 后意图库按任务隔离，hunt/solve 启动时会打印 job 号）。"
+        f"\n最近任务：\n{hint}",
+        err=True,
+    )
+    raise typer.Exit(2)
+
+
 @intent_app.command("add")
 def intent_add(
     title: str = typer.Argument(..., help="意图标题（要测什么）"),
+    job: str = typer.Option(
+        "", "--job", "-j", help="目标任务 base job_id（hunt/solve 启动时打印）"
+    ),
     goal: str = typer.Option("", "--goal", "-g", help="目标说明"),
     done: str = typer.Option("", "--done", "-d", help="完成判据"),
     priority: int = typer.Option(9, "--priority", "-p", help="优先级（默认 9 插队）"),
 ) -> None:
-    """往当前 frontier 队列直投一条意图（source=direct，planner 见 direct 即暂停）。"""
-    from secpt.core.orchestrator.frontier import Frontier
+    """往**指定任务**的 frontier 队列直投一条意图（source=direct，planner 见 direct 即暂停）。
 
-    fr = Frontier()
+    F1 后意图库按任务隔离——须用 --job 指定目标任务（或 SECPT_FRONTIER_DB 覆盖）。
+    """
+    from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
+
+    job = _require_job_or_hint(job)
+    db = frontier_db_path(job) if job else Path(os.environ["SECPT_FRONTIER_DB"])
+    fr = Frontier(db)
     iid = fr.add(title, goal=goal, done_criteria=done, priority=priority, source="direct")
     typer.echo(
-        f"已直投意图 {iid}（priority={priority}）。运行中的 hunt 将在当前意图后执行它；"
-        f"无运行中的 hunt 时启动 `secpt hunt` 即只跑 direct 意图。"
+        f"已直投意图 {iid}（priority={priority}）到任务 {job or '(SECPT_FRONTIER_DB)'}。"
+        f"该任务运行中将在当前意图后执行它；未运行时启动同一 job 的 hunt/solve 即只跑 direct 意图。"
     )
 
 
 @intent_app.command("list")
 def intent_list(
+    job: str = typer.Option("", "--job", "-j", help="目标任务 base job_id（缺省列出各任务概览）"),
     status: str | None = typer.Option(None, "--status", "-s", help="open/running/done/exhausted"),
+    as_json: bool = typer.Option(False, "--json", help="机器可读输出（需 --job）"),
 ) -> None:
-    """查看意图队列（★=direct 人工直投，#=planner）。"""
-    from secpt.core.orchestrator.frontier import Frontier
+    """查看意图队列（★=direct 人工直投，#=planner）。缺省按任务列出概览。"""
+    from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
 
-    rows = Frontier().list_all(status=status)
+    if not job and as_json:
+        typer.echo("Error: --json 需要同时指定 --job", err=True)
+        raise typer.Exit(2)
+    if not job:
+        cands = _candidate_task_dbs(limit=10)
+        if not cands:
+            typer.echo("（无任务级意图库；用 --job <base> 指定任务）")
+            return
+        import time as _time
+
+        now = _time.time()
+        typer.echo("按任务隔离（F1）——--job <base> 查看明细：")
+        for b, mt in cands:
+            fr = Frontier(frontier_db_path(b))
+            typer.echo(
+                f"  {b:14s} 意图 total={fr.total():3d} open={fr.count_open():2d}"
+                f"  （最近活动 {max(0, now - mt):.0f}s 前）"
+            )
+        return
+
+    rows = Frontier(frontier_db_path(job)).list_all(status=status)
+    if as_json:
+        typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
     if not rows:
-        typer.echo("（队列为空）")
+        typer.echo(f"（任务 {job} 队列为空）")
         return
     typer.echo(f"{'id':14s} {'源':6s} {'状态':10s} {'prio':>4s} 标题")
     for r in rows:
@@ -93,6 +166,58 @@ def intent_list(
         typer.echo(
             f"{r['id']:14s} {tag:6s} {r['status']:10s} {r['priority']:>4d} {r['title'][:50]}"
         )
+
+
+def _open_task(job: str):
+    """按 --job 打开目标任务意图库（或 SECPT_FRONTIER_DB 覆盖路径）。"""
+    from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
+
+    job = _require_job_or_hint(job)
+    db = frontier_db_path(job) if job else Path(os.environ["SECPT_FRONTIER_DB"])
+    return job, Frontier(db)
+
+
+@intent_app.command("set")
+def intent_set(
+    intent_id: str = typer.Argument(..., help="意图 id（secpt intent list 可见）"),
+    job: str = typer.Option("", "--job", "-j", help="目标任务 base job_id"),
+    title: str = typer.Option(None, "--title", help="改标题"),
+    goal: str = typer.Option(None, "--goal", "-g", help="改目标说明"),
+    done: str = typer.Option(None, "--done", "-d", help="改完成判据"),
+    priority: int = typer.Option(None, "--priority", "-p", help="改优先级"),
+    max_steps: int = typer.Option(None, "--max-steps", help="改意图级步数预算（0=不限）"),
+) -> None:
+    """改意图（标题/目标/判据/优先级/步数预算）。仅 open/blocked 可改——
+    running/done/exhausted 拒绝（防改在途语义与历史）。"""
+    _job, fr = _open_task(job)
+    ok = fr.update(
+        intent_id,
+        title=title,
+        goal=goal,
+        done_criteria=done,
+        priority=priority,
+        max_steps=max_steps,
+    )
+    if ok:
+        typer.echo(f"已更新 {intent_id}")
+    else:
+        typer.echo(f"未更新：{intent_id} 不存在、无字段变化或状态非 open/blocked", err=True)
+    raise typer.Exit(0 if ok else 1)
+
+
+@intent_app.command("rm")
+def intent_rm(
+    intent_id: str = typer.Argument(..., help="意图 id"),
+    job: str = typer.Option("", "--job", "-j", help="目标任务 base job_id"),
+) -> None:
+    """撤回意图（跑偏即撤）。仅 open/blocked 可删；running/done/exhausted 拒绝。"""
+    _job, fr = _open_task(job)
+    ok = fr.remove(intent_id)
+    if ok:
+        typer.echo(f"已撤回 {intent_id}")
+    else:
+        typer.echo(f"未撤回：{intent_id} 不存在或状态非 open/blocked（在途/历史不可删）", err=True)
+    raise typer.Exit(0 if ok else 1)
 
 
 # ---------------------------------------------------------------------------

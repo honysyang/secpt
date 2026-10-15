@@ -59,14 +59,18 @@ secpt solve challenges/rois-saml-sso
 ```
 src/secpt/
   cli/           typer 入口（app=薄注册层）+ solve(★主入口) / watch / cmd_run / cmd_findings / cmd_jobs
+                 / cmd_ops(intent/steer/审批/worker) / cmd_doctor(预检) / tui_app+tui_data(面板)
   runtime/       engine.py(★主循环) / llm/client(多模型路由+池) / sandbox(Docker沙箱) / stuck(卡死检测)
+                 / notify(通知通道)
   core/
     job/         作业层：TaskSpec/JobRecord/store/event/resume/rounds/manager/worker
     orchestrator/ dag 分流(默认单链) / stages 多阶段 / frontier 意图调度(source=direct
-                人工直投) / steer.py 人在环路操舵 / specialist(DAG,默认关)
+                人工直投) / steer.py 人在环路操舵
+                注：SpecialistOrchestrator（固定 DAG）已退役，勿复活——team 路径走
+                frontier 角色意图；WarroomHooks 在 core/memory/warroom.py
     profile/     profile YAML loader + render（system_extra 渲染）
     context/     S3 四件套：estimator/compaction(0.72)/roundpool(0.95)/budget/summarize
-    memory/      warroom 共享作战记忆（SQLite 四表，作业内暂存）
+    memory/      warroom 四表（历史/可选：无生产装配点——多意图协作走 intel 图 + findings + traces）
     watchdog.py  空转监控（连续回合零新增 → paused + 换层提示）
   evaluation/    AI 评判层：anticheat → ground_truth → Jev 门控 → judge → verdict
   findings/      漏洞发现全生命周期：模型/存储/report_finding 工具/verify 对抗式复现/cve 去重

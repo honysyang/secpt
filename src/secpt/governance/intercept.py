@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +28,12 @@ from pathlib import Path
 DEFAULT_DB = Path(os.environ.get("SECPT_VAR", "var")) / "intercept.sqlite"
 
 BLOCK_TAG = "【平台管控·非目标防御】"
+
+# D：规则表 TTL 缓存——每次 run_bash 都新建 Interceptor 并全表 SELECT 纯浪费；
+# 按库路径缓存 5 秒（跨进程改规则 ≤5s 生效；同进程改规则立即失效）。进程内锁保护。
+_RULES_TTL_S = 5.0
+_rules_cache: dict[str, tuple[float, list[dict]]] = {}
+_rules_lock = threading.Lock()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS intercept_rules (
@@ -156,6 +164,7 @@ class Interceptor:
                     time.time(),
                 ),
             )
+            self._invalidate_cache()  # D：同进程改规则立即生效（跨进程靠 TTL）
             return int(cur.lastrowid)
 
     def list_rules(self) -> list[dict]:
@@ -166,6 +175,7 @@ class Interceptor:
     def remove_rule(self, rule_id: int) -> bool:
         with self._conn() as c:
             cur = c.execute("DELETE FROM intercept_rules WHERE id=? AND builtin=0", (rule_id,))
+            self._invalidate_cache()
             return cur.rowcount > 0
 
     def set_enabled(self, rule_id: int, enabled: bool) -> bool:
@@ -173,21 +183,39 @@ class Interceptor:
             cur = c.execute(
                 "UPDATE intercept_rules SET enabled=? WHERE id=?", (1 if enabled else 0, rule_id)
             )
+            self._invalidate_cache()
             return cur.rowcount > 0
 
     # ---------------- 求值与审批 ----------------
 
-    def _match(self, *, tool: str, command: str) -> list[dict]:
-        hits = []
+    def _cached_rules(self) -> list[dict]:
+        """启用的规则列表（D：按库路径 TTL 缓存；缺省 5s，跨进程改规则 ≤5s 生效）。"""
+        key = str(self.db_path)
+        now = time.time()
+        with _rules_lock:
+            hit = _rules_cache.get(key)
+            if hit is not None and now - hit[0] < _RULES_TTL_S:
+                return hit[1]
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM intercept_rules WHERE enabled=1 ORDER BY priority DESC, id"
             ).fetchall()
-        for r in rows:
+        rules = [dict(r) for r in rows]
+        with _rules_lock:
+            _rules_cache[key] = (now, rules)
+        return rules
+
+    def _invalidate_cache(self) -> None:
+        with _rules_lock:
+            _rules_cache.pop(str(self.db_path), None)
+
+    def _match(self, *, tool: str, command: str) -> list[dict]:
+        hits = []
+        for r in self._cached_rules():
             hay = tool if r["match_target"] == "tool" else command
             try:
                 if re.search(r["pattern"], hay or ""):
-                    hits.append(dict(r))
+                    hits.append(r)
             except re.error:
                 continue
         return hits
@@ -265,6 +293,14 @@ class Interceptor:
             f"[intercept] ⏸ 等待审批 #{pid} 规则[{rule['name']}]："
             f"{(command or '')[:80]}（secpt approve {pid} / deny）"
         )
+        with contextlib.suppress(Exception):
+            from secpt.runtime.notify import notify
+
+            notify(
+                "approval_pending",
+                f"secpt 待审批 #{pid}（规则：{rule['name']}）",
+                f"{(command or '')[:200]}\n批准：secpt approve {pid} / 拒绝：secpt deny {pid}",
+            )
         if not wait:
             self.decide(pid, False, by="no-wait")
             return False, f"{BLOCK_TAG} 规则[{rule['name']}]要求审批（非阻塞模式拒绝）"

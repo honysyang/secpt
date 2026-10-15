@@ -56,6 +56,17 @@ class TestExtractTargets:
     def test_local_command_no_target(self):
         assert extract_scope_targets("pwd && ls -la") == []
 
+    def test_bare_ipv6(self):
+        """G1 补丁：裸/括号 IPv6 必须能提取（提取不到即不校验 = 绕过面）。"""
+        assert "2001:db8::1" in extract_scope_targets("nmap -6 -p 80 2001:db8::1")
+        assert "::1" in extract_scope_targets("curl -g 'http://[::1]/x'")
+        assert "fe80::1" in extract_scope_targets("nmap -6 fe80::1%eth0")
+
+    def test_ipv6_false_positives_rejected(self):
+        # 时间串 / MAC 地址不是 IP，宽松候选必须被 ipaddress 校验剔除
+        assert extract_scope_targets("echo 12:34:56 done") == []
+        assert extract_scope_targets("ping aa:bb:cc:dd:ee:ff") == []
+
 
 class TestLoopback:
     def test_ipv4_loopback_range(self):
@@ -174,3 +185,107 @@ class TestAuditLifecycle:
         assert events == ["scope.denied", "job.started", "job.finished"]
         rec = AuditLogger(path).read_all()[-1]
         assert rec["status"] == "succeeded" and rec["steps"] == 42
+
+
+class TestPluginGovernance:
+    """x-secpt-governance.network 插件工具统一治理前置（A 任务接线）。"""
+
+    @staticmethod
+    def _engine(tmp_path: Path, allowed: list[str], fn):
+        from secpt.runtime.engine import Engine
+
+        cfg = _cfg(tmp_path, allowed)
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "browser_navigate",
+                "description": "测试用网络插件",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                    "x-secpt-governance": {"network": True},
+                },
+            },
+        }
+        return Engine(cfg, llm=object(), extra_tools={"browser_navigate": (schema, fn)})
+
+    def test_scope_denies_out_of_scope(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_INTERCEPT", "0")
+        called = []
+
+        async def _fn(args):
+            called.append(args)
+            return "ok"
+
+        eng = self._engine(tmp_path, ["10.0.0.0/8"], _fn)
+        out = asyncio.run(eng.tools["browser_navigate"]({"url": "http://evil.example/x"}))
+        assert out.startswith("Error:") and "授权范围" in out
+        assert called == []  # 治理拒绝 → 原工具未执行
+
+    def test_scope_allows_in_scope(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_INTERCEPT", "0")
+        called = []
+
+        async def _fn(args):
+            called.append(args)
+            return "ok"
+
+        eng = self._engine(tmp_path, ["10.0.0.0/8"], _fn)
+        out = asyncio.run(eng.tools["browser_navigate"]({"url": "http://10.1.2.3/x"}))
+        assert out == "ok" and called
+
+    def test_intercept_deny_blocks_plugin(self, tmp_path, monkeypatch):
+        from secpt.governance.intercept import BLOCK_TAG
+
+        class _Deny:
+            def __init__(self, *a, **k): ...
+
+            def eval(self, *, tool, command, job_id="", wait=True):
+                return False, f"{BLOCK_TAG} 规则[测试]:禁止"
+
+        monkeypatch.setattr("secpt.governance.intercept.Interceptor", _Deny)
+        called = []
+
+        async def _fn(args):
+            called.append(args)
+            return "ok"
+
+        eng = self._engine(tmp_path, ["10.0.0.0/8"], _fn)
+        out = asyncio.run(eng.tools["browser_navigate"]({"url": "http://10.1.2.3/x"}))
+        assert "测试" in out and called == []  # 审批拒绝 → 原工具未执行
+
+    def test_non_governed_plugin_untouched(self, tmp_path, monkeypatch):
+        """未声明治理的插件工具不套前置（普通插件零开销）。"""
+        from secpt.runtime.engine import Engine
+
+        monkeypatch.setenv("SECPT_INTERCEPT", "0")
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "calc",
+                "description": "本地计算",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        called = []
+
+        async def _fn(args):
+            called.append(args)
+            return "42"
+
+        cfg = _cfg(tmp_path, [])
+        eng = Engine(cfg, llm=object(), extra_tools={"calc": (schema, _fn)})
+        assert asyncio.run(eng.tools["calc"]({})) == "42"
+        assert called
+
+    def test_llm_schema_strips_private_keys(self, tmp_path):
+        """x-secpt-governance 是 engine 私有协议，不得随 schema 发往 LLM。"""
+
+        async def _fn(args):
+            return "ok"
+
+        eng = self._engine(tmp_path, ["10.0.0.0/8"], _fn)
+        params = eng._extra_schemas[0]["function"]["parameters"]
+        assert "x-secpt-governance" not in params
+        assert params["properties"]

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from pathlib import Path
@@ -137,8 +138,43 @@ def _prepare_attachments(challenge_dir: Path) -> list[str]:
     return uniq
 
 
+_PRIOR_SEM_MIN = 0.45  # 先验语义命中阈值（比召回型阈值严：先验是打法级注入，宁缺毋滥）
+
+
+def _semantic_prior(low: str, table: dict, priors_dir: Path) -> str | None:
+    """先验语义兜底（关键词脆弱的互补）：objective 与（先验名+关键词）文档的
+    嵌入余弦取最高且过阈值——"逻辑缺陷"能命中语义相近的先验，而非逐字撞词。
+    嵌入不可用（未装/未启用）→ None（静默回退旧行为，绝不阻断）。"""
+    try:
+        from secpt.knowledge import embedding as _emb
+
+        docs: list[tuple[str, str]] = []
+        for prior, keywords in table.items():
+            name = str(prior)
+            if not (priors_dir / f"{name}.md").is_file():
+                continue
+            docs.append((name, f"{name} " + " ".join(str(k) for k in keywords or [])))
+        if not docs:
+            return None
+        vecs = _emb.embed_cached([low] + [d for _n, d in docs])
+        if vecs is None:
+            return None
+        qv = vecs[0]
+        best_name, best_score = "", 0.0
+        for (name, _d), v in zip(docs, vecs[1:], strict=True):
+            score = _emb.cosine(qv, v)
+            if score > best_score:
+                best_name, best_score = name, score
+        if best_score >= _PRIOR_SEM_MIN:
+            print(f"[solve] 先验语义匹配 → {best_name}（score={best_score:.3f}）")
+            return best_name
+    except Exception:
+        return None
+    return None
+
+
 def _auto_prior(objective: str) -> str | None:
-    """关键词表匹配先验；未命中或先验文件未策划 → None（用 profile 默认）。
+    """先验匹配：关键词子串优先（确定性），未命中走语义兜底；都未命中 → None。
 
     只返回 priors 目录真实存在的先验——映射表是愿望清单，缺文件不炸任务。
     """
@@ -158,6 +194,7 @@ def _auto_prior(objective: str) -> str | None:
                         return name
                     print(f"[solve] 先验 {name!r} 未策划（priors/{name}.md 不存在），跳过")
                     return None
+        return _semantic_prior(low, table, priors_dir)
     except Exception as e:
         print(f"[solve] 先验匹配失败（忽略）: {e}")
     return None
@@ -169,6 +206,37 @@ def _find_ground_truth(challenge_dir: Path) -> Path | None:
         if cand.is_file():
             return cand
     return None
+
+
+def _feedback_experiences(job_id: str, outcome: bool) -> int:
+    """C 反馈闭环：把本任务注入过的经验按最终成败回写（best-effort）。
+
+    扫描 <job_id>*/experiences_injected.json——覆盖 stages（-<stage>）与
+    frontier（-i…）子 job 各自的注入记录；同一条经验多子 job 命中时按任务
+    总结果只回写一次（去重）。任何失败静默（learning 绝不打断主链路）。
+    返回回写条数。
+    """
+    try:
+        from secpt.core.job.resume import jobs_dir
+        from secpt.learning.store import ExperienceJournal
+
+        jr = ExperienceJournal()
+        seen: set[str] = set()
+        n = 0
+        for p in jobs_dir().glob(f"{job_id}*/experiences_injected.json"):
+            try:
+                ids = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for eid in ids if isinstance(ids, list) else []:
+                eid = str(eid)
+                if eid and eid not in seen:
+                    seen.add(eid)
+                    if jr.record_usage(eid, outcome):
+                        n += 1
+        return n
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -262,16 +330,6 @@ def solve(
     prior_name = prior or _auto_prior(objective)
     gt = _find_ground_truth(challenge_dir)
 
-    # profile 自动路由（用户没指定时；规则优先，LLM 兜底）
-    if profile is None or profile == "auto":
-        from secpt.core.profile.router import route_objective
-
-        profile = asyncio.run(route_objective(objective))
-        print(f"[solve] profile 自动路由 → {profile}")
-
-    # 目标拆解层（阶段一）：客户自然语言 → 结构化 GoalSpec，objective 替换为结构化文本。
-    # benchmark 跑分是程序化协议（平台 API 流程），不拆解保持原文；其余 profile 理解层介入。
-    # SECPT_GOALS=0 跳过拆解直接使用原文（与 SECPT_EXPERIENCE 等开关风格一致）
     from secpt.core.orchestrator.goals import (
         decompose_objective,
         filter_goal_assets,
@@ -280,12 +338,39 @@ def solve(
         seed_goal_assets,
     )
 
+    # 统一理解智能体（路由+拆解一次产出；SECPT_UNDERSTANDING=0 回退旧两段式）
+    # profile 自动判定（用户没指定时）；理解产多标签 + GoalSpec + 先验推荐
+    understanding = None
+    _u_on = os.environ.get("SECPT_UNDERSTANDING", "1") != "0"
+    if (profile is None or profile == "auto") and _u_on and not is_rendered(objective):
+        from secpt.core.orchestrator.understanding import understand_task
+
+        understanding = asyncio.run(understand_task(objective, llm=None, model=model))
+        profile = understanding.profiles[0]
+        print(
+            f"[understand] 统一理解 → profiles={understanding.profiles}"
+            f"{'（多标签）' if len(understanding.profiles) > 1 else ''}"
+            f" priors={understanding.priors or '（无）'}"
+            f"{'  ' + understanding.notes if understanding.notes else ''}"
+        )
+    elif profile is None or profile == "auto":
+        from secpt.core.profile.router import route_objective
+
+        profile = asyncio.run(route_objective(objective))
+        print(f"[solve] profile 自动路由 → {profile}")
+
+    # 目标拆解层：客户自然语言 → 结构化 GoalSpec，objective 替换为结构化文本。
+    # 理解智能体已产 GoalSpec 时直接沿用（不再二次 LLM）；benchmark 跑分是程序化
+    # 协议不拆解；SECPT_GOALS=0 跳过（与 SECPT_EXPERIENCE 等开关风格一致）
     goals_on = os.environ.get("SECPT_GOALS", "1") != "0" and profile != "benchmark"
     print(
         f"[solve] 目标拆解层：{'启用' if goals_on else '关闭'}（SECPT_GOALS={os.environ.get('SECPT_GOALS', '1')}）"
     )
     if goals_on and not is_rendered(objective):
-        goal = asyncio.run(decompose_objective(objective, llm=None, model=model))
+        if understanding is not None:
+            goal = understanding.goal  # 理解智能体产物：零额外调用
+        else:
+            goal = asyncio.run(decompose_objective(objective, llm=None, model=model))
         # 输入可信边界：拆解层产出的 asset_scope 逐项过白名单（与 bash scope 同源 =
         # entries + SECPT_SCOPE_ALLOW），防污染题面经注入产虚假资产入图谱。
         # entries 与 SECPT_SCOPE_ALLOW 双空时整段跳过校验（单题无入口场景不误伤）
@@ -301,8 +386,28 @@ def solve(
             f"constraints={len(goal.constraints)} attack_steps={len(goal.attack_steps)} "
             f"种子资产 {seeded} 个"
         )
+        # 先验：理解推荐优先（已过存在性校验）；用户 --prior 显式指定时最高优先
+        if understanding is not None and understanding.priors and not prior:
+            prior_name = understanding.priors[0]
+            print(f"[understand] 先验推荐 → {prior_name}")
 
     job_id = uuid.uuid4().hex[:8]
+
+    # 多标签合并：横向任务的能力/知识并集（工具白名单 + 先验文本），
+    # 主标签定角色/终止/预算。物化为任务级 YAML，下游按 profile 路径加载（字符串管道零改动）
+    if understanding is not None and len(understanding.profiles) > 1:
+        from secpt.core.orchestrator.understanding import (
+            materialize_merged_profile,
+            merge_profiles_from_names,
+        )
+
+        merged = merge_profiles_from_names(understanding.profiles)
+        profile = materialize_merged_profile(merged, job_id)
+        print(
+            f"[understand] 多标签合并 → 主={merged.name} 并入={understanding.profiles[1:]}"
+            f"（工具/白名单/先验并集；物化 {Path(profile).name}）"
+        )
+
     spec = TaskSpec(
         job_id=job_id,
         task_type=profile,
@@ -469,6 +574,13 @@ def solve(
                 print(f"[solve] 已沉淀经验：{exp.title}")
         except Exception as e:
             print(f"[solve] 经验蒸馏失败（忽略）: {e}")
+
+    # C 反馈闭环：本任务注入过的经验按最终成败回写（best-effort，静默降级）
+    if learn_enable:
+        _outcome = bool(flag or verdict_ok)
+        _n_fb = _feedback_experiences(job_id, _outcome)
+        if _n_fb:
+            print(f"[solve] 经验反馈回写：{_n_fb} 条（outcome={'hit' if _outcome else 'miss'}）")
 
     return 0 if (flag or verdict_ok) else 1
 

@@ -65,7 +65,7 @@ def run_cmd(
     """对 ``target`` 执行一次渗透任务。
 
     默认走 Engine 单链（function-calling），失败自动换路线重试一次；
-    --mode dag 显式启用 Specialist DAG 编排（recon → exploit×N 并行 → verify）。
+    --mode dag 显式启用多入口编排（frontier 角色意图：recon → exploit×N 并行 → verify）。
 
     S5 多入口对照结论：DAG 层保留但默认关闭；只有显式 --mode dag（或 --orchestrator）
     才启用。entries <= 1 时编排层天然休眠，直连单链。
@@ -89,17 +89,29 @@ def run_cmd(
         typer.echo("")
         typer.echo(f"job_id:    {summary['job_id']}")
         typer.echo(f"mode:      {summary['mode']}")
-        typer.echo(f"entries:   {len(summary['entries'])} 个")
+        # F3：防御读取——summary 契约由 dag._fill_summary_contract 统一补齐，
+        # 这里再兜底一次，任何新执行器缺键都不该让 CLI 在跑完后崩报告路径
+        typer.echo(f"entries:   {len(summary.get('entries') or [])} 个")
         typer.echo(f"wall_s:    {summary['wall_s']:.1f}")
         typer.echo(
-            f"assets:    {summary['warroom_assets']}  attempted={summary['warroom_attempts']}"
+            f"assets:    {summary.get('warroom_assets', 0)}"
+            f"  attempted={summary.get('warroom_attempts', 0)}"
         )
-        typer.echo(f"findings:  {summary['findings']}  verified={summary['verified']}")
+        typer.echo(
+            f"findings:  {summary.get('findings', 0)}  verified={summary.get('verified', 0)}"
+        )
         typer.echo(f"flags:     {summary['flags'] or '未拿到'}")
         for c in summary["chains"]:
+            # 统一 ChainResult 契约（结构化轮）：entry>=0 为单链/stages 入口维度，
+            # 否则显示意图标题（frontier/benchmark）
+            if c.get("entry", -1) >= 0:
+                detail = f"entry={c['entry']}"
+            else:
+                detail = f"intent={str(c.get('intent') or '')[:40]}"
             typer.echo(
-                f"  chain:   {c['role']:<8s} entry={c['entry']} steps={c['steps']} "
-                f"wall={c['wall_s']}s status={c['status']}"
+                f"  chain:   {c.get('role') or '':<8s} {detail} "
+                f"steps={c.get('steps', 0)} wall={c.get('wall_s', 0)}s "
+                f"status={c.get('status', '?')}"
             )
         if not summary["flags"]:
             raise typer.Exit(1)

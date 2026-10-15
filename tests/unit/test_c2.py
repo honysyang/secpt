@@ -113,3 +113,61 @@ class TestLLMPool:
         _run(pool.call_pooled([], [], "bad"))
         assert calls == ["good"]
         pool._circuits.clear()
+
+    def test_half_open_probe_admits_single(self, monkeypatch):
+        """D 修复：冷却到期只放 1 个探针（旧实现全量恢复 → 60s 失败脉冲）。"""
+        monkeypatch.setenv("SECPT_MODEL_POOL", "bad,good")
+        pool._circuits.clear()
+
+        async def down(messages, tools, model, api_key=None, fallback=None):
+            raise ConnectionError("down")
+
+        monkeypatch.setattr(pool, "call_llm", down)
+        for _ in range(3):
+            import contextlib
+
+            with contextlib.suppress(ConnectionError):
+                _run(pool.call_pooled([], [], "bad"))
+        assert pool._broken("bad")
+        # 冷却到期（手动置过去）→ 半开：第一个 _admit 放行探针，第二个拒绝
+        pool._circuits["bad"][1] = 0.0
+        assert pool._admit("bad") is True  # 探针放行
+        assert pool._admit("bad") is False  # 探针在途：其余拒绝
+        pool._circuits.clear()
+
+    def test_half_open_probe_rebreak_and_recover(self, monkeypatch):
+        """探针失败 → 重新熔断；探针成功 → 恢复全量。"""
+        monkeypatch.setenv("SECPT_MODEL_POOL", "bad,good")
+        pool._circuits.clear()
+        mode = {"bad_down": True}
+
+        async def fake(messages, tools, model, api_key=None, fallback=None):
+            if model == "bad" and mode["bad_down"]:
+                raise ConnectionError("down")
+            return _Resp("ok")
+
+        monkeypatch.setattr(pool, "call_llm", fake)
+        for _ in range(3):
+            import contextlib
+
+            with contextlib.suppress(ConnectionError):
+                _run(pool.call_pooled([], [], "bad"))
+        # 冷却到期，探针仍失败 → 重新熔断（until 被推后）
+        pool._circuits["bad"][1] = 0.0
+        _run(pool.call_pooled([], [], "bad"))  # bad 探针失败 → good 兜底
+        assert pool._broken("bad")
+        # 冷却到期 + 上游恢复 → 探针成功 → 熔断清除，bad 重新可用
+        pool._circuits["bad"][1] = 0.0
+        mode["bad_down"] = False
+        calls = []
+
+        async def spy(messages, tools, model, api_key=None, fallback=None):
+            calls.append(model)
+            return _Resp("ok")
+
+        monkeypatch.setattr(pool, "call_llm", spy)
+        _run(pool.call_pooled([], [], "bad"))
+        assert calls == ["bad"]  # 探针成功直接返回，未走 good
+        assert not pool._broken("bad")
+        assert "bad" not in pool._circuits  # closed
+        pool._circuits.clear()

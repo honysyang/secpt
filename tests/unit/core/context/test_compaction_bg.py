@@ -163,3 +163,90 @@ def test_complete_summary_failure_writes_fallback(tmp_path):
     s = load_summary(tmp_path, "jz", 2)
     assert s is not None and "摘要生成失败" in s
     assert not req_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# E 修复：user 消息纳入可删单元（此前永不删除、单调堆积）
+# ---------------------------------------------------------------------------
+
+
+class TestUserMessageRemoval:
+    def test_user_messages_are_removable(self):
+        """nudge/旧摘要等 user 消息可删（预算注水大户）。"""
+        from secpt.core.context.compaction import _is_removable_user
+
+        assert _is_removable_user({"role": "user", "content": "【系统提醒】你似乎重复调用…"})
+        assert _is_removable_user({"role": "user", "content": "【历史摘要 #0】\n1. 任务目标：x"})
+        assert _is_removable_user({"role": "user", "content": "预算已用 80%…"})
+
+    def test_pending_placeholder_not_removable(self):
+        """未回填的"生成中"占位不删：删了摘要回填就永远找不到落点。"""
+        from secpt.core.context.compaction import _is_removable_user
+
+        assert not _is_removable_user({"role": "user", "content": placeholder_content(2)})
+
+    def test_plan_removes_user_messages_and_tail_intact(self):
+        """超阈值压缩：user 消息进入 removed_msgs；尾部保护段原样保留。"""
+        msgs = [{"role": "system", "content": "s"}]
+        # 大 user 消息（旧摘要占位与 nudge 各一）+ 完整组若干
+        msgs.append({"role": "user", "content": "【历史摘要 #0】\n正文" + "u" * 30_000})
+        for i in range(4):
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{i}",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                }
+            )
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 30_000})
+        msgs.append({"role": "user", "content": "【系统提醒】重复调用警告" + "n" * 30_000})
+
+        assert should_compact(msgs, 10_000)
+        plan = plan_compaction(msgs, 10_000)
+        assert plan is not None
+        remaining, removed, _first = plan
+        removed_roles = [m.get("role") for m in removed]
+        assert "user" in removed_roles  # user 消息纳入删除
+        # 组完整性不变：tool 结果必与 assistant 对偶出现
+        removed_calls = {c["id"] for m in removed for c in (m.get("tool_calls") or [])}
+        removed_tools = {m.get("tool_call_id") for m in removed if m.get("role") == "tool"}
+        assert removed_calls == removed_tools
+        assert remaining[0]["role"] == "system"
+
+    def test_pending_placeholder_survives_compaction(self):
+        """链里含"生成中"占位时：压缩不删它（其余消息可删）。"""
+        msgs = [{"role": "system", "content": "s"}]
+        ph = {"role": "user", "content": placeholder_content(0)}
+        msgs.append(ph)
+        for i in range(4):
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"c{i}",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                }
+            )
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 30_000})
+        msgs.append({"role": "user", "content": "y" * 30_000})
+        plan = plan_compaction(msgs, 10_000)
+        assert plan is not None
+        remaining, removed, _first = plan
+        assert all(PLACEHOLDER_MARK not in str(m.get("content") or "") for m in removed)
+        # 占位仍在链里（回填落点保留）
+        assert any(
+            PLACEHOLDER_MARK in str(m.get("content") or "")
+            for m in remaining
+            if m.get("role") == "user"
+        )

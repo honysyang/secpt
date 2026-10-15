@@ -149,6 +149,51 @@ class TestIntercept:
         assert it.remove_rule(rid) is True
         assert it.remove_rule(1) is False  # 内置规则不可删
 
+    def test_ask_does_not_block_event_loop(self, tmp_path, monkeypatch):
+        """修复回归：审批阻塞等待（ask 最长 300s）不得冻结事件循环。
+
+        旧实现 run_bash 内同步调 Interceptor().eval，ask 的人工等待把整个
+        事件循环卡死——同进程其他 worker 全部停摆。现走 asyncio.to_thread。
+        """
+        from secpt.runtime.engine import RunConfig, make_tool_fns
+
+        class _SlowInterceptor:
+            def __init__(self, *a, **k): ...
+
+            def eval(self, *, tool, command, job_id="", wait=True):
+                time.sleep(0.5)  # 模拟人工审批等待（阻塞式 sleep）
+                return True, ""
+
+        monkeypatch.setattr("secpt.governance.intercept.Interceptor", _SlowInterceptor)
+        cfg = RunConfig(
+            job_id="ic1",
+            objective="t",
+            system_extra="",
+            workspace=tmp_path,
+            bash_whitelist=frozenset({"echo"}),
+        )
+        (tmp_path / "ws").mkdir(exist_ok=True)
+        tools = make_tool_fns(cfg)
+
+        async def _all():
+            ticks = 0
+
+            async def ticker():
+                nonlocal ticks
+                while True:
+                    await asyncio.sleep(0.02)
+                    ticks += 1
+
+            tk = asyncio.create_task(ticker())
+            out = await tools["bash"]({"command": "echo hi"})
+            tk.cancel()
+            return out, ticks
+
+        out, ticks = _run(_all())
+        assert "hi" in out
+        # 0.5s 阻塞期间事件循环持续运转（~25 ticks）；旧实现 ticks 恒为 0
+        assert ticks >= 5
+
 
 # ---------------------------------------------------------------------------
 # 直投意图 + frontier v2
@@ -249,6 +294,40 @@ class TestParallelClaim:
 
         _run(_all())
         assert sorted(claimed) == sorted(ids)  # 3 条各领一次，无重复
+
+    def test_claim_atomic_across_connections(self, tmp_path):
+        """跨进程语义：独立连接并发认领不重复不丢失。
+
+        旧实现 SELECT 后 UPDATE 是 deferred 事务（BEGIN IMMEDIATE 修复）——
+        两个进程可能同时选中同一行再各自 UPDATE 成功（双认领）。
+        这里用多线程 + 独立 Frontier 实例（各自连接）逼近跨进程交错。
+        """
+        db = tmp_path / "fr.db"
+        n = 30
+        fr0 = Frontier(db)
+        ids = {fr0.add(f"任务{i}", source="direct") for i in range(n)}
+        claimed: list[str] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(6)
+
+        def worker():
+            fr = Frontier(db)  # 独立实例/连接（实例须在认领开始前全部建好：
+            barrier.wait()  # _recover_stale 会把 running 置回 open，模拟多进程时不可中途新建）
+
+            while True:
+                it = fr.claim_next()
+                if it is None:
+                    return
+                with lock:
+                    claimed.append(it.id)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(claimed) == n  # 无重复
+        assert set(claimed) == ids  # 无丢失
 
 
 # ---------------------------------------------------------------------------

@@ -67,10 +67,14 @@ class TestLongOutputPersisted:
         assert saved, "超长输出应落盘 outputs/"
         full = saved[0].read_text()
         assert len(full) >= 9000
-        # 完整内容可通过 read_file 相对路径按需取回（read_file 统一 8K 截断，细节不丢在对话里）
+        # 完整内容可通过 read_file 相对路径按需取回（C 分页：默认 8K 切片 + 续读提示）
         got = tools["read_file"]({"path": f"outputs/{saved[0].name}"})
-        assert len(got) == 8000
         assert got.startswith("x")
+        assert got.startswith("x" * 8000)  # 默认切片 8000
+        assert "已读 0-8000/" in got and "offset=8000" in got  # 续读提示（翻页取回后续）
+        # 翻页续读拿到后续内容（细节不丢在对话里，按需取）
+        got2 = tools["read_file"]({"path": f"outputs/{saved[0].name}", "offset": 8000})
+        assert got2.startswith("x")
 
     def test_short_output_not_saved(self, tmp_path):
         cfg = RunConfig(job_id="t", objective="o", system_extra="", workspace=tmp_path)

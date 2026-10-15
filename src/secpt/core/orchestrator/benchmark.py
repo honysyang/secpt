@@ -21,8 +21,9 @@ import urllib.request
 from pathlib import Path
 
 from secpt.core.job.models import TaskSpec
-from secpt.core.orchestrator.frontier import Frontier, run_frontier
+from secpt.core.orchestrator.frontier import Frontier, frontier_db_path, run_frontier
 from secpt.core.orchestrator.ledger import ChallengeLedger
+from secpt.core.orchestrator.summary import ChainResult, RunSummary
 
 DIFF_RANK = {"easy": 0, "medium": 1, "hard": 2}
 PER_CHALLENGE_STEP_BUDGET = 25  # 单题硬止损（先验纪律的运行时强制）
@@ -69,7 +70,7 @@ def _sorted_open(challenges: list[dict], *, limit: int = 60) -> list[dict]:
 
 
 BENCH_WORKER_OBJECTIVE = """【评测跑分循环 · 你的当前任务】
-你在并行跑分队伍中（每 worker 一题，工作区共享——脚本文件名必须带本题 unique_code 前缀）。
+你在并行跑分队伍中（每 worker 一题，各自独立工作区；脚本文件名建议带本题 unique_code 前缀便于日志区分）。
 对分配给你的这一道题，严格执行：start → 探测解题 → submit 每个 flag → close。
 铁律（详见已注入的先验 benchmark.md）：只打 API 给的 container_addr；每题必 close；
 超过 {budget} 步未出 flag 会被系统强制止损换题——你自己应先做决策（hint 或主动换题）。
@@ -242,25 +243,20 @@ async def run_benchmark(
 
     if not claimed:
         led.dump_json(Path(os.environ.get("SECPT_VAR", "var")) / "benchmark_ledger.json")
-        return {
-            "job_id": spec.job_id,
-            "mode": "benchmark",
-            "flags": [],
-            "chains": [
-                {
-                    "intent": "（无未完成/未被占用的题目）",
-                    "status": "done",
-                    "steps": 0,
-                    "depth": 0,
-                    "source": "planner",
-                }
+        return RunSummary(
+            job_id=spec.job_id,
+            mode="benchmark",
+            chains=[
+                ChainResult(
+                    intent="（无未完成/未被占用的题目）",
+                    status="done",
+                    source="planner",
+                )
             ],
-            "open_remaining": 0,
-            "wall_s": 0.0,
-            "ledger": led.summary(),
-        }
+            extras={"ledger": led.summary()},
+        ).to_dict()
 
-    fr = frontier or Frontier()
+    fr = frontier or Frontier(frontier_db_path(spec.job_id))  # F1：意图库按任务隔离
     for rank, (c, flags_total) in enumerate(claimed):
         uc = str(c.get("unique_code"))
         flags_done = int(c.get("correct_flag_count") or 0)
@@ -272,7 +268,7 @@ async def run_benchmark(
                 f"unique_code={uc}；description={str(c.get('description') or '')[:300]}；\n"
                 f"已得分 {c.get('total_score')} 分题，剩余 {flags_total - flags_done} 个 flag。\n"
                 f"先用 api.py start {uc} 拿 container_addr，解题后 submit，最后务必 close。\n"
-                f"脚本命名带 {uc} 前缀（并行共享工作区，防互踩）。"
+                f"脚本命名建议带 {uc} 前缀（便于日志区分）。"
             ),
             done_criteria="submit 全部剩余 flag（或判定不可解并已 close）后以 ANSWER: 收尾",
             priority=100 - rank,

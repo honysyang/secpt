@@ -94,7 +94,9 @@ MODEL_WINDOWS = {
 
 BASH_MAX_OUT = 8000
 BASH_READ_CAP = BASH_MAX_OUT * 2  # 单命令 stdout+stderr 读取上限（防失控输出撑爆内存）
-READ_MAX = 200 * 1024
+READ_MAX = 200 * 1024  # 兼容旧注：单次 read_file 默认读取上限（分页前的整文件上限）
+READ_SLICE_MAX = BASH_MAX_OUT * 2  # read_file 单次分页上限（字符）
+READ_HARD_CAP = 8 * 1024 * 1024  # read_file 可读文件上限（超出引导 bash 分段；防大文件读爆内存）
 
 # shell 组合构造：白名单命令默认以 argv 数组执行（禁 shell=True），仅拦截
 # 未引号的"跨命令依赖"构造（管道/重定向/串联/后台/命令替换）——这些必须靠
@@ -139,8 +141,19 @@ def _has_unquoted_shell_chain(command: str) -> bool:
 # （保守、安全），漏判（如脚本 import 兄弟脚本）属启发式的已知上限。
 # ---------------------------------------------------------------------------
 
-# 同轮独立工具调用并发上限（防单轮输出 token 截断 / 沙箱过载）
+# 同轮独立工具调用并发上限默认值（E：SECPT_PARALLEL_MAX 可覆盖，clamp 1-16；
+# 防单轮输出 token 截断 / 沙箱过载）
 _PARALLEL_MAX = 4
+
+
+def _parallel_max() -> int:
+    """工具并发上限：SECPT_PARALLEL_MAX 覆盖（非法值回退默认，clamp 1-16）。"""
+    try:
+        v = int(os.environ.get("SECPT_PARALLEL_MAX", "") or _PARALLEL_MAX)
+    except ValueError:
+        v = _PARALLEL_MAX
+    return max(1, min(16, v))
+
 
 # bash 命令里形如文件名的 token（用于识别"写脚本→跑脚本"依赖）
 _EXT_RE = re.compile(
@@ -365,11 +378,20 @@ class RunResult:
     # | budget_exceeded | failed | error
     messages: list[dict] = field(default_factory=list)
     cost_cny: float = 0.0  # S3 累计成本（CNY，由 BudgetTracker 记）
+    # 结构化轮：prefix cache 记账随结果返回（usage 无该字段的端点恒 0）
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
 
 
 # G1 scope：命令里的目标提取与回环判定（纯函数，便于单测）
 
 _BARE_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# 裸 IPv6 候选（含 :: 压缩、[::1] 括号、内嵌 IPv4 尾巴）：宽松捕获后交 ipaddress
+# 精确校验——时间串 12:34:56、MAC 地址、hex 冒号串等假阳性在校验层被剔除；
+# 全 8 组 hex 形式的误报代价只是多余的 scope 拒绝（fail-closed），漏报则是绕过面
+_IPV6_CAND_RE = re.compile(
+    r"\[?(?:[0-9A-Fa-f]{1,4}:|:){1,7}(?:[0-9A-Fa-f]{1,4}|(?:\d{1,3}\.){3}\d{1,3})\]?"
+)
 # 裸域名（无 scheme）：排除常见文件扩展名，避免把 report.md / exploit.py 当目标
 _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\b")
 _FILE_EXT = {
@@ -423,6 +445,16 @@ def extract_scope_targets(command: str) -> list[str]:
             targets.append(host)
     # 裸 IPv4（含 host:port 形式的 host 部分）
     targets.extend(_BARE_IP_RE.findall(command))
+    # 裸 IPv6（G1 补丁）：URL 形式经 urlparse.hostname 已覆盖，这里补裸/括号形式
+    # （nmap -6 ::1、curl -g 'http://[2001:db8::1]' 的参数段等）——提取不到即不
+    # 校验，是 v4-only 授权场景下的实际绕过面
+    for m in _IPV6_CAND_RE.finditer(command):
+        cand = m.group(0).strip("[]")
+        try:
+            ipaddress.ip_address(cand)
+        except ValueError:
+            continue
+        targets.append(cand)
     # 裸域名：末段是文件扩展名的跳过；URL 已提取的 host 去重
     for m in _DOMAIN_RE.findall(command):
         if m.rsplit(".", 1)[-1] in _FILE_EXT:
@@ -487,6 +519,86 @@ def _scope_check(cfg: RunConfig, command: str) -> str | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# 插件网络工具治理（P1）：Python/YAML 插件的网络类工具（浏览器等）此前完全
+# 绕过 scope/ratelimit/intercept——run_bash 的治理前置只保护内置 bash。
+# 插件 schema 声明 x-secpt-governance: {"network": true} 后，Engine 装配时
+# 统一套治理前置：ratelimit（跨 job 配额）→ scope（复用 extract_scope_targets，
+# fail-closed）→ intercept（ask 阻塞放线程池，不冻结事件循环）→ 原工具。
+# 声明键是 engine 私有协议，发往 LLM 的请求里一律剥离（_public_tool_schema）。
+# ---------------------------------------------------------------------------
+
+_GOV_KEY = "x-secpt-governance"
+
+
+def _extract_governance(schema: dict) -> dict:
+    """提取插件治理声明（兼容 schema 三种形态：裸 parameters / function / 顶层）。"""
+    if not isinstance(schema, dict):
+        return {}
+    fn = schema.get("function") if isinstance(schema.get("function"), dict) else {}
+    params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
+    for cand in (schema.get(_GOV_KEY), fn.get(_GOV_KEY), params.get(_GOV_KEY)):
+        if isinstance(cand, dict):
+            return cand
+    return {}
+
+
+def _public_tool_schema(schema: dict) -> dict:
+    """剥离 x- 私有声明键（engine 协议，不进 LLM 请求）。"""
+    out = {k: v for k, v in schema.items() if not k.startswith("x-")}
+    fn = out.get("function")
+    if isinstance(fn, dict):
+        fn = {k: v for k, v in fn.items() if not k.startswith("x-")}
+        params = fn.get("parameters")
+        if isinstance(params, dict):
+            fn["parameters"] = {k: v for k, v in params.items() if not k.startswith("x-")}
+        out["function"] = fn
+    return out
+
+
+def _governed_plugin_fn(cfg: RunConfig, tool_name: str, fn):
+    """网络类插件工具的治理包装：ratelimit → scope → intercept → 原工具（同 run_bash 语义）。"""
+
+    async def _wrapped(args: dict) -> str:
+        text = " ".join(str(v) for v in (args or {}).values() if isinstance(v, (str, int, float)))
+        if text:
+            # 全局限速（与 run_bash 入口同语义：跨 job 配额，非空 = 拦截；限速器
+            # 自身故障 fail-closed——与 run_bash 一致，防治理失效时打穿目标）
+            rl = cfg.ratelimit
+            if rl is not None and hasattr(rl, "check"):
+                try:
+                    blocked = rl.check(text)
+                    if blocked:
+                        return f"Error: rate limit exceeded for {blocked}（global max_rps）"
+                except Exception as e:
+                    return f"Error: ratelimit check failed: {e}"
+            scope_err = _scope_check(cfg, text)
+            if scope_err:
+                return scope_err
+            if os.environ.get("SECPT_INTERCEPT", "1") != "0":
+                try:
+                    from secpt.governance.intercept import Interceptor
+
+                    ok, why = await asyncio.to_thread(
+                        Interceptor().eval, tool=tool_name, command=text, job_id=cfg.job_id
+                    )
+                    if not ok:
+                        if cfg.audit is not None:
+                            with contextlib.suppress(Exception):
+                                cfg.audit.log(
+                                    "intercept.denied", command=text[:200], note=why[:200]
+                                )
+                        return why
+                except Exception as e:
+                    print(f"[intercept] 求值失败（放行）: {e}", file=sys.stderr)
+        result = fn(args)
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, str) else str(result)
+
+    return _wrapped
+
+
 def build_tools_doc(cfg: RunConfig) -> str:
     return (
         f"- bash(command)  白名单命令：{', '.join(sorted(cfg.bash_whitelist))}，"
@@ -498,14 +610,16 @@ def build_tools_doc(cfg: RunConfig) -> str:
         "先用 write_file 写 Python/Shell 脚本到工作目录，再 bash 执行该脚本。"
         "宿主机绝对路径（如 /home/kali/...）在沙箱容器内不可见，一律用相对路径。"
         "工作目录：{cfg.work_dir}，所有相对路径都自动落到它下面\n"
-        f"- read_file(path)  读文件（相对路径=工作目录下），{READ_MAX // 1024}KB上限\n"
+        f"- read_file(path, offset?, limit?)  读文件（相对路径=工作目录下）；"
+        f"分页读：offset 字符偏移、limit 字符数（缺省 {BASH_MAX_OUT}，上限 {READ_SLICE_MAX}），"
+        f"未读完会提示续读 offset；文件上限 {READ_HARD_CAP // (1024 * 1024)}MB\n"
         "- list_dir(path)  列目录（相对路径=工作目录下），深度1\n"
         f"- write_file(path, content)  写文件到 {cfg.work_dir}/ 下"
         "（相对路径自动落到工作目录，禁止越界；可写 python 脚本再 bash 执行）\n"
         "- 目标授权：网络命令的目标（URL/IP/域名）必须在授权范围内，"
         "范围外会被拒绝执行；本地回环（127.0.0.1/localhost）不受限。"
         "如需访问额外目标，请告知操作者设置 SECPT_SCOPE_ALLOW（逗号分隔 IP/CIDR/域名）\n"
-        f"- 并行：同轮可发起最多 {_PARALLEL_MAX} 个相互独立的工具调用"
+        f"- 并行：同轮可发起最多 {_parallel_max()} 个相互独立的工具调用"
         "（系统只并行执行无副作用调用 read_file/list_dir/write_file；"
         "bash 一律串行执行——共享工作区 ws/，并行会互踩文件）；"
         "依赖彼此结果的调用请分轮串行"
@@ -530,10 +644,20 @@ def build_tool_schemas(cfg: RunConfig) -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": f"读取文件，{READ_MAX // 1024}KB上限",
+                "description": (
+                    f"读取文件（支持分页），单次上限 {READ_SLICE_MAX} 字符；"
+                    "未读完返回续读提示（用 offset 翻页）"
+                ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {"type": "string"},
+                        "offset": {"type": "integer", "description": "起始字符偏移（缺省 0）"},
+                        "limit": {
+                            "type": "integer",
+                            "description": f"读取字符数（缺省 {BASH_MAX_OUT}，上限 {READ_SLICE_MAX}）",
+                        },
+                    },
                     "required": ["path"],
                 },
             },
@@ -656,12 +780,16 @@ def make_tool_fns(cfg: RunConfig) -> dict:
         if scope_err:
             return scope_err
 
-        # 人在环路-审批：白名单/元字符之后、执行之前（SECPT_INTERCEPT=0 可全局关）
+        # 人在环路-审批：白名单/元字符之后、执行之前（SECPT_INTERCEPT=0 可全局关）。
+        # eval 的 ask 分支会阻塞等待人工审批（最长 timeout_s，默认 300s）——必须放
+        # 线程池执行，同步等待会冻结整个事件循环（同进程其他 worker 全部停摆）
         if os.environ.get("SECPT_INTERCEPT", "1") != "0":
             try:
                 from secpt.governance.intercept import Interceptor
 
-                ok, why = Interceptor().eval(tool="bash", command=command, job_id=cfg.job_id)
+                ok, why = await asyncio.to_thread(
+                    Interceptor().eval, tool="bash", command=command, job_id=cfg.job_id
+                )
                 if not ok:
                     # G5 审计：拦截事件（超时拒绝单列，便于区分人工 deny 与审批超时）
                     if cfg.audit is not None:
@@ -777,17 +905,42 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             return "(no output)"
         return _truncate_output(text)
 
-    def read_file(path: str) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
+        """读文件（C：支持分页）。
+
+        offset：起始字符偏移（缺省 0）；limit：读取字符数（0=默认 8000，上限
+        READ_SLICE_MAX）。返回切片；未读完附续读提示（模型据此翻页，不再靠
+        head/tail 拼）。文件超 READ_HARD_CAP 拒绝（引导 bash head/tail/sed 分段）。
+        """
         p = Path(path)
         if not p.is_absolute():
             p = work_dir / p  # 与 bash cwd / write_file 一致
         try:
             sz = p.stat().st_size
-            if sz > READ_MAX:
-                return f"Error: file too large ({sz} > {READ_MAX})"
-            return p.read_text(errors="replace")[:BASH_MAX_OUT]
+            if sz > READ_HARD_CAP:
+                return (
+                    f"Error: file too large ({sz} > {READ_HARD_CAP})；"
+                    "用 bash 的 head/tail/sed -n 分段查看大文件"
+                )
+            text = p.read_text(errors="replace")
         except Exception as e:
             return f"Error: {e}"
+        try:
+            off = max(0, int(offset or 0))
+            lim = int(limit) if limit else BASH_MAX_OUT
+            lim = max(1, min(lim, READ_SLICE_MAX))
+        except (TypeError, ValueError):
+            return "Error: offset/limit 必须是整数"
+        total = len(text)
+        if not text:
+            return "(empty file)"
+        if off >= total:
+            return f"Error: offset {off} 超出文件长度 {total}"
+        chunk = text[off : off + lim]
+        end = off + len(chunk)
+        if end < total:
+            chunk += f"\n...(已读 {off}-{end}/{total} 字符，续读: read_file(path, offset={end}))"
+        return chunk
 
     def list_dir(path: str) -> str:
         p = Path(path)
@@ -826,7 +979,7 @@ def make_tool_fns(cfg: RunConfig) -> dict:
 
     return {
         "bash": lambda a: run_bash(a["command"]),
-        "read_file": lambda a: read_file(a["path"]),
+        "read_file": lambda a: read_file(a["path"], a.get("offset", 0), a.get("limit", 0)),
         "list_dir": lambda a: list_dir(a["path"]),
         "write_file": lambda a: write_file(a["path"], a["content"]),
     }
@@ -857,7 +1010,13 @@ class Engine:
         self.llm = llm
         self.tools = tools if tools is not None else make_tool_fns(cfg)
         self.extra_tools = extra_tools or {}
-        self.tools.update({name: fn for name, (schema, fn) in self.extra_tools.items()})
+        self._extra_schemas: list[dict] = []
+        for name, (schema, fn) in self.extra_tools.items():
+            if _extract_governance(schema).get("network"):
+                # 网络类插件工具（浏览器等）：装配时统一套治理前置（scope→intercept）
+                fn = _governed_plugin_fn(cfg, name, fn)
+            self.tools[name] = fn
+            self._extra_schemas.append(_public_tool_schema(schema))
         self.hooks = hooks
         self.summarizer = summarizer
         self.verbose = verbose
@@ -950,13 +1109,13 @@ class Engine:
         else:
             messages: list[dict] = [{"role": "system", "content": system}]
 
-        tool_schemas = build_tool_schemas(cfg) + [
-            schema for schema, _fn in self.extra_tools.values()
-        ]
+        tool_schemas = build_tool_schemas(cfg) + self._extra_schemas
         flag_re = cfg.flag_re
 
         model = cfg.model_primary
         steps = 0
+        cache_hit_tokens = 0  # A：usage 带 cache 字段时累计（resume 后从 0 起，近似口径）
+        cache_miss_tokens = 0
         t0 = time.time()
         flag_found = None
         status = "failed"  # 默认值：循环条件不满足且未显式设置时兜底
@@ -975,7 +1134,9 @@ class Engine:
         if cfg.budget_cost_cny > 0:
             from secpt.core.context.budget import BudgetTracker
 
-            budget = BudgetTracker(cfg.budget_cost_cny, warn_pct=cfg.budget_warn_pct)
+            # 计价按主模型解析（池化/failover 引入后与 deepseek 默认价脱钩；
+            # failover 段按主模型价近似——预算上限语义不受影响）
+            budget = BudgetTracker(cfg.budget_cost_cny, warn_pct=cfg.budget_warn_pct, model=model)
         if self.summarizer is None:
             from secpt.core.context.summarize import get_summarizer
 
@@ -1100,6 +1261,15 @@ class Engine:
                 if usage is not None:
                     prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                     completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                    # A 缓存命中可观测：DeepSeek 系 usage 带 cache 命中/未命中 token——
+                    # 累计进指标与收尾汇总（append-only 链的 prefix cache 收益从此可量化）
+                    _hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+                    _miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+                    if _hit or _miss:
+                        cache_hit_tokens += _hit
+                        cache_miss_tokens += _miss
+                        counter_inc("llm_cache_hit_tokens_total", float(_hit))
+                        counter_inc("llm_cache_miss_tokens_total", float(_miss))
                 else:
                     # fake/无 usage 时回退估算（本轮请求 + 本轮产出）
                     prompt_tokens = est_messages_tokens(req_messages)
@@ -1138,6 +1308,14 @@ class Engine:
                         flag_found = ans.group(1)
                         status = "success"
                         print(f"\n[ANSWER] {flag_found}", file=sys.stderr)
+                        with contextlib.suppress(Exception):
+                            from secpt.runtime.notify import notify
+
+                            notify(
+                                "flag_found",
+                                f"secpt 任务 {cfg.job_id} 拿到成果",
+                                flag_found[:120],
+                            )
                         break
                     print("  [info] no tool_calls, continuing...", file=sys.stderr)
                     continue
@@ -1157,7 +1335,7 @@ class Engine:
                         fn_args = {}
                     items.append((tc, fn_name, fn_args))
 
-                sem = asyncio.Semaphore(_PARALLEL_MAX)
+                sem = asyncio.Semaphore(_parallel_max())
 
                 async def _exec_one(item):
                     """执行单个工具调用；失败不拖垮整批（逐项捕获返回错误串）。"""
@@ -1354,6 +1532,13 @@ class Engine:
                 self._bg_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._bg_task
+            # F2：释放本 job 的常驻沙箱容器（此前仅 atexit + 4h TTL 兜底——
+            # 多意图任务（frontier 每意图一个子 job）逐意图累积容器）。
+            # sandbox 未启用时是 no-op；意图内复用语义不变（容器活到本 run 结束）。
+            with contextlib.suppress(Exception):
+                from secpt.runtime.sandbox import release_container
+
+                release_container(cfg.job_id)
 
         # ------------------------------------------------------------------
         # 结束
@@ -1372,6 +1557,12 @@ class Engine:
         print(f"墙钟:   {wall:.1f}s")
         print(f"Flag:   {flag_found or '未拿到'}")
         print(f"卡死切换器触发: {detector.trigger_count} 次")
+        _cache_total = cache_hit_tokens + cache_miss_tokens
+        if _cache_total:
+            print(
+                f"缓存命中: {cache_hit_tokens}/{_cache_total} prompt tokens"
+                f" ({100.0 * cache_hit_tokens / _cache_total:.1f}%)"
+            )
         if budget is not None:
             print(
                 f"成本:   {cost:.4f} CNY  (prompt={budget.prompt_tokens}, "
@@ -1396,4 +1587,6 @@ class Engine:
             status=status,
             messages=messages,
             cost_cny=cost,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_miss_tokens=cache_miss_tokens,
         )

@@ -45,6 +45,32 @@ EVENT_TYPES = {
     "compaction_completed",  # 后台摘要完成、<k>.summary.md 已落盘
 }
 
+# 事件 payload 结构目录（结构化加固轮）：类型 → 必备 payload 键。
+# 校验口径 = "缺键告警不阻断"（每类型一次 stderr 告警）——事件流是观测层，
+# 不许因结构瑕疵打断主链路；目录本身是**单点事实源**：新增事件类型必须同时
+# 登记 EVENT_TYPES 与 EVENT_CATALOG（有测试保证目录完备）。
+EVENT_CATALOG: dict[str, frozenset[str]] = {
+    "assistant": frozenset({"content", "tool_calls"}),
+    "tool_call": frozenset({"call_id", "tool", "args"}),
+    "tool_result": frozenset({"call_id", "status", "bytes", "preview"}),
+    "finding": frozenset({"id", "kind", "value"}),
+    # round 归事件行信封管（frontier 父流聚合的合成 round_end 只带 n_messages）
+    "round_end": frozenset({"n_messages"}),
+    "budget_warning": frozenset({"message"}),
+    "rollover": frozenset({"round", "n_messages", "handoff"}),
+    "status_change": frozenset({"status"}),
+    "error": frozenset({"message"}),
+    "compaction": frozenset({"k", "removed_messages", "window", "summary"}),
+    "compaction_requested": frozenset({"k", "removed_messages", "window"}),
+    "compaction_completed": frozenset({"k", "removed_messages", "window", "summary"}),
+    "routed": frozenset({"profile", "via"}),
+    "step": frozenset({"n", "elapsed_s"}),
+    "user_msg": frozenset({"kind", "content"}),
+    "tokens": frozenset({"prompt", "completion", "cost_cny"}),
+    # verdict 由 evaluation 层直接 append（不经 write()），目录条目为存量文档
+    "verdict": frozenset({"complete"}),
+}
+
 
 def _classify_output(out: str) -> str:
     """根据工具输出判定 status ∈ ok|empty|error。"""
@@ -81,6 +107,7 @@ class EventSink:
         # 进程内写锁：specialist 多链 to_thread 并行共享同一 sink 写同一文件，
         # _seq 自增与 append 必须原子（PR-A 并发安全）
         self._lock = threading.Lock()
+        self._schema_warned: set[str] = set()  # payload 缺键告警去重（每类型一次）
         # 初始 seq = 已有行数（jsonl 用行号做 seq）
         self._seq = self._count_lines()
 
@@ -117,6 +144,17 @@ class EventSink:
     def write(self, etype: str, payload: dict, round_: int = 0) -> int:
         if etype not in EVENT_TYPES:
             raise ValueError(f"unknown event type: {etype!r}")
+        # 结构化校验（缺键告警每类型一次，不阻断——事件流是观测层）
+        required = EVENT_CATALOG.get(etype)
+        if required:
+            missing = required - set(payload or {})
+            if missing and etype not in self._schema_warned:
+                self._schema_warned.add(etype)
+                print(
+                    f"[sink] 事件 {etype!r} payload 缺键 {sorted(missing)}"
+                    f"（EVENT_CATALOG 契约，已记录不阻断）",
+                    file=__import__("sys").stderr,
+                )
         with self._lock:
             self._seq += 1
             line = {

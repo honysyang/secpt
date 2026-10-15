@@ -1,4 +1,4 @@
-"""S5 L2 共享作战记忆（warroom）——新系统的主干。
+"""warroom：SQLite 四表共享作战记忆（历史/可选组件）。
 
 多角色（recon / exploit / analyze / verify）协作的共享事实层：
 角色之间**只交换这四张表的行**，不交换自然语言摘要。
@@ -7,6 +7,11 @@
     credentials —— 凭据：kind / value，valid 是否已验证（S6 由 verify 置位）
     findings    —— 发现：id / kind / title / evidence / severity / verified
     attempts    —— 尝试记录：key_hash = sha1(action + target)，去重靠它
+
+现状标注（F4）：当前多意图协作的生产链路走 intel 图 + findings 库 +
+search_traces + 完成广播（见 core/orchestrator/frontier.py），本模块**无生产
+装配点**——WarroomHooks（挂上 hooks 链即自动把观察点落四表）保留作通用桥接，
+需要"表行级"协作语义的场景可显式接入；勿在新代码里默认依赖它。
 
 并发要点（与 S1 JobStore 一致）：
 - PRAGMA journal_mode=WAL + busy_timeout=5000，同一 job 内多链并发读写安全
@@ -291,3 +296,121 @@ class Warroom:
         with self._conn() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM attempts").fetchone()
         return int(row["n"])
+
+
+# ---------------------------------------------------------------------------
+# 引擎观察点 → warroom 表行（原 core/orchestrator/specialist.py 迁入；该编排器
+# 已被 frontier 角色意图折叠退役，WarroomHooks 作为 warroom 通用桥接保留——
+# 挂到 hooks 链即把工具调用/发现自动落四张表）
+# ---------------------------------------------------------------------------
+
+
+def _parse_asset_url(url: str) -> tuple[str, int | None, str]:
+    """从 URL 提取 (host, port, service)。解析失败返回空值。"""
+    from urllib.parse import urlparse
+
+    try:
+        u = urlparse(url)
+        return u.hostname or "", u.port, u.scheme or ""
+    except Exception:
+        return "", None, ""
+
+
+def _extract_target(args: dict) -> str:
+    """从工具参数里尽力提取 target（URL / 路径 / 命令里的地址），供 attempts 去重。"""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("url", "host", "target", "command"):
+        v = str(args.get(key, "") or "")
+        if not v:
+            continue
+        for tok in v.split():
+            if tok.startswith("http://") or tok.startswith("https://"):
+                return tok
+            if tok.startswith(("127.", "10.", "192.168.", "172.")):
+                return tok
+        return v[:120]
+    return ""
+
+
+class WarroomHooks:
+    """把 Engine 的观察点写进 warroom 四张表，并透传内层 hooks 链。
+
+    链：Engine → WarroomHooks → Watchdog → EventSink
+    - on_tool / on_result   → attempts（key=sha1(action+target)，重复跳过）
+    - on_finding            → credentials（credential）/ assets（URL 解析）
+    - 其余 hooks 经 __getattr__ 透传给内层（Watchdog）
+    """
+
+    def __init__(self, inner, warroom: Warroom) -> None:
+        import json
+
+        self._inner = inner
+        self._warroom = warroom
+        self._json = json
+        # PR-A：按 call_id 精确关联（并行多链下 FIFO 顺序会被其他链交错打乱；
+        # LLM 产出的 call_id 全局唯一，dict 映射天然并发安全）
+        self._pending: dict[str, tuple[str, str]] = {}
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    # ---------------- attempts ----------------
+
+    def on_tool(self, call_id: str, name: str, args: dict) -> None:
+        action = f"{name}({self._json.dumps(args, ensure_ascii=False)[:200]})"
+        target = _extract_target(args)
+        self._pending[call_id] = (action, target)
+        try:
+            self._warroom.add_attempt(action, target=target)
+        except Exception as e:
+            print(f"[warroom] add_attempt failed (ignored): {e}")
+        inner = getattr(self._inner, "on_tool", None)
+        if inner is not None:
+            inner(call_id, name, args)
+
+    def on_result(self, call_id: str, out: str) -> None:
+        pending = self._pending.pop(call_id, None)
+        if pending is not None:
+            action, target = pending
+            # 补记结果：UPDATE 已有行（INSERT OR IGNORE 撞 UNIQUE 后 result 不落盘）
+            try:
+                self._warroom.update_attempt_result(action, target=target, result=out[:1000])
+            except Exception as e:
+                print(f"[warroom] update attempt failed (ignored): {e}")
+        inner = getattr(self._inner, "on_result", None)
+        if inner is not None:
+            inner(call_id, out)
+
+    # ---------------- findings ----------------
+
+    def on_finding(self, kind: str, value: str, evidence: str = "") -> None:
+        try:
+            if kind == "credential":
+                self._warroom.add_credential("regex", value, source_step=evidence)
+                self._warroom.add_finding(
+                    f"cred-{self._warroom.count_attempts() + 1}",
+                    "credential",
+                    value,
+                    evidence=evidence,
+                    severity="medium",
+                )
+            elif kind == "asset":
+                host, port, service = _parse_asset_url(value)
+                if host:
+                    self._warroom.add_asset(host, port, service, "", source_step=evidence)
+            elif kind == "flag":
+                self._warroom.add_finding(
+                    f"flag-{self._warroom.count_attempts() + 1}",
+                    "flag",
+                    value,
+                    evidence=evidence,
+                    severity="critical",
+                )
+        except Exception as e:
+            print(f"[warroom] on_finding failed (ignored): {e}")
+        inner = getattr(self._inner, "on_finding", None)
+        if inner is not None:
+            inner(kind, value, evidence)
+        elif hasattr(self._inner, "finding"):
+            self._inner.finding(kind, value, evidence)

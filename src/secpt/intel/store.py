@@ -302,10 +302,12 @@ class IntelStore:
         return out[:limit]
 
     def recall_graph(self, query: str, *, limit: int = 8) -> list[dict]:
-        """联想召回：关键词命中（排除冷节点）→ 1 跳血缘邻居合并排序。
+        """联想召回：关键词命中（排除冷节点）→ 1 跳血缘邻居 + 语义近邻合并排序。
 
         图记忆派的本质：记忆按**关联**取回，不是按字符串匹配——命中一个 fact，
         与它综合得出过 finding 的其他 fact 一并带回（交叉点的原材料）。
+        B 语义通路：字面（FTS/LIKE）与血缘之外补嵌入近邻——"命令执行"捞到
+        "RCE"（字面零命中时也能冷启动召回）；嵌入不可用则跳过（行为同旧版）。
         """
         hits = self.recall(query, limit=limit)
         hits = [h for h in hits if not h.get("cold")]
@@ -316,7 +318,54 @@ class IntelStore:
                     continue
                 nb["associated"] = True  # 联想带来源标记（排序降权）
                 merged.setdefault(int(nb["id"]), dict(nb))
+        try:
+            for nb in self.semantic_neighbors(query, exclude=set(merged), limit=2):
+                nb["associated"] = True
+                merged.setdefault(int(nb["id"]), nb)
+        except Exception:
+            pass  # 语义通路 best-effort：失败只丢联想，不动主召回
         return list(merged.values())[: limit * 2]
+
+    def semantic_neighbors(
+        self, query: str, *, exclude: set[int], limit: int = 2, pool: int = 120
+    ) -> list[dict]:
+        """嵌入近邻 top-limit（B）：对最近 pool 条非冷 fact/finding/hint 按余弦排序。
+
+        嵌入不可用/推理失败 → 空表（调用方零感知，与旧行为一致）；
+        低于 EMBED_MIN_SCORE 视为无关（阈值与 learning 侧同源）。
+        """
+        try:
+            from secpt.knowledge import embedding as _emb
+
+            if _emb.get_embedder() is None:
+                return []
+        except Exception:
+            return []
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT id,type,content,ts FROM nodes
+                   WHERE type IN ('fact','finding','hint') AND COALESCE(cold,0)=0
+                   ORDER BY ts DESC LIMIT ?""",
+                (pool,),
+            ).fetchall()
+        cand = [dict(r) for r in rows if int(r["id"]) not in exclude]
+        if not cand:
+            return []
+        vecs = _emb.embed_cached([query] + [str(r["content"] or "") for r in cand])
+        if vecs is None:
+            return []
+        qv = vecs[0]
+        scored = sorted(
+            ((r, _emb.cosine(qv, v)) for r, v in zip(cand, vecs[1:], strict=True)),
+            key=lambda p: -p[1],
+        )
+        out: list[dict] = []
+        for r, score in scored[:limit]:
+            if score < _emb.EMBED_MIN_SCORE:
+                break
+            r["semantic_score"] = round(score, 4)
+            out.append(r)
+        return out
 
     # ---------------- 冷压缩 ----------------
 

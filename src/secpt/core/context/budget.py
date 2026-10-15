@@ -1,8 +1,10 @@
 """S3 预算追踪 BudgetTracker。
 
 累计 prompt_tokens / completion_tokens / cost_cny / wall_s。
-单价从环境变量读取（per 1K input/output），不写死：
-SECPT_PRICING_INPUT_PER_1K（默认 0.002）/ SECPT_PRICING_OUTPUT_PER_1K（默认 0.008）。
+单价解析（pricing_for，按模型）优先级：
+SECPT_PRICE_<PREFIX>_IN_PER_1K / _OUT_PER_1K（provider 级 env 覆盖） >
+内置模型名表 > 内置 provider 表 > SECPT_PRICING_INPUT_PER_1K/OUT（通用 env，
+默认 0.002/0.008 CNY per 1K，历史 deepseek 价）。
 
 阈值行为：
 - 达到 warn_pct（默认 80%）→ check() 返回 "warn"，由 Engine 往 messages
@@ -16,12 +18,56 @@ from __future__ import annotations
 import os
 import time
 
+# 内置计价表（CNY / 1K tokens；参考 2025-2026 官网档位，随官方调整——env 可覆盖）
+_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "deepseek-chat": (0.002, 0.008),
+    "deepseek-reasoner": (0.004, 0.016),
+    "gpt-4o": (0.018, 0.072),
+    "gpt-4o-mini": (0.0011, 0.0044),
+}
+_PROVIDER_PRICES: dict[str, tuple[float, float]] = {
+    "DEEPSEEK": (0.002, 0.008),
+    "OPENAI": (0.018, 0.072),
+}
+
 
 def _pricing() -> tuple[float, float]:
-    """token 单价（CNY/1K）：env 可覆盖，默认 deepseek-chat 价。"""
+    """通用 token 单价（CNY/1K，兼容旧配置）：env 可覆盖，默认 deepseek-chat 价。"""
     inp = float(os.environ.get("SECPT_PRICING_INPUT_PER_1K", "0.002"))
     out = float(os.environ.get("SECPT_PRICING_OUTPUT_PER_1K", "0.008"))
     return inp, out
+
+
+def _provider_prefix(model: str) -> str:
+    """模型名 → provider 前缀（大写，与 SECPT_MODEL_*_<PREFIX> 生态一致）。"""
+    if "/" in model:
+        return model.partition("/")[0].upper().replace("-", "_")
+    return "DEEPSEEK"  # 裸名默认 provider（与 llm/client.resolve_model 口径一致）
+
+
+def pricing_for(model: str = "") -> tuple[float, float]:
+    """按模型解析单价（CNY/1K tokens）。
+
+    provider 级 env（SECPT_PRICE_<PREFIX>_IN/OUT_PER_1K）> 精确模型名表 >
+    provider 表 > 通用 env/默认价。model 为空时等价 _pricing()（向后兼容）。
+    """
+    fallback = _pricing()
+    prefix = _provider_prefix(model) if model else ""
+    if prefix:
+        env_in = os.environ.get(f"SECPT_PRICE_{prefix}_IN_PER_1K")
+        env_out = os.environ.get(f"SECPT_PRICE_{prefix}_OUT_PER_1K")
+        if env_in not in (None, "") or env_out not in (None, ""):
+            return (
+                float(env_in) if env_in not in (None, "") else fallback[0],
+                float(env_out) if env_out not in (None, "") else fallback[1],
+            )
+    if model:
+        mid = model.partition("/")[2] or model
+        if mid in _MODEL_PRICES:
+            return _MODEL_PRICES[mid]
+        if prefix in _PROVIDER_PRICES:
+            return _PROVIDER_PRICES[prefix]
+    return fallback
 
 
 WARN_80_MSG = "预算已用 80%。请停止探索，把你已确认的事实整理成结构化结论输出。"
@@ -35,10 +81,12 @@ class BudgetTracker:
         warn_pct: float = 0.8,
         input_per_1k: float | None = None,
         output_per_1k: float | None = None,
+        model: str = "",
     ) -> None:
-        _inp, _out = _pricing()
+        _inp, _out = pricing_for(model)
         self.input_per_1k = _inp if input_per_1k is None else input_per_1k
         self.output_per_1k = _out if output_per_1k is None else output_per_1k
+        self.model = model  # 计价依据（记录用；failover 段按主模型价近似）
         self.cost_limit_cny = float(cost_limit_cny or 0.0)
         self.warn_pct = float(warn_pct)
         self.prompt_tokens = 0
@@ -77,7 +125,7 @@ class BudgetTracker:
         return ""
 
 
-def tokens_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """按 env 单价估算一次调用的成本（CNY），供 EventSink 记账。"""
-    inp, out = _pricing()
+def tokens_cost(prompt_tokens: int, completion_tokens: int, model: str = "") -> float:
+    """按模型单价估算一次调用的成本（CNY），供 EventSink 记账。"""
+    inp, out = pricing_for(model)
     return max(0, prompt_tokens) / 1000.0 * inp + max(0, completion_tokens) / 1000.0 * out

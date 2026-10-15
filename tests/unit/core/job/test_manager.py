@@ -199,3 +199,58 @@ def test_restarts_roundtrip(tmp_path):
     store.upsert_job(rec)
     got = store.get_job("r1")
     assert got.restarts == 2
+
+
+def test_priority_pop_order(tmp_path, monkeypatch):
+    """F6：priority DESC 出队，同级 FIFO（此前是纯 FIFO，README 声称优先级队列）。"""
+    monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+    mgr = JobManager(max_parallel_jobs=1, db_path=tmp_path / "t.sqlite")
+    mgr.submit(_spec("low"), {"priority": 1})
+    mgr.submit(_spec("high"), {"priority": 9})
+    mgr.submit(_spec("normal"))  # 缺省 0
+    mgr.submit(_spec("high2"), {"priority": 9})  # 同级：先提交先出
+    assert [mgr._pop_next() for _ in range(4)] == ["high", "high2", "low", "normal"]
+
+
+def test_priority_drives_spawn(tmp_path, monkeypatch):
+    """F6 端到端：并发槽位释放后，高优先级任务先被拉起。"""
+    monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+    fake = tmp_path / "fake_worker.py"
+    fake.write_text(_FAKE_WORKER)
+    mgr = JobManager(max_parallel_jobs=1, db_path=tmp_path / "t.sqlite", worker_script=fake)
+    mgr.submit(_spec("block"), {"priority": 100})  # 占住唯一槽位（自身也走优先级）
+    mgr.submit(_spec("low"), {"priority": 1})
+    mgr.submit(_spec("high"), {"priority": 9})
+    mgr.reap()
+    assert set(mgr._procs) == {"block"}
+    # 等 block 退出 → 再 reap 补位：high 应先进 _procs
+    import time as _time
+
+    for _ in range(100):
+        if mgr._procs["block"][0].poll() is not None:
+            break
+        _time.sleep(0.05)
+    mgr.reap()
+    assert "high" in mgr._procs
+    assert "low" not in mgr._procs and mgr._queue == ["low"]
+
+
+def test_restore_queue_from_store(tmp_path, monkeypatch):
+    """加强⑥：JobManager 重启恢复 queued（优先级从 task.yaml 快照读回）。"""
+    monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+    from secpt.core.job.resume import write_task_snapshot
+
+    db = tmp_path / "t.sqlite"
+    store = JobStore(str(db))
+    for jid, prio in (("rq1", 5), ("rq2", 0)):
+        jd = tmp_path / "jobs" / jid
+        write_task_snapshot(jd, _spec(jid), {"priority": prio, "db_path": str(db)})
+        store.upsert_job(JobRecord(job_id=jid, spec=_spec(jid), status="queued"))
+
+    mgr = JobManager(max_parallel_jobs=1, db_path=db, restore_queue=True)
+    assert mgr._queue == ["rq1", "rq2"]
+    assert mgr._prio["rq1"] == 5
+    assert mgr._pop_next() == "rq1"  # 恢复的优先级参与出队
+
+    mgr2 = JobManager(max_parallel_jobs=1, db_path=db)  # 默认不恢复（只读命令无副作用）
+    assert mgr2._queue == []

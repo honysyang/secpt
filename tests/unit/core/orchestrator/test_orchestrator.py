@@ -243,6 +243,12 @@ async def test_multi_entry_runs_team_mode(env) -> None:
     assert all(c["status"] == "done" for c in chains if c["role"] == "exploit")
     assert len(summary["flags"]) == 2  # 每条 exploit 各自宣告一个 flag
 
+    # F3 回归：summary 契约完整（cmd_run 直接/防御读取这些键；此前缺键
+    # 导致 `secpt run --mode dag` 跑完成功后报告路径 KeyError: 'entries' 崩溃）
+    assert summary["entries"] == ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]
+    for k in ("warroom_assets", "warroom_attempts", "findings", "verified"):
+        assert k in summary, k
+
 
 # ---------------------------------------------------------------------------
 # 判据 5：--no-orchestrator 对照

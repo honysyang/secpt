@@ -18,6 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         netcat-openbsd tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
+# 浏览器插件（tools/plugins/browser.py）：playwright + 自带 chromium（--with-deps
+# 同时装齐系统库）。插件在 engine 进程内执行：镜像内开箱即用；非 root 下 chromium
+# 必须 no-sandbox（插件读 SECPT_BROWSER_NO_SANDBOX，由 ENV 默认声明）
+RUN pip3 install --break-system-packages --no-cache-dir playwright \
+    && python3 -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+ENV SECPT_BROWSER_NO_SANDBOX=1
+
 WORKDIR /work
 # 非 root 运行 + /work 开放写（引擎以宿主 uid 注入容器，bind mount 的文件归属才能对上）
 RUN useradd -m secpt && chmod 777 /work

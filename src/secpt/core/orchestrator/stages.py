@@ -15,6 +15,7 @@ import asyncio
 
 from secpt.core.job.models import TaskSpec
 from secpt.core.job.store import JobStore
+from secpt.core.orchestrator.summary import ChainResult, RunSummary
 from secpt.core.profile.loader import Profile
 
 
@@ -86,14 +87,14 @@ async def run_stages(
         final_result = result
         total_wall += result.wall_s
         chains.append(
-            {
-                "role": stage.name,
-                "entry": -1,
-                "flag": result.flag,
-                "steps": result.steps,
-                "wall_s": round(result.wall_s, 1),
-                "status": result.status,
-            }
+            ChainResult(
+                role=stage.name,
+                entry=-1,  # 阶段无入口维度（入口并入 objective）
+                flag=result.flag,
+                steps=result.steps,
+                wall_s=round(result.wall_s, 1),
+                status=result.status,
+            )
         )
 
         # 交接摘要：最后一条 assistant 正文（含该阶段 ANSWER 交付物）
@@ -107,16 +108,12 @@ async def run_stages(
         if result.flag and is_last:
             break
 
-    return {
-        "job_id": spec.job_id,
-        "mode": "stages",
-        "entries": entries,
-        "recon_assets": 0,
-        "warroom_assets": 0,
-        "warroom_attempts": 0,
-        "findings": 0,
-        "verified": 0,
-        "flags": [final_result.flag] if final_result and final_result.flag else [],
-        "chains": chains,
-        "wall_s": round(total_wall, 1),
-    }
+    return RunSummary(
+        job_id=spec.job_id,
+        mode="stages",
+        entries=entries,
+        flags=[final_result.flag] if final_result and final_result.flag else [],
+        chains=chains,
+        wall_s=round(total_wall, 1),
+        extras={"recon_assets": 0},  # 历史键保留兼容
+    ).to_dict()

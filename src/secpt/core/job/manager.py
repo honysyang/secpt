@@ -42,22 +42,55 @@ class JobManager:
         db_path: str | Path = "var/secpt.sqlite",
         worker_python: str | None = None,
         worker_script: str | Path | None = None,
+        restore_queue: bool = False,
     ) -> None:
         """worker_script 可选：覆盖 worker 入口（单测用假 worker 脚本，
-        生产保持 ``-m secpt.core.job.worker``）。"""
+        生产保持 ``-m secpt.core.job.worker``）。
+
+        restore_queue（加强⑥）：True 时从 jobs 表恢复 queued 任务入队
+        （优先级从 task.yaml 快照的 run_config 读回）——`secpt forever`
+        常驻进程崩溃重启后不丢排队任务。默认 False（ls/status/cancel 等
+        只读命令构造 manager 时不产生副作用）。
+        """
         self.max_parallel_jobs = max(1, max_parallel_jobs)
         self.store = JobStore(db_path)
         self.db_path = Path(db_path)
         # job_id -> (Popen, started_at)
         self._procs: dict[str, tuple[subprocess.Popen, float]] = {}
-        self._queue: list[str] = []  # FIFO 排队中（jobs 表 status=queued）
+        self._queue: list[str] = []  # 排队中（status=queued）；出队按 _prio 排序
+        self._prio: dict[str, int] = {}  # job_id -> 调度优先级（F6；缺省 0）
         self._worker_python = worker_python or sys.executable
         self._worker_script = Path(worker_script) if worker_script else None
+        if restore_queue:
+            self._restore_queue()
+
+    def _restore_queue(self) -> None:
+        """从 jobs 表恢复 queued → 内存队列（优先级取 task.yaml 快照）。best-effort。"""
+        try:
+            from secpt.core.job.resume import read_task_snapshot
+
+            for rec in self.store.list_jobs(status="queued"):
+                jid = str(rec.job_id)
+                if jid in self._procs or jid in self._queue:
+                    continue
+                prio = 0
+                try:
+                    _spec, rc = read_task_snapshot(jobs_dir() / jid)
+                    prio = int((rc or {}).get("priority") or 0)
+                except Exception:
+                    pass
+                self._queue.append(jid)
+                self._prio[jid] = prio
+        except Exception as e:
+            print(f"[manager] 队列恢复失败（忽略）: {e}")
 
     # ---------------- 提交 ----------------
 
     def submit(self, spec: TaskSpec, run_config: dict | None = None) -> None:
-        """提交任务：落盘 task.yaml + 写 jobs 表 queued + 入队。"""
+        """提交任务：落盘 task.yaml + 写 jobs 表 queued + 入队。
+
+        run_config["priority"]（缺省 0）：调度优先级，大者先出队；同级 FIFO。
+        """
         jdir = jobs_dir() / spec.job_id
         run_config = dict(run_config or {})
         run_config.setdefault("db_path", str(self.db_path))
@@ -69,8 +102,21 @@ class JobManager:
             rec.spec = spec
             rec.set_status("queued")
         self.store.upsert_job(rec)
+        self._prio[spec.job_id] = int(run_config.get("priority") or 0)
         if spec.job_id not in self._queue and spec.job_id not in self._procs:
             self._queue.append(spec.job_id)
+
+    def _pop_next(self) -> str:
+        """取下一个待跑任务：priority DESC，同级 FIFO（F6）。
+
+        此前 _queue 是纯 FIFO list（README 的"优先级队列"无实现）；改动保持
+        _queue 为 list（兼容既有断言/调试），出队时按 _prio 选最大者。
+        """
+        best_i = max(
+            range(len(self._queue)),
+            key=lambda i: (self._prio.get(self._queue[i], 0), -i),
+        )
+        return self._queue.pop(best_i)
 
     # ---------------- 调度 ----------------
 
@@ -109,9 +155,9 @@ class JobManager:
         for job_id in done:
             self._procs.pop(job_id, None)
 
-        # 2) 从队列补位
+        # 2) 从队列补位（priority DESC，同级 FIFO——F6）
         while len(self._procs) < self.max_parallel_jobs and self._queue:
-            job_id = self._queue.pop(0)
+            job_id = self._pop_next()
             self._spawn(job_id)
 
     def _spawn(self, job_id: str) -> bool:
@@ -178,6 +224,7 @@ class JobManager:
                 pass
         if job_id in self._queue:
             self._queue.remove(job_id)
+            self._prio.pop(job_id, None)
         if rec.status in ("queued", "paused"):
             rec.set_status("cancelled")
             self.store.upsert_job(rec)

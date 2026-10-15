@@ -36,9 +36,19 @@ def _ts() -> float:
 
 
 class JobStore:
-    """SQLite 作业/事件/finding 存取。db_path 默认 var/secpt.sqlite。"""
+    """SQLite 作业/事件/finding 存取。db_path 缺省 SECPT_VAR/secpt.sqlite。
 
-    def __init__(self, db_path: str | Path = "var/secpt.sqlite") -> None:
+    修复（复评修复轮）：此前缺省硬编码相对路径 "var/secpt.sqlite"——完全无视
+    SECPT_VAR，与 jobs_dir()/ledger/intel 等"数据根统一 var/（SECPT_VAR 可覆盖）"
+    的约定不一致（测试与多实例场景会把数据写进 CWD 的 var/）；现改为调用时按
+    SECPT_VAR 解析，未设置时仍等价 "var/secpt.sqlite"（CWD 相对，兼容旧行为）。
+    """
+
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            import os
+
+            db_path = Path(os.environ.get("SECPT_VAR", "var")) / "secpt.sqlite"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()

@@ -252,3 +252,22 @@ class TestPersistentContainer:
 
     def test_release_idempotent(self, tmp_path, monkeypatch):
         release_container("nonexistent")  # 不炸
+
+
+def test_engine_releases_container_on_finish(tmp_path, monkeypatch):
+    """F2 回归：engine.run 收尾调用 release_container。
+
+    此前 release_container 只有 atexit + 4h TTL 兜底——frontier 每个意图一个
+    子 job，逐意图累积常驻容器；现引擎结束即回收（sandbox 未启用时 no-op）。
+    """
+    import asyncio
+
+    from secpt.core.job.fakellm import FakeLLM
+    from secpt.runtime import sandbox as sb
+    from secpt.runtime.engine import Engine, RunConfig
+
+    calls: list[str] = []
+    monkeypatch.setattr(sb, "release_container", lambda jid: calls.append(jid))
+    cfg = RunConfig(job_id="rel1", objective="t", system_extra="", workspace=tmp_path, max_steps=2)
+    asyncio.run(Engine(cfg, llm=FakeLLM(n_steps=1, job_id="rel1")).run())
+    assert calls == ["rel1"]  # 收尾按 job_id 释放

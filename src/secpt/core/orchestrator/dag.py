@@ -2,11 +2,13 @@
 
 分流规则（红线 2 / 对照实验结论）：
 - 默认（未显式 use_dag）→ 单链：一次 Engine.run，入口拼进 objective，失败自动重试一次
-- 显式 use_dag=True（--mode dag）且 N >= 2 → SpecialistOrchestrator 跑 DAG
+- 显式 use_dag=True（--mode dag）且 N >= 2 → frontier 角色意图编排（recon→exploit×N→verify→report）
 - N == 1（或未声明多入口）→ 编排层天然休眠，直连单链
 
 DAG 编排层仍保留（未证伪、未被证实），但默认关闭；只有显式 --mode dag 才启用。
-N = 入口数量（spec.entries）。
+N = 入口数量（spec.entries）。固定 DAG 编排器（SpecialistOrchestrator）已由
+frontier 角色意图折叠退役（见 policy.DEPRECATED_MODULES），WarroomHooks 迁至
+core/memory/warroom.py。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from secpt.core.job.models import TaskSpec
 from secpt.core.job.store import JobStore
 
 from .policy import SINGLE_ENTRY_MAX
+from .summary import ChainResult, RunSummary
 
 
 def entries_of(spec: TaskSpec) -> list[str]:
@@ -79,6 +82,7 @@ async def run_task(
         from .benchmark import run_benchmark
 
         summary = await run_benchmark(spec, llm=llm, model=model_primary)
+        summary["entries"] = list(entries_of(spec))  # 入口维度来自 TaskSpec（编排器不感知）
         return summary
 
     from .frontier import run_frontier
@@ -93,7 +97,8 @@ async def run_task(
         role_plan=True,
         default_assets=list(entries_of(spec)),
     )
-    summary["mode"] = "team"
+    summary["mode"] = "team"  # 契约 dict 可变：团队语义覆盖 frontier 默认 mode
+    summary["entries"] = list(entries_of(spec))  # 入口维度来自 TaskSpec（frontier 不感知）
     return summary
 
 
@@ -151,14 +156,14 @@ async def run_single_chain(
         artifacts=spec.artifacts,
     )
     chains.append(
-        {
-            "role": "exploit",
-            "entry": -1,
-            "flag": result.flag,
-            "steps": result.steps,
-            "wall_s": round(result.wall_s, 1),
-            "status": result.status,
-        }
+        ChainResult(
+            role="exploit",
+            entry=-1,  # 单链无入口维度（entries 已并入 objective）
+            flag=result.flag,
+            steps=result.steps,
+            wall_s=round(result.wall_s, 1),
+            status=result.status,
+        )
     )
     wall_s_total += result.wall_s
     if result.flag:
@@ -208,31 +213,27 @@ async def run_single_chain(
             model_fallback=model_fallback,
         )
         chains.append(
-            {
-                "role": "exploit",
-                "entry": -1,
-                "flag": result2.flag,
-                "steps": result2.steps,
-                "wall_s": round(result2.wall_s, 1),
-                "status": result2.status,
-            }
+            ChainResult(
+                role="exploit",
+                entry=-1,
+                flag=result2.flag,
+                steps=result2.steps,
+                wall_s=round(result2.wall_s, 1),
+                status=result2.status,
+            )
         )
         wall_s_total += result2.wall_s
         if result2.flag:
             flags.append(result2.flag)
 
-    return {
-        "job_id": spec.job_id,
+    return RunSummary(
+        job_id=spec.job_id,
         # 单链路径恒标 single(+retry)：重试能力始终装配（首轮成功则 chains 仅 1 条，
         # 首轮失败自动换路线重试则 chains 2 条 attempt-1/attempt-2），便于对照判据。
-        "mode": "single(+retry)",
-        "entries": entries,
-        "recon_assets": 0,
-        "warroom_assets": 0,
-        "warroom_attempts": 0,
-        "findings": 0,
-        "verified": 0,
-        "flags": flags,
-        "chains": chains,
-        "wall_s": round(wall_s_total, 1),
-    }
+        mode="single(+retry)",
+        entries=entries,
+        flags=flags,
+        chains=chains,
+        wall_s=round(wall_s_total, 1),
+        extras={"recon_assets": 0},  # 历史键（recon 属 frontier 口径），保留兼容
+    ).to_dict()

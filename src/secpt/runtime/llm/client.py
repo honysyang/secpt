@@ -2,9 +2,10 @@
 
 在 harness.py 的 call_llm 基础上加固：
 - 指数退避重试：429 / 5xx / ReadTimeout / ConnectError / ConnectTimeout / PoolTimeout
-  最多重试 4 次，间隔 1/2/4/8s + 抖动（连接类异常此前不重试，内网抖动即整轮失败）
+  最多重试 4 次，间隔 1/2/4/8s + 抖动（连接类异常此前不重试，内网抖动即整轮失败）；
+  429 读 Retry-After 头取 max(指数退避, 服务端指示)（上限 120s）
 - 回传 messages 时剔除 reasoning_content（它只落盘审计，放回请求会被拒或污染上下文）
-- 单次请求 timeout 180s（60s 在长推理时误杀）
+- 超时拆分：read 180s（60s 在长推理时误杀）+ connect 10s（网关宕机快速失败）
 - 模块级共享 AsyncClient（按事件循环缓存，连接池复用，不再每请求新建）
 
 多模型路由（OpenAI 兼容端点）：
@@ -26,6 +27,8 @@ from secpt.runtime.metrics import counter_inc, histogram_observe
 
 BASE_URL = "https://api.deepseek.com"
 REQUEST_TIMEOUT_S = 180
+_CONNECT_TIMEOUT_S = 10.0  # 连接阶段独立超时（网关宕机快速失败进 failover）
+_MAX_RETRY_AFTER_S = 120.0  # Retry-After 采纳上限（防异常头部挂死任务）
 MAX_RETRIES = 4  # 可重试异常最多重试次数
 _BACKOFF_BASE_S = 1.0  # 1/2/4/8 秒
 
@@ -87,12 +90,38 @@ def _get_client() -> object:
     client = _clients.get(loop)
     if client is None:
         timeout_s = float(_llm_param("SECPT_LLM_TIMEOUT_S", "timeout_s", REQUEST_TIMEOUT_S))
+        # 超时拆分：connect 独立短超时——网关宕机时快速失败进重试/failover，
+        # 而不是每次尝试挂满 180s（read/write 仍按 SECPT_LLM_TIMEOUT_S）
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_s),
+            timeout=httpx.Timeout(timeout_s, connect=min(_CONNECT_TIMEOUT_S, timeout_s)),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
         _clients[loop] = client
     return client
+
+
+def _retry_after_s(response) -> float | None:
+    """解析 429 的 Retry-After 头（秒数或 HTTP-date）；缺失/不可解析 → None。
+
+    采纳上限 _MAX_RETRY_AFTER_S：尊重服务端退避指示，但不允许异常大值挂死任务。
+    """
+    try:
+        raw = (response.headers.get("retry-after") or "").strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return min(_MAX_RETRY_AFTER_S, max(0.0, float(raw)))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(raw)
+        return min(_MAX_RETRY_AFTER_S, max(0.0, dt.timestamp() - time.time()))
+    except Exception:
+        return None
 
 
 def sanitize_messages(messages: list[dict]) -> list[dict]:
@@ -149,6 +178,10 @@ def _wrap_response(data: dict) -> object:
         u = _Usage()
         u.prompt_tokens = int(data["usage"].get("prompt_tokens") or 0)
         u.completion_tokens = int(data["usage"].get("completion_tokens") or 0)
+        # A：缓存命中可观测——DeepSeek 兼容端点返回 prompt_cache_hit/miss_tokens，
+        # 透传给 Engine 记指标（其他端点无此字段时为 0，命中率汇总结论不受影响）
+        u.prompt_cache_hit_tokens = int(data["usage"].get("prompt_cache_hit_tokens") or 0)
+        u.prompt_cache_miss_tokens = int(data["usage"].get("prompt_cache_miss_tokens") or 0)
         resp.usage = u
     return resp
 
@@ -218,6 +251,10 @@ async def call_llm(
                     raise
                 last_exc = e
                 delay = _BACKOFF_BASE_S * (2**attempt) + random.random()
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                    ra = _retry_after_s(e.response)
+                    if ra is not None:
+                        delay = max(delay, ra)  # 尊重服务端指示（不低于指数退避）
                 await asyncio.sleep(delay)
         assert last_exc is not None
         raise last_exc

@@ -267,6 +267,17 @@ def run_engine(
                 f"{'；'.join(e.title[:24] for e in exps[:3])}",
                 file=sys.stderr,
             )
+            # 注入记录（C 反馈闭环）：本 job 注入了哪些经验指纹——任务收尾时由
+            # solve() 按最终成败回写（learning best-effort，记录失败静默）
+            try:
+                import json as _json_learn
+
+                (jdir / "experiences_injected.json").write_text(
+                    _json_learn.dumps([e.id for e in exps], ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception as _e:
+                print(f"[learn] 注入记录失败（忽略）: {_e}")
     except Exception as e:
         print(f"[learn] experience injection failed (ignored): {e}")
 

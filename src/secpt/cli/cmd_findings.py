@@ -28,8 +28,11 @@ def findings_cmd(
         None, "--cvedupe", help="已知 CVE 去重检查（防把 1day 当 0day 报）"
     ),
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
+    as_json: bool = typer.Option(False, "--json", help="机器可读输出（list / --show 详情）"),
 ) -> None:
     """漏洞发现库：跨 job 存活的分诊视图（确认纪律：inferred 只能经 verify 升级）。"""
+    import json as _json
+
     from secpt.findings.store import FindingStore
 
     store = FindingStore()
@@ -90,6 +93,9 @@ def findings_cmd(
         if f is None:
             typer.echo(f"Error: finding {show} 不存在", err=True)
             raise typer.Exit(2)
+        if as_json:
+            typer.echo(_json.dumps(f.model_dump(), ensure_ascii=False, indent=2))
+            return
         typer.echo(f"id:         {f.id}")
         typer.echo(f"title:      {f.title}")
         typer.echo(
@@ -108,6 +114,9 @@ def findings_cmd(
                 typer.echo(f"  {r['verdict']}  job={r['job_id']}")
         return
     rows = store.list(status=status, target=target)
+    if as_json:
+        typer.echo(_json.dumps([f.model_dump() for f in rows], ensure_ascii=False, indent=2))
+        return
     if not rows:
         typer.echo("（无 findings）")
         return
@@ -137,20 +146,34 @@ def hunt_cmd(
     profile: str = typer.Option("hunter", "--profile", "-p"),
     model: str = typer.Option("deepseek-chat", "--model", "-m"),
     max_rounds: int = typer.Option(20, "--rounds", "-r"),
+    job: str = typer.Option(
+        "", "--job", "-j", help="任务 base job_id（缺省自动生成；人工直投用它定向）"
+    ),
 ) -> None:
-    """意图驱动狩猎：planner 产意图入 frontier（SQLite 持久化），worker 逐条执行。
+    """意图驱动狩猎：planner 产意图入 frontier（SQLite 持久化，按任务隔离），worker 逐条执行。
 
     多步利用链的计划不依赖模型上下文记忆——深洞场景（5+ 步）用这个入口。
+    F1 后意图库按任务隔离：指定 --job 可先投再跑（secpt intent add --job <base> ...）。
     """
     import asyncio
+    import uuid
     from pathlib import Path as _P
 
     from secpt.core.orchestrator.frontier import run_frontier
 
     objective = _P(objective_file).read_text(encoding="utf-8", errors="replace")
-    summary = asyncio.run(
-        run_frontier(objective, profile=profile, model=model, max_rounds=max_rounds)
-    )
+    base = job or f"hunt-{uuid.uuid4().hex[:8]}"
+    typer.echo(f'[hunt] job={base}（人工直投: secpt intent add --job {base} "要看什么"）')
+    try:
+        summary = asyncio.run(
+            run_frontier(
+                objective, profile=profile, model=model, max_rounds=max_rounds, base_job_id=base
+            )
+        )
+    except RuntimeError as e:
+        # 任务级单编排锁冲突（同 base 已在运行）：友好提示而非裸 traceback
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2) from None
     typer.echo("")
     typer.echo(
         f"hunt: {summary['job_id']}  wall={summary['wall_s']}s  "

@@ -171,17 +171,18 @@ class TestRetrieve:
         jr = ExperienceJournal(tmp_path / "exp.jsonl")
         jr.append(
             LearnedExperience(
-                title="SAML XSW 绕过签名",
-                technique="saml_xsw",
+                # 标题不含查询会命中的词——否则按修复后的语义算强信号（见下个测试）
+                title="某通用渗透手法",
+                technique="generic_tactic",
                 indicators=["saml"],
                 task_type="ctf",
             )
         )
-        # benchmark 任务里出现 "saml"（弱信号）→ 跨域不注入
+        # benchmark 任务里出现 "saml"（仅指标弱信号）→ 跨域不注入
         assert search_experiences("目标使用 saml 登录", journal=jr, task_type="benchmark") == []
         # 同任务类型（ctf）→ 正常注入
         hits = search_experiences("目标使用 saml 登录", journal=jr, task_type="ctf")
-        assert hits and hits[0].technique == "saml_xsw"
+        assert hits and hits[0].technique == "generic_tactic"
 
     def test_task_type_gate_strong_crosses(self, tmp_path):
         """⑥ 跨任务类型但强信号（技术名命中）仍可注入。"""
@@ -189,3 +190,114 @@ class TestRetrieve:
         jr.append(LearnedExperience(title="某题", technique="saml_xsw", task_type="ctf"))
         hits = search_experiences("尝试 saml_xsw 手法", journal=jr, task_type="benchmark")
         assert hits and hits[0].technique == "saml_xsw"
+
+    def test_title_term_counts_strong(self, tmp_path):
+        """修复回归：标题显著词命中是强信号（旧实现 `q in title` 方向反了，分支恒不触发）。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.append(LearnedExperience(title="SAML XSW 绕过签名", technique="xsw", task_type="ctf"))
+        # 标题词 "saml" 命中 benchmark 任务 → 强信号，跨域注入
+        hits = search_experiences("目标使用 saml 单点登录", journal=jr, task_type="benchmark")
+        assert hits and hits[0].technique == "xsw"
+
+    def test_filler_words_do_not_match(self, tmp_path):
+        """标题里的 ASCII 填充词不产生命中（防强信号放大噪声）。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.append(LearnedExperience(title="the and get 手法", technique="t", task_type="ctf"))
+        assert search_experiences("get the flag for this and use it", journal=jr) == []
+
+
+class TestUsageFeedback:
+    """C 反馈闭环：注入→结果回写（usage 旁路事件流 + 检索命中率因子）。"""
+
+    def test_record_and_load_usage(self, tmp_path):
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        assert jr.record_usage("exp-1", True) is True
+        assert jr.record_usage("exp-1", False) is True
+        assert jr.record_usage("exp-2", True) is True
+        assert jr.record_usage("", True) is False  # 空 id 拒绝
+        assert jr.load_usage() == {"exp-1": (1, 1), "exp-2": (1, 0)}
+
+    def test_usage_corrupt_line_skipped(self, tmp_path):
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.record_usage("exp-1", True)
+        with open(jr.usage_path, "a", encoding="utf-8") as f:
+            f.write("{broken json\n")
+        assert jr.load_usage() == {"exp-1": (1, 0)}
+
+    def test_no_usage_file_neutral(self, tmp_path):
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        assert jr.load_usage() == {}
+
+    def test_usage_factor_bounds_and_shrink(self):
+        from secpt.learning.retrieve import _usage_factor
+
+        assert _usage_factor(0, 0) == 1.0
+        assert _usage_factor(10, 0) > 1.0  # 全中升权
+        assert _usage_factor(0, 10) < 1.0  # 全挂降权
+        # 小样本收缩：n=1 全中的偏移量必须小于 n=10 全中（防一次偶然命中过度升权）
+        assert abs(_usage_factor(1, 0) - 1.0) < abs(_usage_factor(10, 0) - 1.0)
+
+    def test_miss_history_demotes_ranking(self, tmp_path):
+        """等强信号两条经验：有挂史的被降权（排序翻转）。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        exp_a = LearnedExperience(
+            title="SAML XSW 手法甲",
+            technique="saml_xsw",
+            what_worked="手法甲",
+            indicators=["saml"],
+        )
+        exp_b = LearnedExperience(
+            title="SAML XSW 手法乙",
+            technique="saml_xsw",
+            what_worked="手法乙",
+            indicators=["saml"],
+        )
+        jr.append(exp_a)
+        jr.append(exp_b)
+        hits0 = search_experiences("saml 登录", journal=jr)
+        assert len(hits0) == 2
+        first = hits0[0].id
+        for _ in range(6):
+            jr.record_usage(first, False)
+        hits1 = search_experiences("saml 登录", journal=jr)
+        assert len(hits1) == 2
+        assert hits1[0].id != first  # 挂史 6 次的降到后面
+
+    def test_feedback_helper_writes_back_dedup(self, tmp_path, monkeypatch):
+        """_feedback_experiences：stages/frontier 子 job 的注入记录聚合去重回写。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.cli.solve import _feedback_experiences
+        from secpt.core.job.resume import jobs_dir
+
+        jdir = jobs_dir() / "jobx"
+        jdir.mkdir(parents=True)
+        (jdir / "experiences_injected.json").write_text(
+            json.dumps(["exp-a", "exp-b"]), encoding="utf-8"
+        )
+        sub = jobs_dir() / "jobx-irecon1"
+        sub.mkdir()
+        (sub / "experiences_injected.json").write_text(
+            json.dumps(["exp-b", "exp-c"]), encoding="utf-8"
+        )
+        n = _feedback_experiences("jobx", outcome=True)
+        assert n == 3  # a/b/c 去重后各一次
+        assert ExperienceJournal().load_usage() == {
+            "exp-a": (1, 0),
+            "exp-b": (1, 0),
+            "exp-c": (1, 0),
+        }
+
+    def test_engine_runner_records_injection(self, tmp_path, monkeypatch):
+        """run_engine 注入经验时落 experiences_injected.json（回写的依据）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_FAKE_LLM", "1")
+        jr = ExperienceJournal()  # SECPT_VAR 已在调用时生效（懒解析）
+        jr.append(
+            LearnedExperience(title="SAML XSW 绕过签名", technique="saml_xsw", indicators=["saml"])
+        )
+        from secpt.cli.engine_runner import run_engine
+
+        run_engine(objective="目标使用 saml 单点登录", profile="ctf", job_id="inj1", max_steps=3)
+        rec = tmp_path / "jobs" / "inj1" / "experiences_injected.json"
+        assert rec.is_file()
+        assert jr.load()[0].id in json.loads(rec.read_text(encoding="utf-8"))

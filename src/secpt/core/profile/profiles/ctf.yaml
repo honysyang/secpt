@@ -1,7 +1,7 @@
 name: ctf
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: CTF 解题手
-tools: [bash, read_file, list_dir, write_file, nmap]
+tools: [bash, read_file, list_dir, write_file, nmap, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content]
 bash_whitelist_extra: [nmap, john, hashcat]
 bash_timeout_s: 240
 prior: ctf.md

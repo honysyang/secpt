@@ -2,9 +2,18 @@
 
 CHECKMATE/HPTSA 的可迁移最小实现：
 - planner 每轮全新会话（省 context、防漂移），只负责产意图（intent）入 frontier
-- frontier 存 SQLite——常驻 todolist 跨 resume/重启持久化（比 ARTEX 内存版强，天然配 7×24）
+- frontier 存 SQLite（按任务隔离：var/jobs/<base>/frontier.sqlite）——常驻
+  todolist 跨 resume/重启持久化（比 ARTEX 内存版强，天然配 7×24）
 - worker = 现有单链 Engine：领一条 intent 跑到自宣告，计划本身不依赖模型上下文记忆
-- 深度优先 + 否定记账：intent 有 depth 与 attempts，失败两次即 exhausted（至多复核一次）
+- 深度优先 + 否定记账：intent 有 depth 与 attempts，失败两次即 exhausted
+  （至多复核一次——加强②后为**运行时强制**：首轮失败自动回队复核，重跑时
+  objective 带最新 recent_results/共享 finding）
+- 资产级在途互斥（加强①）：带 asset_scope 的意图在 claim 同一事务内抢占
+  asset_leases 租约——同资产意图不并发执行（此前只有 SharedStopper 事后让出），
+  settle/崩溃恢复释放租约；已完成资产的等待者直接跳过结算（不重复执行）
+- 任务级单编排锁（加强④）：flock var/jobs/<base>/.frontier.lock——同一任务
+  并发启动第二个编排器直接拒绝（防双方 _recover_stale 互重置在途意图）
+- 人机通道（加强③）：intent add/set/rm（直投/编辑/撤回，见 secpt intent --help）
 """
 
 from __future__ import annotations
@@ -20,7 +29,116 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from secpt.core.orchestrator.summary import ChainResult, RunSummary  # 统一汇总契约
+
+# 历史共享库路径（legacy）：仅作显式 `Frontier()` 无参构造的兜底（测试/工具）。
+# 生产链路一律走 frontier_db_path(base)——F1 修复：意图库按任务隔离。
 DEFAULT_DB = Path(os.environ.get("SECPT_VAR", "var")) / "frontier.sqlite"
+
+
+def frontier_db_path(base_job_id: str) -> Path:
+    """任务级意图库路径（F1）：var/jobs/<base>/frontier.sqlite。
+
+    此前全项目共享 var/frontier.sqlite，三个后果：并发任务互相认领对方意图
+    （claim 无任务过滤）、_recover_stale 把其他在跑任务的 running 意图置回
+    open（双执行）、total() 终身累计吃满 max_intents 后 planner 对所有后续
+    任务永久静默。按任务隔离后三者同时消失，库随 job 目录纳入既有留存/归档。
+    SECPT_FRONTIER_DB 可显式覆盖（特殊部署/测试）；调用时解析（SECPT_VAR
+    后设不漂移——与 situation_report 的取值口径一致）。
+    """
+    override = os.environ.get("SECPT_FRONTIER_DB", "")
+    if override:
+        return Path(override)
+    from secpt.core.job.resume import jobs_dir
+
+    return jobs_dir() / base_job_id / "frontier.sqlite"
+
+
+# 复核纪律运行时强制（加强②）：首轮失败自动回队一次，第二次失败才终态
+_RECHECK_ATTEMPTS = 2
+
+
+def _acquire_task_lock(base: str):
+    """任务级单编排锁（加强④）：flock 独占 var/jobs/<base>/.frontier.lock。
+
+    同一任务的 frontier 并发启动直接拒绝——两个编排器共享同一 todo 库会
+    各自 _recover_stale 重置对方在途意图（双执行）。崩溃自动释放（进程退出
+    内核回收 flock）。Windows 无 fcntl → 返回 None（降级为不加锁）。
+    """
+    from secpt.core.job.resume import jobs_dir
+
+    lock_path = jobs_dir() / base / ".frontier.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 锁需持有到编排结束
+    except OSError:
+        return None
+    try:
+        import fcntl
+
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            raise RuntimeError(
+                f"任务 {base} 已有 frontier 编排在运行（并发启动会互相重置在途意图）。"
+                f"等待其结束后重试；确认无进程在跑时可删除 {lock_path}"
+            ) from None
+        with contextlib.suppress(OSError):
+            f.write(str(os.getpid()))
+            f.flush()
+    except ImportError:
+        pass  # Windows：无 fcntl，降级不加锁（best-effort）
+    return f
+
+
+def _release_task_lock(handle) -> None:
+    if handle is None:
+        return
+    with contextlib.suppress(Exception):
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    with contextlib.suppress(Exception):
+        handle.close()
+
+
+def _ingest_recon_assets(path, *, job_id: str = "") -> int:
+    """把 recon 的 ws/assets.json 确定性灌入 intel 资产图（加强⑤）。
+
+    "程序算关系，LLM 只交观察"的落地：recon→exploit 的资产传递此前是尽力
+    而为（取决于模型自觉调 observe_asset），现由编排层解析清单直接入图并
+    建锚——exploit 的"已知资产实体"与覆盖度不再依赖模型自觉。best-effort：
+    解析/写图失败静默（记忆层不阻断主链）。返回入图条数。
+    """
+    try:
+        import json as _json
+
+        from secpt.core.orchestrator.goals import _infer_asset_type
+        from secpt.intel.store import IntelStore
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return 0
+        st = IntelStore(Path(os.environ.get("SECPT_VAR", "var")) / "intel.sqlite")
+        n = 0
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or "").strip()
+            if not host:
+                continue
+            port = item.get("port")
+            value = f"{host}:{port}" if port else host
+            try:
+                st.observe_asset(_infer_asset_type(value), value, job_id=job_id)
+                n += 1
+            except Exception:
+                continue
+        return n
+    except Exception:
+        return 0
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS intents (
@@ -45,6 +163,11 @@ CREATE TABLE IF NOT EXISTS intents (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status, priority DESC, depth);
+CREATE TABLE IF NOT EXISTS asset_leases (
+    asset_scope TEXT PRIMARY KEY,      -- 资产维度在途互斥（加强①）：同资产意图不并发
+    intent_id TEXT NOT NULL,
+    acquired_at REAL NOT NULL
+);
 """
 
 
@@ -65,20 +188,26 @@ class Intent:
     asset_scope: str = ""
 
 
-_SCOPE_LEDGER = None  # ③ 跨进程广播载体单例（懒建，按调用时 SECPT_VAR 解析）
+_SCOPE_LEDGERS: dict[str, object] = {}  # ③ 跨进程广播载体：按库路径缓存（见 _get_scope_ledger）
 
 
 def _get_scope_ledger():
-    """懒建账本实例（scope_done 广播的跨进程载体）。账本库不可用时返回 None（广播降级进程内）。"""
-    global _SCOPE_LEDGER
-    if _SCOPE_LEDGER is None:
-        try:
-            from secpt.core.orchestrator.ledger import ChallengeLedger
+    """懒建账本实例（scope_done 广播的跨进程载体）。账本库不可用时返回 None。
 
-            _SCOPE_LEDGER = ChallengeLedger()
-        except Exception:
-            return None
-    return _SCOPE_LEDGER
+    按 **库路径**（调用时解析 SECPT_VAR）缓存——此前模块级单例只建一次，
+    首个调用者的 var 路径被固化，后续 SECPT_VAR 变化（测试/多实例）读到旧库，
+    scope_done 标记跨测试串扰（复评修复轮：曾把"已完成跳过"放大为整意图作废）。
+    """
+    try:
+        from secpt.core.job.resume import jobs_dir
+        from secpt.core.orchestrator.ledger import ChallengeLedger
+
+        key = str((jobs_dir().parent / "benchmark_ledger.sqlite").resolve())
+        if key not in _SCOPE_LEDGERS:
+            _SCOPE_LEDGERS[key] = ChallengeLedger(key)
+        return _SCOPE_LEDGERS[key]
+    except Exception:
+        return None
 
 
 def _has_ws_output(job_id: str) -> bool:
@@ -164,7 +293,12 @@ class SharedStopper:
             self._done_intents.add(iid)
 
     def should_yield(self, asset_scope: str, iid: str) -> bool:
-        """该意图是否应让出：同资产已被别的意图完成（进程内或跨进程账本），且不是它自己。"""
+        """该意图是否应让出：同资产已被别的意图完成（进程内或跨进程账本），且不是它自己。
+
+        用于**在途让出提示**（_YieldHook：只影响 steer，不致命）。
+        账本 scope_done 是 var 级持久标记（跨任务/跨时间仍命中）——"整个意图
+        作废"这类强动作请用 should_yield_local（仅本次运行的广播）。
+        """
         if not asset_scope:
             return False
         with self._lock:
@@ -178,6 +312,17 @@ class SharedStopper:
             except Exception:
                 pass
         return False
+
+    def should_yield_local(self, asset_scope: str, iid: str) -> bool:
+        """仅进程内广播判定（不含跨进程账本）：用于"跳过执行"的强动作。
+
+        持久账本命中（历史任务曾完成该资产）不足以作废本任务意图——新任务
+        重新授权同一资产时应当照跑；只有**本次运行**中刚完成的资产才跳过。
+        """
+        if not asset_scope:
+            return False
+        with self._lock:
+            return asset_scope in self._done_assets and iid not in self._done_intents
 
 
 class _YieldHook:
@@ -367,11 +512,19 @@ class Frontier:
     def _recover_stale(self, c: sqlite3.Connection) -> None:
         """崩溃恢复：进程被杀遗留的 running 意图置回 open（可重新认领）。
 
-        每个 Frontier 实例对应一次编排上下文（run_frontier 一次调用），
-        running 只可能来自同库先前被杀的进程——init 时统一放回可领队列，
+        任务级库（frontier_db_path）下每个库对应**一个任务**的一次编排上下文，
+        running 只可能来自该任务先前被杀的进程——init 时统一放回可领队列，
         避免永久卡死阻塞收敛（stale running 会计入 pending 覆盖度）。
+        （F1 前共享 var/frontier.sqlite 时该假设不成立：会把其他运行中任务的
+        在途意图置回 open，被第二个编排器双执行。）
+        加强①：running 意图持有的资产租约一并回收——否则资产被"幽灵意图"
+        锁死（意图回 open 了，租约还在，该资产永远领不到）。
         """
         with contextlib.suppress(sqlite3.Error):
+            c.execute(
+                "DELETE FROM asset_leases WHERE intent_id IN"
+                " (SELECT id FROM intents WHERE status='running')"
+            )
             c.execute(
                 "UPDATE intents SET status='open', updated_at=? WHERE status='running'",
                 (time.time(),),
@@ -522,20 +675,39 @@ class Frontier:
 
         role 指定时只认领该角色（或未定角色的老意图）——角色 worker 拓扑：
         声明确认自己角色后，认领互斥由原子 UPDATE 保证，不抢其他角色的活。
+        跨进程原子性：BEGIN IMMEDIATE 先取写锁再做 SELECT+UPDATE——deferred
+        事务下 SELECT 不加写锁，两个进程可能同时选中同一行再各自 UPDATE
+        成功（双认领、attempts 双计）；持写锁后该序列不可交错。
         """
         role_filter = "AND (role=? OR role='')" if role else ""
         with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            # 加强①：资产租约——带 asset_scope 的意图在**同一事务内**抢占租约，
+            # 他人持有的资产一律跳过。此前同资产意图可被两个 worker 并发执行
+            # （只有 SharedStopper 的事后让出），登录态/有状态靶场会互扰。
             row = c.execute(
                 f"""SELECT * FROM intents WHERE status='open' {role_filter}
+                   AND (asset_scope='' OR asset_scope NOT IN
+                        (SELECT asset_scope FROM asset_leases))
                    ORDER BY priority DESC, depth DESC, created_at LIMIT 1""",
                 (role,) if role else (),
             ).fetchone()
             if row is None:
                 return None
-            c.execute(
-                "UPDATE intents SET status='running', attempts=attempts+1, updated_at=? WHERE id=?",
+            cur = c.execute(
+                "UPDATE intents SET status='running', attempts=attempts+1, updated_at=?"
+                " WHERE id=? AND status='open'",
                 (time.time(), row["id"]),
             )
+            if cur.rowcount != 1:
+                return None  # 持写锁下不应发生；防御性放弃（commit 空更新无害）
+            _scope = str(row["asset_scope"] or "")
+            if _scope:
+                c.execute(
+                    "INSERT OR REPLACE INTO asset_leases (asset_scope, intent_id, acquired_at)"
+                    " VALUES (?,?,?)",
+                    (_scope, row["id"], time.time()),
+                )
         d = dict(row)
         return Intent(
             id=row["id"],
@@ -616,6 +788,46 @@ class Frontier:
                 "UPDATE intents SET status=?, result=?, fail_reason=?, updated_at=? WHERE id=?",
                 (status, result[:2000], fail_reason[:500], time.time(), iid),
             )
+            # 加强①：任何结算路径都释放该意图的资产租约（含 blocked 回退与
+            # 复核回队——租约只随"在途"存在，不随状态残留）
+            c.execute("DELETE FROM asset_leases WHERE intent_id=?", (iid,))
+
+    def lease_holder(self, asset_scope: str) -> str | None:
+        """当前持有该资产租约的意图 id（可观测/测试用）；无则 None。"""
+        if not asset_scope:
+            return None
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT intent_id FROM asset_leases WHERE asset_scope=?", (asset_scope,)
+            ).fetchone()
+        return str(row["intent_id"]) if row else None
+
+    # ---------------- 人机通道：意图编辑/撤回（加强③） ----------------
+
+    _UPDATABLE = ("title", "goal", "done_criteria", "priority", "max_steps")
+
+    def update(self, iid: str, **fields) -> bool:
+        """改意图（标题/目标/判据/优先级/步数预算）。仅 open/blocked 可改——
+        running/done/exhausted 不动（防改在途语义与历史）。返回是否生效。"""
+        cols = {k: v for k, v in fields.items() if k in self._UPDATABLE and v is not None}
+        if not cols:
+            return False
+        sets = ", ".join(f"{k}=?" for k in cols)
+        with self._conn() as c:
+            cur = c.execute(
+                f"UPDATE intents SET {sets}, updated_at=?"
+                " WHERE id=? AND status IN ('open','blocked')",
+                (*cols.values(), time.time(), iid),
+            )
+            return cur.rowcount > 0
+
+    def remove(self, iid: str) -> bool:
+        """撤回意图（跑偏即撤）。仅 open/blocked 可删；running/done/exhausted 拒绝。"""
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM intents WHERE id=? AND status IN ('open','blocked')", (iid,)
+            )
+            return cur.rowcount > 0
 
     def count_open(self) -> int:
         with self._conn() as c:
@@ -969,9 +1181,13 @@ async def run_frontier(
         seed_goal_assets(goal)
         objective = render_goal_system(goal)
 
-    # 默认库按调用时 SECPT_VAR 解析（模块级 DEFAULT_DB 是 import 期快照，
-    # 测试/多实例会漂移——与 situation_report 的取值口径一致）
-    fr = frontier or Frontier(Path(os.environ.get("SECPT_VAR", "var")) / "frontier.sqlite")
+    # F1：base 先定（意图库按任务隔离），库即 var/jobs/<base>/frontier.sqlite——
+    # 并发任务互不可见；resume 同 base 续接同一 todolist
+    base = base_job_id or f"hunt-{uuid.uuid4().hex[:8]}"
+    # 加强④：同任务单编排锁——第二个并发实例直接拒绝（防双方 _recover_stale
+    # 互重置在途意图）。异常路径由文件对象回收自动释放 flock（CPython 语义）
+    _lock = _acquire_task_lock(base)
+    fr = frontier or Frontier(frontier_db_path(base))
 
     # 团队模式（role_plan）：折叠 Specialist 固定 DAG 为角色意图骨架——
     # recon 1 条（role=recon）+ 每资产 1 条 exploit（role=exploit, depends_on=recon）。
@@ -1011,7 +1227,6 @@ async def run_frontier(
             max_workers = max(max_workers, min(len(team_assets), 4))  # exploit 并行认领
             stop_on_first_flag = False  # 团队模式：持续推进所有资产，不因单资产收敛
 
-    base = base_job_id or f"hunt-{uuid.uuid4().hex[:8]}"
     chains: list[dict] = []
     flags: list[str] = []
     chains_lock = asyncio.Lock()
@@ -1050,6 +1265,40 @@ async def run_frontier(
         # report 角色：确定性聚合（不耗 LLM 步数），落盘报告后结算
         if getattr(intent, "role", "") == "report":
             return await _run_report(intent)
+        # 加强①配套：同资产已被完成（**本次运行**的进程内广播）→ 跳过执行直接
+        # 结算 done（省一整轮意图成本）。注意用 local 判定：持久账本里的
+        # 历史 scope_done 不足以作废本任务意图（新任务重测同一资产应照跑）。
+        # 租约只防并发，这一层防"等待租约期间目标已被本次运行拿下"
+        _scope0 = getattr(intent, "asset_scope", "") or ""
+        if (
+            _scope0
+            and getattr(intent, "role", "") in ("exploit", "verify")
+            and stopper.should_yield_local(_scope0, intent.id)
+        ):
+            fr.settle(intent.id, status="done", result="同资产已完成（协作广播），跳过重复执行")
+            async with chains_lock:
+                chains.append(
+                    ChainResult(
+                        intent=intent.title,
+                        role=getattr(intent, "role", "") or "",
+                        asset_scope=_scope0,
+                        status="done",
+                        steps=0,
+                        depth=intent.depth,
+                        source=intent.source,
+                    )
+                )
+                done_events.append(
+                    {
+                        "iid": intent.id,
+                        "status": "done",
+                        "role": intent.role,
+                        "asset_scope": _scope0,
+                    }
+                )
+            with contextlib.suppress(Exception):
+                wake_q.put_nowait(intent.id)
+            return None
         # P0-2：意图「真正开始执行」→ 回调编排层置 running（claim 只表示"已预留"，
         # 二者语义分离，账本 running 数才与真实在途容器数一致）
         if on_started is not None:
@@ -1132,8 +1381,8 @@ async def run_frontier(
             "failed",
             "budget_exceeded",
         ):
-            # 侦察意图：正常结束即 done——依赖它的 exploit 意图据此解锁（对齐
-            # specialist recon 语义）。校验资产清单是否落盘：未产出则 result 显式
+            # 侦察意图：正常结束即 done——依赖它的 exploit 意图据此解锁（recon
+            # 角色语义）。校验资产清单是否落盘：未产出则 result 显式
             # 标注，让 exploit 的 recent_results 可见"侦察空转"（不阻断解锁，避免
             # 误伤确实无资产可枚举的目标）
             status, why = "done", "侦察完成"
@@ -1143,20 +1392,45 @@ async def run_frontier(
                 _af = jobs_dir() / (result.job_id or "") / "ws" / "assets.json"
                 if not (_af.is_file() and "[" in _af.read_text(encoding="utf-8", errors="replace")):
                     why = "侦察完成但未产出资产清单（ws/assets.json 缺失或空）"
+                else:
+                    # 加强⑤：清单确定性灌入 intel 资产图（不依赖模型自觉 observe_asset）
+                    _n_ing = _ingest_recon_assets(_af, job_id=base)
+                    if _n_ing:
+                        why = f"侦察完成（资产入图 {_n_ing} 条）"
             except Exception:
                 pass
         elif getattr(intent, "max_steps", 0) > 0 and result.status == "step_exceeded":
             status, why = "exhausted", f"超意图步数预算（{intent.max_steps} 步硬止损）"
-        elif result.status in ("step_exceeded", "wallclock_exceeded") and intent.attempts >= 2:
-            status, why = "exhausted", f"{result.status}（尝试 {intent.attempts} 次）"
         elif result.status == "error":
             status, why = "blocked", "engine error"
+        elif (
+            result.status in ("step_exceeded", "wallclock_exceeded", "failed")
+            and intent.attempts < _RECHECK_ATTEMPTS
+        ):
+            # 加强②：复核纪律运行时强制——首轮失败自动回队重跑一次（重跑时
+            # build_intent_objective 会带上最新 recent_results/共享 finding，
+            # 期间落下的新事实自然进入复核上下文）；第二次失败才终态 exhausted。
+            # 硬止损类（意图级步数预算 / 引擎 error / 预算超限）不进复核，防烧钱循环。
+            status, why = "open", f"{result.status}（首轮失败，自动复核一次）"
         else:
-            status, why = "exhausted", f"{result.status}（首次失败，可复核一次）"
+            status, why = "exhausted", f"{result.status}（尝试 {intent.attempts} 次）"
         fr.settle(
             intent.id, status=status, result=answer or f"steps={result.steps}", fail_reason=why
         )
         fr.reopen_ready()  # 本条结算后立即解锁依赖已满足的 blocked 意图（事件驱动，不等轮询）
+        # 完成广播（双通道）：进程内 SharedStopper（快路径）+ 账本 scope_done
+        # （③ 跨进程可见——其他 worker 进程轮询同一账本即可让出同资产在途意图）。
+        # 加强①时序：settle 已释放资产租约，广播必须紧跟其后（在下面 on_settled
+        # 等 await 之前置位）——同资产等待者的认领与"已完成跳过"之间不留 await 窗口
+        if status == "done" and getattr(intent, "role", "") in ("exploit", "verify"):
+            stopper.mark_done(intent.asset_scope, intent.id)
+        scope_key = getattr(intent, "asset_scope", "") or ""
+        if status == "done" and scope_key:
+            try:
+                _sl = scope_ledger or _get_scope_ledger()
+                _sl.mark_scope_done(scope_key)
+            except Exception:
+                pass  # 广播通道失败不阻断结算（进程内 stopper 仍生效）
         # ② 结算回调：编排层确定性收尾（benchmark close 容器 / 其他资源回收）。
         #    回调失败不阻断结算——收尾是 best-effort，任务状态以 settle 为准
         if on_settled is not None:
@@ -1168,15 +1442,15 @@ async def run_frontier(
                 print(f"[frontier] on_settled 回调失败（忽略）: {e}", flush=True)
         async with chains_lock:
             chains.append(
-                {
-                    "intent": intent.title,
-                    "role": getattr(intent, "role", "") or "",
-                    "asset_scope": getattr(intent, "asset_scope", "") or "",
-                    "status": status,
-                    "steps": result.steps,
-                    "depth": intent.depth,
-                    "source": intent.source,
-                }
+                ChainResult(
+                    intent=intent.title,
+                    role=getattr(intent, "role", "") or "",
+                    asset_scope=getattr(intent, "asset_scope", "") or "",
+                    status=status,
+                    steps=result.steps,
+                    depth=intent.depth,
+                    source=intent.source,
+                )
             )
             if status == "done":
                 done_events.append(
@@ -1193,17 +1467,6 @@ async def run_frontier(
                 _aggregate_sub_events(
                     base, sub_jobs, chains, flags, aggregated=aggregated, final=False
                 )
-        # 完成广播（双通道）：进程内 SharedStopper（快路径）+ 账本 scope_done
-        # （③ 跨进程可见——其他 worker 进程轮询同一账本即可让出同资产在途意图）
-        if status == "done" and getattr(intent, "role", "") in ("exploit", "verify"):
-            stopper.mark_done(intent.asset_scope, intent.id)
-        scope_key = getattr(intent, "asset_scope", "") or ""
-        if status == "done" and scope_key:
-            try:
-                _sl = scope_ledger or _get_scope_ledger()
-                _sl.mark_scope_done(scope_key)
-            except Exception:
-                pass  # 广播通道失败不阻断结算（进程内 stopper 仍生效）
         # 事件唤醒主循环（无条件：结算变化必须立刻可见，防 60s 心跳饿死）
         with contextlib.suppress(Exception):
             wake_q.put_nowait(intent.id)
@@ -1233,15 +1496,15 @@ async def run_frontier(
         fr.settle(intent.id, status=status, result=result_txt, fail_reason=why)
         async with chains_lock:
             chains.append(
-                {
-                    "intent": intent.title,
-                    "role": "report",
-                    "asset_scope": "",
-                    "status": status,
-                    "steps": 0,
-                    "depth": intent.depth,
-                    "source": intent.source,
-                }
+                ChainResult(
+                    intent=intent.title,
+                    role="report",
+                    asset_scope="",
+                    status=status,
+                    steps=0,
+                    depth=intent.depth,
+                    source=intent.source,
+                )
             )
             if status == "done":
                 done_events.append(
@@ -1358,13 +1621,17 @@ async def run_frontier(
     # 子 job + 追加 summary 事件（增量聚合期间已合并的由 aggregated 幂等跳过）
     _aggregate_sub_events(base, sub_jobs, chains, flags, aggregated=aggregated)
 
-    return {
-        "job_id": base,
-        "mode": "frontier",
-        "flags": flags,
-        "chains": chains,
-        "done_events": done_events,  # 完成广播事件（含 report 聚合条目）
-        "sub_jobs": sub_jobs,  # 子任务清单（父事件流聚合来源）
-        "open_remaining": fr.count_open(),
-        "wall_s": round(time.time() - t0, 1),
-    }
+    _release_task_lock(_lock)  # 加强④：正常路径显式释放（异常路径 fd 回收兜底）
+
+    return RunSummary(
+        job_id=base,
+        mode="frontier",
+        flags=flags,
+        chains=chains,
+        open_remaining=fr.count_open(),
+        wall_s=round(time.time() - t0, 1),
+        extras={
+            "done_events": done_events,  # 完成广播事件（含 report 聚合条目）
+            "sub_jobs": sub_jobs,  # 子任务清单（父事件流聚合来源）
+        },
+    ).to_dict()

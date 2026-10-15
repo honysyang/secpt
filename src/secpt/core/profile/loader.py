@@ -54,6 +54,8 @@ class Profile(BaseModel):
     tools: list[str] = Field(default_factory=lambda: list(CORE_TOOLS))
     bash_whitelist_extra: list[str] = Field(default_factory=list)
     prior: str = "generic.md"  # knowledge/priors/<prior>，相对文件名
+    # 多标签合并的先验并集（理解智能体横向任务产物）：prior_text() 按序串联
+    prior_extra: list[str] = Field(default_factory=list)
     terminator: Terminator = Field(default_factory=Terminator)
     budget: Budget = Field(default_factory=Budget)
     stages: list[Stage] = Field(default_factory=list)  # 非空 → 多阶段编排
@@ -70,9 +72,17 @@ class Profile(BaseModel):
         return PRIORS_DIR / self.prior
 
     def prior_text(self) -> str:
-        if not self.prior_path.is_file():
-            return ""
-        return self.prior_path.read_text(encoding="utf-8").strip()
+        """先验文本（含多标签合并的 prior_extra 串联；缺失文件跳过，去重）。"""
+        parts: list[str] = []
+        seen: set[str] = set()
+        for fn in [self.prior, *self.prior_extra]:
+            if not fn or fn in seen:
+                continue
+            seen.add(fn)
+            fp = PRIORS_DIR / fn
+            if fp.is_file():
+                parts.append(fp.read_text(encoding="utf-8").strip())
+        return "\n\n".join(parts)
 
     def merged_whitelist_extra(self) -> list[str]:
         """tools 里非内置项 + 显式 bash_whitelist_extra 的去重合并。"""
@@ -85,12 +95,18 @@ class Profile(BaseModel):
 
 
 def load_profile(name: str) -> Profile:
-    """加载 profile YAML；找不到文件时回退默认值（兼容 generic 等旧名）。"""
-    path = PROFILES_DIR / f"{name}.yaml"
+    """加载 profile YAML。支持两类入参（多标签合并物化后按路径加载）：
+
+    - 内置名：``ctf`` → ``profiles/ctf.yaml``；找不到回退默认值（兼容旧名）
+    - YAML 路径：``/…/merged-<job>.yaml`` 或含 ``/`` 的字符串 → 直接读该文件
+    """
+    is_path = name.endswith((".yaml", ".yml")) or "/" in name
+    path = Path(name) if is_path else PROFILES_DIR / f"{name}.yaml"
+    fallback = Path(name).stem if is_path else name
     if not path.is_file():
-        return Profile(name=name)
+        return Profile(name=fallback)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        return Profile(name=name)
-    data.setdefault("name", name)
+        return Profile(name=fallback)
+    data.setdefault("name", fallback)
     return Profile(**data)

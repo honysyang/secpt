@@ -15,18 +15,20 @@ secpt solve <dir> -p multistage               # 多阶段：recon → getshell �
 
 ## 核心能力
 
-- **一键解题（solve）**：入口 URL 抽取、附件自动解压、先验关键词匹配（`knowledge/prior_map.yaml` 可扩展）、跑完自动评判 + 经验沉淀
-- **多智能体团队模式（frontier）**：意图队列 + 四角色分工（侦察 / 利用×N 并行 / 验证 / 报告），事件流协作 + L2 warroom 共享作战记忆，跨进程账本互斥防重复解题
+- **统一理解智能体（solve 首环）**：一次 LLM 调用同时产出「打法分类（**多标签**，横向任务自动合并工具/先验并集）+ 结构化目标 GoalSpec + 先验推荐」，取代原「路由→拆解」两次调用；入口抽取/附件解压/白名单校验/种子入图照旧（`SECPT_UNDERSTANDING=0` 回退旧两段式）
+- **一键解题（solve）**：入口 URL 抽取、附件自动解压、先验匹配（关键词→语义兜底）、跑完自动评判 + 经验沉淀
+- **多智能体团队模式（frontier）**：意图队列（SQLite 持久化、按任务隔离、依赖/事实谓词解锁、资产级租约互斥）+ 四角色分工（侦察 / 利用×N 并行 / 验证 / 报告），失败自动复核一次，协作走事件流 + intel 图/`search_traces` 跨任务检索 + 完成广播；人机通道 intent add/set/rm
 - **非阻塞 compaction**：主循环仅同步删组+插占位（微秒级），LLM 摘要交后台 worker（`secpt worker summarize` 补偿入口），`compaction_requested/completed` 事件全链路可观测
 - **断点续跑（checkpoint resume）**：重启后从 `events.jsonl` 恢复轮次/预算/检测器状态，预算累计无缝衔接；仅顶层任务路径开启，编排层防串扰
-- **多链并发安全**：EventSink 线程锁 + flock 文件锁 + 跨进程 seq 单调；工具调用按 `call_id` 精确配对（不再依赖 FIFO）；warroom 写入 busy 指数退避重试
+- **多链并发安全**：EventSink 线程锁 + flock 文件锁 + 跨进程 seq 单调；工具调用按 `call_id` 精确配对（不再依赖 FIFO）；SQLite 写入 busy 指数退避重试
 - **可观测性**：structlog JSON 日志（`SECPT_LOG_JSON=1`，按 job_id/agent 检索）+ 零依赖 Prometheus 指标（`secpt worker metrics --port 9100`）+ 18 类事件流 `events.jsonl`
 - **越用越好用（learning 闭环）**：每次运行 LLM 蒸馏经验入 `var/knowledge/experiences.jsonl`，下次同类任务自动注入 top-3 历史经验（`SECPT_EXPERIENCE=0` 关闭）
 - **工具插件（tools/plugins/）**：YAML 声明式集成外部工具/其他智能体能力（如 getshell），模板参数 shlex.quote 防注入；profile `tools:` 声明即装配
 - **多阶段渗透（profile stages）**：recon → getshell → privesc 串行编排，共享 workspace，阶段交付物自动交接
 - **AI 评判（不依赖 flag 正则）**：`secpt judge <job_id> [--ground-truth FILE]`——反作弊 → Jev 门控 → LLM judge 终裁
 - **7×24 长任务**：`--wall 0` 不限墙钟，compaction/rollover 上下文自愈，卡死切换器（六判据）自动纠偏，协作式取消
-- **多任务**：`secpt submit -t spec.yaml -j 4` / `secpt forever`（进程池 + 优先级队列）
+- **多任务**：`secpt submit -t spec.yaml -j 4 --priority 9` / `secpt forever`（进程池 + 优先级队列 + 重启恢复排队）
+- **运维体验**：`secpt doctor`（环境预检）/ `secpt tui`（意图板+事件流+审批面板，pip install 'secpt[tui]'）/ 通知通道（SECPT_NOTIFY_WEBHOOK 或 SECPT_NOTIFY_DESKTOP=1 → 审批待办/空转暂停/拿到 flag 实时推送）
 - **多模型**：`--model openai/gpt-4o` 或 `SECPT_MODEL_BASE_<PREFIX>` 接入任意 OpenAI 兼容端点
 
 ## 插件示例（集成 getshell 能力）
@@ -50,8 +52,9 @@ export DEEPSEEK_API_KEY=<key>          # 或任意 OpenAI 兼容端点（见 doc
 
 # 2. 一键执行——任务类型与打法都不需要用户判断：
 secpt solve challenges/rois-saml-sso
-#    内部自动：profile 路由（规则关键词→LLM 兜底）→ 先验匹配 → 执行模式
-#    （懒升级阶梯：single → 无成果自动升级 frontier → stages 若 profile 编排）
+#    内部自动：统一理解智能体（多标签分类 + GoalSpec + 先验推荐，一次调用）
+#    → 白名单校验/种子入图 → 多标签合并（横向任务工具+先验并集）
+#    → 执行模式（懒升级阶梯：single → 无成果自动升级 frontier → stages 若 profile 编排）
 #    → AI 评判 → 经验沉淀。高级用户可用 -p/--prior/--mode 覆盖任何一步。
 
 # 3. 无 key 干跑（FakeLLM 全链路）
@@ -88,10 +91,10 @@ secpt/
 │   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由+池) / sandbox(Docker沙箱) / logsetup / metrics
 │   ├── core/
 │   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event(并发安全)/resume/summarize_worker/worker
-│   │   ├── orchestrator/      # dag 分流(默认单链) / specialist 团队编排(四角色) / frontier 意图调度
+│   │   ├── orchestrator/      # dag 分流(默认单链) / stages 多阶段 / frontier 意图调度（四角色）
 │   │   ├── profile/           # profile YAML loader + system_extra 渲染
 │   │   ├── context/           # S3 四件套：compaction(非阻塞) / rollover / budget / summarize
-│   │   ├── memory/            # warroom 共享作战记忆（busy 重试）
+│   │   ├── memory/            # warroom 四表（历史/可选组件；多意图协作走 intel 图 + findings + traces）
 │   │   └── watchdog.py        # 空转监控
 │   ├── governance/            # scope / ratelimit / intercept / audit（审计 JSONL）
 │   ├── evaluation/            # AI 评判层（anticheat→Jev→judge→verdict）

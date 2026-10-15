@@ -74,3 +74,41 @@ def test_budget_exceeded_graceful_flush(tmp_path) -> None:
 def test_warn_message_text() -> None:
     assert "80%" in WARN_80_MSG
     assert "结构化结论" in WARN_80_MSG
+
+
+class TestPerProviderPricing:
+    """D 修复：per-provider 计价（池化后预算百分比不再按 deepseek 价失真）。"""
+
+    def test_model_price_differs_by_model(self, monkeypatch):
+        monkeypatch.delenv("SECPT_PRICE_OPENAI_IN_PER_1K", raising=False)
+        monkeypatch.delenv("SECPT_PRICE_OPENAI_OUT_PER_1K", raising=False)
+        b_ds = BudgetTracker(1.0, model="deepseek-chat")
+        b_oa = BudgetTracker(1.0, model="openai/gpt-4o")
+        b_ds.add(1000, 1000)
+        b_oa.add(1000, 1000)
+        # gpt-4o 单价远高于 deepseek-chat：同 token 成本更高、百分比更高
+        assert b_oa.cost_cny > b_ds.cost_cny
+        assert b_oa.percent() > b_ds.percent()
+
+    def test_provider_env_override(self, monkeypatch):
+        monkeypatch.setenv("SECPT_PRICE_OPENAI_IN_PER_1K", "0.5")
+        monkeypatch.setenv("SECPT_PRICE_OPENAI_OUT_PER_1K", "1.0")
+        b = BudgetTracker(1.0, model="openai/gpt-4o")
+        assert b.input_per_1k == 0.5 and b.output_per_1k == 1.0
+        b.add(1000, 0)
+        assert abs(b.cost_cny - 0.5) < 1e-9
+
+    def test_model_table_exact_match(self, monkeypatch):
+        monkeypatch.delenv("SECPT_PRICE_OPENAI_IN_PER_1K", raising=False)
+        assert BudgetTracker(1.0, model="openai/gpt-4o-mini").input_per_1k == 0.0011
+
+    def test_unknown_model_falls_back_to_generic(self, monkeypatch):
+        monkeypatch.setenv("SECPT_PRICING_INPUT_PER_1K", "0.003")
+        monkeypatch.setenv("SECPT_PRICING_OUTPUT_PER_1K", "0.009")
+        b = BudgetTracker(1.0, model="mygw/qwen3-32b")
+        assert b.input_per_1k == 0.003 and b.output_per_1k == 0.009
+
+    def test_tokens_cost_model_kwarg(self):
+        assert abs(tokens_cost(1000, 0, model="openai/gpt-4o") - 0.018) < 1e-9
+        # 不传 model：兼容旧口径（deepseek 默认价）
+        assert abs(tokens_cost(1000, 0) - 0.002) < 1e-9

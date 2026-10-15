@@ -37,6 +37,9 @@ dependencies = [
 
 [project.optional-dependencies]
 traffic = ["mitmproxy>=12"]      # B3 流量证据层（MITM 透明录制）
+embed = ["fastembed>=0.4"]        # B 语义检索（本地 ONNX 嵌入；缺省降级字面检索）
+browser = ["playwright>=1.45"]    # A 浏览器工具（首次需 playwright install chromium）
+tui = ["textual>=0.60"]           # secpt tui 运维面板
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

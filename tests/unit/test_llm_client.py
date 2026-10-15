@@ -194,3 +194,25 @@ class TestRequestParams:
         monkeypatch.setenv("SECPT_MODEL_BASE_DEEPSEEK", "https://gw.internal/v1")
         base, _key, mid = resolve_model("deepseek-chat")
         assert base == "https://gw.internal/v1" and mid == "deepseek-chat"
+
+
+def test_usage_cache_tokens_passthrough():
+    """A：DeepSeek usage 的缓存命中/未命中 token 透传（命中率可观测的前提）。"""
+    data = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20,
+        },
+    }
+    resp = client_mod._wrap_response(data)
+    assert resp.usage.prompt_cache_hit_tokens == 80
+    assert resp.usage.prompt_cache_miss_tokens == 20
+    # 无该字段的端点 → 0（不炸）
+    resp2 = client_mod._wrap_response(
+        {"choices": [{"message": {"content": "x"}}], "usage": {"prompt_tokens": 1}}
+    )
+    assert resp2.usage.prompt_cache_hit_tokens == 0
+    assert resp2.usage.prompt_cache_miss_tokens == 0

@@ -1,7 +1,7 @@
 name: redteam
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 红队操作员
-tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei]
+tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content]
 bash_whitelist_extra: [nmap, httpx, gobuster, nuclei, hydra, john, hashcat, sqlmap, wfuzz, ffuf, nc, tcpdump]
 prior: redteam.md
 terminator:

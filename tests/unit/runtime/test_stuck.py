@@ -175,3 +175,82 @@ def test_no_call_key_keeps_legacy_semantics():
     for _ in range(9):
         det.update(out)  # 完全相同的输出，但不传 call_key
     assert det.should_nudge() is False  # waiting=9 < 12，行为与改造前一致
+
+
+# ---------------- 节流（复评修复轮：冷却/退避/回落/上限/等待文案） ----------------
+
+
+def test_cooldown_suppresses_retrigger():
+    """S1：触发后 8 步冷却内同类触发器不再触发（旧实现每 3 步刷一条）。"""
+    det = StuckDetector()
+    key = 'bash:{"command": "ls"}'
+    det.update("same", call_key=key)  # 冷启动
+    det.update("same", call_key=key)
+    det.update("same", call_key=key)  # dup=2 → 触发
+    assert det.should_nudge() is True
+    det.nudge()
+    assert det.trigger_count == 1
+    for i in range(7):  # 冷却期内继续打同一命令：恒不触发
+        det.update("same", call_key=key)
+        assert det.should_nudge() is False, i
+    det.update("same", call_key=key)  # 冷却耗尽
+    assert det.should_nudge() is True  # 退避后重新触发（门槛已升）
+
+
+def test_progress_decays_escalation():
+    """S4：触发推高的阈值/退避，随进展逐级回落（防"只涨不落"检测失聪）。"""
+    det = StuckDetector()
+    for _ in range(3):
+        det._waiting = det._wait_cap  # 直接构造触发条件（waiting 路径）
+        det._cooldown = 0
+        assert det.should_nudge() is True
+        det.nudge()
+    assert det._threshold == 6 + 2 * 3
+    for i in range(20):
+        det.update(f"new-path-{i} HTTP 200 /p{i}")  # 持续进展
+    assert det._threshold == 6  # 回落到基线
+    assert det._dup_cap_extra == 0 and det._err_cap_extra == 0
+
+
+def test_session_nudge_cap():
+    """S5：达 max_nudges 后不再触发（只记 trigger_count，不注水上下文）。"""
+    det = StuckDetector(max_nudges=2)
+    for _ in range(3):
+        det._waiting = det._wait_cap
+        det._cooldown = 0
+        if det.should_nudge():
+            det.nudge()
+    assert det.trigger_count == 2
+    det._waiting = det._wait_cap
+    det._cooldown = 0
+    assert det.should_nudge() is False  # 上限后静默
+
+
+def test_waiting_specific_message():
+    """S3：等待场景触发专属文案（此前复用"无新信息"文案，语义错位）。"""
+    det = StuckDetector(wait_cap=3)
+    out = "=== MENU ===\n1. send\n$ "
+    det.update(out)
+    for _ in range(3):
+        det.update(out)
+    assert det.should_nudge() is True
+    msg = det.nudge()
+    assert "等待/重印" in msg
+
+
+def test_dup_escalation_raises_bar():
+    """S2：dup 触发后退避——同类再犯需要更多证据（门槛 2→3）。"""
+    det = StuckDetector(threshold=999)  # 关闭 no_progress 路径，隔离本测试
+    ka = 'bash:{"command": "holders"}'
+    for _ in range(3):
+        det.update("same", call_key=ka)
+    assert det.should_nudge() is True
+    det.nudge()
+    assert det._dup_cap_extra == 1
+    det._cooldown = 0  # 直接跳过冷却（本测试只验证退避门槛）
+    # 窗口已清空：重打 ka 需 3 次（退避后门槛 2+1）而非 2 次
+    for i in range(3):
+        det.update("same", call_key=ka)
+        if i < 2:
+            assert det.should_nudge() is False
+    assert det.should_nudge() is True  # 第 3 次才达到退避后门槛

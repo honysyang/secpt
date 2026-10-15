@@ -223,6 +223,24 @@ app.add_typer(cmd_ops.intercept_app, name="intercept")
 app.add_typer(cmd_ops.worker_app, name="worker")
 
 
+@app.command("doctor")
+def doctor_entry() -> None:
+    """环境预检：模型凭证 / 沙箱 / 工具矩阵 / 可选依赖，逐项给修复提示。"""
+    from secpt.cli.cmd_doctor import doctor_cmd
+
+    doctor_cmd()
+
+
+@app.command("tui")
+def tui_entry(
+    job: str = typer.Option("", "--job", "-j", help="目标任务 base job_id（缺省取最近活跃）"),
+) -> None:
+    """运维面板（textual）：意图板 + 事件流 + 审批队列，q 退出 / r 刷新 / a·d 审批。"""
+    from secpt.cli.tui_app import run_tui
+
+    run_tui(job)
+
+
 @app.command("archive")
 def archive_entry(
     job_id: str = typer.Argument(..., help="要归档的 job_id"),

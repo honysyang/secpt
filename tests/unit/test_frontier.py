@@ -9,6 +9,7 @@ from typing import ClassVar
 from secpt.core.orchestrator.frontier import (
     Frontier,
     build_intent_objective,
+    frontier_db_path,
     plan_round,
     run_frontier,
 )
@@ -306,3 +307,254 @@ class TestGraphAnchor:
         st = IntelStore(tmp_path / "intel.sqlite")
         rows = st.nodes_for_asset("endpoint", "http://t/admin")
         assert any(r["type"] == "intent" and "打后台越权" in r["content"] for r in rows)
+
+
+class TestTaskScopedDb:
+    """F1 回归：意图库按任务隔离（此前共享 var/frontier.sqlite）。"""
+
+    def test_db_path_under_job_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        assert frontier_db_path("abc123") == tmp_path / "jobs" / "abc123" / "frontier.sqlite"
+
+    def test_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_FRONTIER_DB", str(tmp_path / "custom.sqlite"))
+        assert frontier_db_path("x") == tmp_path / "custom.sqlite"
+
+    def test_tasks_isolated(self, tmp_path, monkeypatch):
+        """两个任务的意图互不可见、互不认领（F1 前共享库时会互抢）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        a = Frontier(frontier_db_path("task-a"))
+        b = Frontier(frontier_db_path("task-b"))
+        a.add("A 的意图", source="planner")
+        assert b.claim_next() is None  # B 领不到 A 的单
+        assert b.count_open() == 0 and b.total() == 0  # B 的配额零污染
+        first = a.claim_next()
+        assert first is not None and first.title == "A 的意图"
+
+    def test_recover_stale_does_not_cross_tasks(self, tmp_path, monkeypatch):
+        """F1 核心回归：新任务是运行中任务的另一 DB——_recover_stale 不再
+        把对方的 running 意图置回 open（此前共享库下会被第二实例双执行）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        a = Frontier(frontier_db_path("task-a"))
+        a.add("在途意图")
+        claimed = a.claim_next()
+        assert claimed is not None and claimed.status == "running"
+        Frontier(frontier_db_path("task-b"))  # B 启动（会跑 _recover_stale）
+        rows = a.list_all(status="running")
+        assert len(rows) == 1, "B 的启动不得把 A 的在途意图置回 open"
+
+    def test_run_frontier_default_uses_task_db(self, tmp_path, monkeypatch):
+        """run_frontier 缺省库必须落在 jobs/<base>/ 下（不再共享 var 根）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        llm = _PlannerLLM(["[]"])  # 产空意图 → 快速收敛
+        _run(
+            run_frontier(
+                "测试目标",
+                profile="ctf",
+                base_job_id="scopechk",
+                llm=llm,
+                planner_llm=llm,
+                max_rounds=1,
+            )
+        )
+        assert (tmp_path / "jobs" / "scopechk" / "frontier.sqlite").is_file()
+
+
+class TestAssetLease:
+    """加强①：资产级在途互斥（同资产意图不并发；settle/崩溃释放）。"""
+
+    def test_same_asset_claim_excluded(self, tmp_path):
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("A", role="exploit", asset_scope="http://t:1", priority=9, depth=0)
+        b = fr.add("B", role="exploit", asset_scope="http://t:1", priority=5, depth=0)
+        c = fr.add("C 无资产", depth=0)
+        first = fr.claim_next()
+        assert first.id == a
+        assert fr.lease_holder("http://t:1") == a
+        # 同资产 B 被租约挡住；无资产意图照常可领
+        assert fr.claim_next().id == c
+        assert fr.claim_next() is None
+        # 结算释放租约 → B 恢复可领
+        fr.settle(a, status="done")
+        assert fr.lease_holder("http://t:1") is None
+        assert fr.claim_next().id == b
+
+    def test_blocked_refund_releases_lease(self, tmp_path):
+        fr = Frontier(tmp_path / "f.db")
+        fr.add("A", role="exploit", asset_scope="http://t:2", depth=0)
+        it = fr.claim_next()
+        assert fr.lease_holder("http://t:2") == it.id
+        # 依赖未满足回退路径：settle(blocked)+refund 也必须释放租约
+        fr.settle(it.id, status="blocked", fail_reason="依赖未满足")
+        fr.refund_attempt(it.id)
+        assert fr.lease_holder("http://t:2") is None
+
+    def test_recover_stale_clears_lease(self, tmp_path):
+        """进程被杀：新实例把 running 置回 open 并回收其租约（防幽灵锁死资产）。"""
+        db = tmp_path / "f.db"
+        fr = Frontier(db)
+        fr.add("A", role="exploit", asset_scope="http://t:3", depth=0)
+        fr.claim_next()
+        assert fr.lease_holder("http://t:3") is not None
+        fr2 = Frontier(db)  # 模拟重启
+        assert fr2.lease_holder("http://t:3") is None
+        assert fr2.claim_next() is not None
+
+    def test_completed_asset_skips_second_intent(self, tmp_path, monkeypatch):
+        """本次运行内同资产已完成 → 第二个意图跳过执行直接结算 done。"""
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        calls: list[str] = []
+
+        def fake_run_engine(**kw):
+            calls.append(str(kw.get("job_id")))
+            return SimpleNamespace(
+                job_id=kw.get("job_id"),
+                flag="FLAG{lease_x}",
+                steps=3,
+                wall_s=0.01,
+                status="success",
+                messages=[],
+            )
+
+        monkeypatch.setattr("secpt.cli.engine_runner.run_engine", fake_run_engine)
+        fr = Frontier(frontier_db_path("sk1"))
+        fr.add(
+            "利用 A",
+            role="exploit",
+            asset_scope="http://10.9.9.9:80",
+            priority=9,
+            depth=0,
+            done_criteria="拿到 flag",
+        )
+        fr.add(
+            "利用 A 变体",
+            role="exploit",
+            asset_scope="http://10.9.9.9:80",
+            priority=5,
+            depth=0,
+            done_criteria="拿到 flag",
+        )
+        summary = _run(
+            run_frontier(
+                "目标",
+                profile="ctf",
+                base_job_id="sk1",
+                frontier=fr,
+                llm=object(),
+                planner_llm=_PlannerLLM(["[]"]),
+                max_rounds=3,
+                stop_on_first_flag=False,
+            )
+        )
+        assert len(calls) == 1  # 第二个同资产意图未执行引擎
+        steps = [c["steps"] for c in summary["chains"]]
+        assert steps == [3, 0]
+
+
+class TestIntentEdit:
+    """加强③：意图编辑/撤回（人机通道）。"""
+
+    def test_update_priority_effective_and_running_refused(self, tmp_path):
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("低", depth=0, priority=1)
+        fr.add("高", depth=0, priority=9)
+        assert fr.update(a, priority=10) is True
+        assert fr.claim_next().id == a  # 改优先级立即生效
+        assert fr.update(a, priority=1) is False  # running 拒绝改
+        assert fr.update("nope", priority=1) is False
+
+    def test_remove_only_open_blocked(self, tmp_path):
+        fr = Frontier(tmp_path / "f.db")
+        a = fr.add("可撤", depth=0)
+        b = fr.add("在途", depth=0, priority=9)
+        assert fr.remove(a) is True
+        claimed = fr.claim_next()
+        assert claimed.id == b
+        assert fr.remove(b) is False  # running 拒绝删
+        assert fr.remove("nope") is False
+
+
+class TestTaskLock:
+    """加强④：任务级单编排锁。"""
+
+    def test_second_acquire_rejected_then_released(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.orchestrator.frontier import _acquire_task_lock, _release_task_lock
+
+        h = _acquire_task_lock("lk1")
+        assert h is not None
+        try:
+            _acquire_task_lock("lk1")
+            raise AssertionError("第二个实例必须被拒绝")
+        except RuntimeError as e:
+            assert "lk1" in str(e)
+        _release_task_lock(h)
+        h2 = _acquire_task_lock("lk1")  # 释放后可再取
+        assert h2 is not None
+        _release_task_lock(h2)
+
+
+class TestRecheckOnce:
+    """加强②：复核纪律运行时强制（首轮失败自动回队一次）。"""
+
+    def test_failed_intent_rechecked_once(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        calls: list[str] = []
+
+        def fake_run_engine(**kw):
+            calls.append(str(kw.get("job_id")))
+            return SimpleNamespace(
+                job_id=kw.get("job_id"),
+                flag=None,
+                steps=2,
+                wall_s=0.01,
+                status="step_exceeded",
+                messages=[],
+            )
+
+        monkeypatch.setattr("secpt.cli.engine_runner.run_engine", fake_run_engine)
+        fr = Frontier(frontier_db_path("rk1"))
+        fr.add("顽固意图", done_criteria="拿到 flag", depth=0)
+        _run(
+            run_frontier(
+                "目标",
+                profile="ctf",
+                base_job_id="rk1",
+                frontier=fr,
+                llm=object(),
+                planner_llm=_PlannerLLM(["[]"]),
+                max_rounds=3,
+            )
+        )
+        assert len(calls) == 2  # 首跑 + 自动复核一次
+        rows = fr.list_all(status="exhausted")
+        assert len(rows) == 1 and rows[0]["attempts"] == 2  # 第二次失败才终态
+
+
+class TestReconIngest:
+    """加强⑤：recon 资产清单确定性入 intel 图。"""
+
+    def test_ingest_recon_assets(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.orchestrator.frontier import _ingest_recon_assets
+        from secpt.intel.store import IntelStore
+
+        p = tmp_path / "assets.json"
+        p.write_text(
+            json.dumps([{"host": "a.example.com", "port": 443, "service": "https"}]),
+            encoding="utf-8",
+        )
+        assert _ingest_recon_assets(p, job_id="t1") == 1
+        st = IntelStore(tmp_path / "intel.sqlite")
+        vals = [str(a["value"]) for a in st.assets(limit=10)]
+        assert any("a.example.com" in v for v in vals)

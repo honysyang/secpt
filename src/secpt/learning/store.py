@@ -18,6 +18,12 @@ from pathlib import Path
 DEFAULT_PATH = Path(os.environ.get("SECPT_VAR", "var")) / "knowledge" / "experiences.jsonl"
 
 
+def _default_path() -> Path:
+    """调用时解析（模块级 DEFAULT_PATH 是 import 期快照，SECPT_VAR 后设会漂移——
+    与 frontier/intel 的取值口径一致）。"""
+    return Path(os.environ.get("SECPT_VAR", "var")) / "knowledge" / "experiences.jsonl"
+
+
 @dataclass
 class LearnedExperience:
     """一次运行沉淀出的经验。"""
@@ -60,7 +66,7 @@ class ExperienceJournal:
     """append-only 经验日志。"""
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = Path(path) if path else DEFAULT_PATH
+        self.path = Path(path) if path else _default_path()
 
     def load(self) -> list[LearnedExperience]:
         if not self.path.is_file():
@@ -88,3 +94,56 @@ class ExperienceJournal:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(exp.to_dict(), ensure_ascii=False) + "\n")
         return True
+
+    # ---------------- 使用反馈（C：注入→结果回写） ----------------
+    #
+    # 设计取舍：usage 走**旁路事件文件**（experiences.usage.jsonl）而非就地重写
+    # 主日志——主 journal 保持蒸馏产物的纯 schema（append-only；就地回写需全量
+    # 重写，易与并发读/进程崩溃互踩）；事件流天然幂等可审计，hits/misses 由
+    # load_usage() 聚合。代价：读侧多一次小文件扫描（经验量级下可忽略）。
+
+    @property
+    def usage_path(self) -> Path:
+        return self.path.parent / (self.path.stem + ".usage.jsonl")
+
+    def record_usage(self, exp_id: str, outcome: bool) -> bool:
+        """回写一次"注入→任务结果"。返回是否写入（best-effort，失败不抛）。"""
+        if not exp_id:
+            return False
+        try:
+            self.usage_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.usage_path, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {"id": exp_id, "hit": bool(outcome), "ts": time.time()},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            return True
+        except OSError:
+            return False
+
+    def load_usage(self) -> dict[str, tuple[int, int]]:
+        """聚合 {exp_id: (hits, misses)}；损坏行跳过（best-effort 口径）。"""
+        out: dict[str, tuple[int, int]] = {}
+        if not self.usage_path.is_file():
+            return out
+        try:
+            with open(self.usage_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        eid = str(rec.get("id") or "")
+                    except json.JSONDecodeError:
+                        continue
+                    if not eid:
+                        continue
+                    h, m = out.get(eid, (0, 0))
+                    out[eid] = (h + (1 if rec.get("hit") else 0), m + (0 if rec.get("hit") else 1))
+        except OSError:
+            return out
+        return out

@@ -63,10 +63,14 @@ class TestRoleClaim:
         # exploit worker：recon 意图不可见（被过滤），但未定角色的老意图可见
         i = fr.claim_next(role="exploit")
         assert i is not None and i.id == expl
-        # recon worker：recon 意图可领
+        # 加强①资产租约：expl 在途时同资产（http://t:1）的 recon 不得并发进入
+        assert fr.lease_holder("http://t:1") == expl
+        assert fr.claim_next(role="recon") is None
+        # 结算释放租约后，recon worker 才能领同资产的 recon 意图
+        fr.settle(expl, status="done", result="exploit 完成")
         i2 = fr.claim_next(role="recon")
         assert i2 is not None and i2.id == recon
-        # 队列空
+        # 队列空（recon 在途持有租约，exploit 侧同样领不到）
         assert fr.claim_next(role="exploit") is None
 
     def test_claim_role_filter_sees_plain(self, tmp_path):

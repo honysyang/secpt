@@ -7,13 +7,16 @@
 
 保护：
 - 首条 system 消息
-- 最新 12 条消息（PROTECT_LATEST）
+- 最新 PROTECT_LATEST 条消息
 - 已记录 finding/credential（存在 store/events，天然不在 messages 里被删，
   且摘要 prompt 会要求模型把凭据写进摘要）
+- "摘要生成中"占位（删了回填落空）
 
-压缩对象：最老的一批，**必须按整组删除**
-    (assistant[含 tool_calls] + 它的全部 tool messages) 是一组
-    ⚠️ 只删 assistant 不删 tool result（或反过来）都会导致 API 400。
+可删单元（E 修复后两类）：
+- 完整组 (assistant[含 tool_calls] + 它的全部 tool messages)
+    ⚠️ 只删 assistant 不删 tool result（或反过来）都会导致 API 400
+- 独立 user 消息（nudge/预算警告/旧摘要占位）——此前永不删除、单调堆积；
+  其正文随 removed_msgs 进摘要，信息不悬空丢失
 产物：在被删区间原位插入 {"role":"user","content":"【历史摘要 #k】\n<六段摘要>"}
 
 红线：本模块（Compaction）是除 Rollover 之外唯一允许删改 messages 的地方。
@@ -90,14 +93,30 @@ def _protected_start(messages: list[dict]) -> int:
 
 
 def _next_removable(messages: list[dict], lo: int, protected_tail: int) -> tuple[int, int] | None:
-    """在 [lo, len-protected_tail) 内找第一个可删整组，返回 (start, end)；无则 None。"""
+    """在 [lo, len-protected_tail) 内找第一个可删单元，返回 (start, end)；无则 None。
+
+    可删单元两类（E 修复）：
+    - assistant 整组（含 tool_calls 与全部 tool 结果，必须完整配对）
+    - 独立 user 消息（nudge/预算警告/旧摘要占位等——此前永不删除，
+      多次压缩后在链里单调堆积、只能靠 rollover 清场；它们的正文会随
+      removed_msgs 进入摘要，信息以六段形式保留，不悬空丢失）
+    未回填的"摘要生成中"占位不删：删了回填就永远找不到落点（pending 摘要落空）。
+    """
     end_limit = max(lo, len(messages) - protected_tail)
     i = lo
     while i < end_limit:
-        if messages[i].get("role") == "assistant" and _is_complete_group(messages, i):
+        m = messages[i]
+        if m.get("role") == "assistant" and _is_complete_group(messages, i):
             return i, group_end(messages, i)
+        if m.get("role") == "user" and _is_removable_user(m):
+            return i, i
         i += 1
     return None
+
+
+def _is_removable_user(m: dict) -> bool:
+    """独立 user 消息是否可删：除"摘要生成中"占位外均可（见 _next_removable）。"""
+    return PLACEHOLDER_MARK not in str(m.get("content") or "")
 
 
 def plan_compaction(

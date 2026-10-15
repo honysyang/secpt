@@ -1,14 +1,14 @@
-"""角色体系：团队拓扑的角色定义与角色化阶段提示（折叠 SpecialistOrchestrator）。
+"""角色体系：团队拓扑的角色定义与角色化阶段提示（frontier 角色意图的语义定义）。
 
 参考 ARTEX 团队拓扑：目标拆解（goals）→ 角色意图（role）→ 认领互斥（claim）→ 事件回馈。
-四角色闭环（与 specialist.py 的固定 DAG 一一对应，但改为意图表达、可并行认领）：
+四角色闭环（角色语义与已退役的固定 DAG 编排一一对应，现改为意图表达、可并行认领）：
 - recon   侦察：枚举资产/指纹/端口 → observe_asset 入图谱（无依赖，先行）
 - exploit 利用：针对单个资产做定向利用（depends_on 对应 recon；每资产一条，可多 worker 并行）
 - verify  复验：对 exploit 声称的 finding/flag 做独立 PoC 复现（depends_on 对应 exploit）
 - report  聚合：verify 全部完成后产结构化渗透报告（depends_on 全部 verify）
 
 实现原则：不新增渲染机制——角色化通过给 worker objective 追加
-「【当前阶段：<role>】」片段实现（对齐 specialist 的 objective_extra 语义），
+「【当前阶段：<role>】」片段实现（objective_extra 语义），
 profile 渲染链路（profile/render.py）原样复用。
 """
 

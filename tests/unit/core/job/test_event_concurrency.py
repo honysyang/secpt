@@ -15,8 +15,7 @@ import threading
 from pathlib import Path
 
 from secpt.core.job.event import EventSink
-from secpt.core.memory.warroom import Warroom
-from secpt.core.orchestrator.specialist import WarroomHooks
+from secpt.core.memory.warroom import Warroom, WarroomHooks
 
 
 def _read_lines(path: Path) -> list[dict]:

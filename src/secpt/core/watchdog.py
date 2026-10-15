@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 MAX_IDLE_ROUNDS = 3
 
 REDIRECT_HINT = (
@@ -87,6 +89,14 @@ class Watchdog:
             f"[watchdog] job={self._job_id} 连续 {self._idle_rounds} 回合零新增，"
             "标记 paused + 注入换层提示"
         )
+        with contextlib.suppress(Exception):
+            from secpt.runtime.notify import notify
+
+            notify(
+                "task_paused",
+                f"secpt 任务 {self._job_id} 空转暂停",
+                f"连续 {self._idle_rounds} 回合无新增产出（换层提示已注入）",
+            )
         if hasattr(self._inner, "status_change"):
             self._inner.status_change("paused")
         if self._store is not None:

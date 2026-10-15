@@ -29,6 +29,9 @@ DEPRECATED_MODULES = (
     "secpt.core.evaluator",
     "secpt.core.node",
     "secpt.core.scheduler",
+    # 固定 DAG 编排器：team 路径已由 frontier 角色意图折叠（E 清理；
+    # WarroomHooks 迁至 core/memory/warroom.py，勿在新代码引用旧路径）
+    "secpt.core.orchestrator.specialist",
 )
 
 # 编排允许的唯一结构（常量文档化）

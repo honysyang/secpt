@@ -11,6 +11,7 @@ import os
 import re
 import time as _time
 
+from secpt.knowledge.embedding import EMBED_MIN_SCORE as _SEM_MIN
 from secpt.learning.store import ExperienceJournal, LearnedExperience
 
 _MAX_ITEMS = 3
@@ -35,6 +36,53 @@ def _term_hit(term: str, q: str) -> bool:
     return t in q
 
 
+# 标题/方法字段里不参与命中的 ASCII 填充词——命中它们与任务无关，只会放大噪声
+_ASCII_FILLER = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "not",
+    "but",
+    "are",
+    "was",
+    "can",
+    "you",
+    "via",
+    "use",
+    "using",
+    "get",
+    "when",
+    "how",
+    "why",
+}
+
+
+def _field_hit(text: str, q: str) -> bool:
+    """经验字段（标题/有效方法）是否命中查询。
+
+    方向必须是"字段的内容出现在查询里"：查询是整条 objective（长），字段是
+    蒸馏产物（短）。旧实现 `q in exp.title` 方向反了——长查询包含于短标题
+    永不成立，3/2 分强信号分支是死代码，召回全靠 indicators/technique 兜底。
+    判定：整短语包含，或字段内显著词命中（ASCII ≥3 字符按词边界、连排汉字
+    按子串，均复用 _term_hit 口径；填充词不参与）。
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False  # 空字段恒不命中（"" in q 恒真，必须前置拦截）
+    if t in q:
+        return True
+    for word in re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", t):
+        if word in _ASCII_FILLER:
+            continue
+        if _term_hit(word, q):
+            return True
+    return False
+
+
 def _recency_factor(ts: float) -> float:
     """时效衰减：exp(-ln2 * age/半衰期)——老经验不消失但降权。"""
     if not ts:
@@ -45,21 +93,67 @@ def _recency_factor(ts: float) -> float:
     return math.exp(-math.log(2) * age_days / _HALF_LIFE_DAYS)
 
 
-def _score(query: str, exp: LearnedExperience) -> tuple[float, bool]:
+def _exp_doc(e: LearnedExperience) -> str:
+    """经验侧语义文档：indicators 是蒸馏产物里天然的语义锚点。"""
+    parts = [e.title, e.technique, e.what_worked, *e.indicators]
+    return " ".join(p for p in parts if p)
+
+
+def _semantic_scores(query: str, exps: list[LearnedExperience]) -> dict[str, float] | None:
+    """{exp_id: cosine}；嵌入不可用返回 None（调用方降级为纯字面打分）。
+
+    best-effort：任何异常（含提供者不可用）都静默返回 None——检索绝不抛。
+    """
+    if not exps or not query:
+        return None
+    try:
+        from secpt.knowledge import embedding as _emb
+
+        vecs = _emb.embed_cached([query] + [_exp_doc(e) for e in exps])
+    except Exception:
+        return None
+    if vecs is None:
+        return None
+    return {e.id: _emb.cosine(vecs[0], v) for e, v in zip(exps, vecs[1:], strict=True)}
+
+
+def _usage_factor(hits: int, misses: int) -> float:
+    """历史命中率因子（C 反馈闭环）：0.7（全挂）~1.3（全中），小样本向 1.0 收缩。
+
+    语义：注入该经验的任务最终成败（粗粒度归因——outcome 写回在 solve 收尾，
+    一条经验同时服务多个子 job 时按任务总结果计）。importance 是蒸馏时 LLM
+    的静态自评；本因子是运行史的动态修正，两者相乘。
+    """
+    n = hits + misses
+    if n <= 0:
+        return 1.0
+    factor = 0.7 + 0.6 * (hits / n)
+    shrink = n / (n + 3.0)  # n=1 时只取 25% 偏移，n=10 取 77%，防小样本误杀
+    return 1.0 + (factor - 1.0) * shrink
+
+
+def _score(
+    query: str,
+    exp: LearnedExperience,
+    usage: dict[str, tuple[int, int]] | None = None,
+    sem: float | None = None,
+) -> tuple[float, bool]:
     """三维打分 → (相关性分, 是否强信号)。
 
     强信号 = 标题/机理/技术名命中（跨任务类型亦可信，说明确属同类问题）；
     弱信号 = 仅指标术语命中（受词边界与最短长度约束，跨任务类型不足采信）。
+    usage：{exp_id: (hits, misses)}——历史命中率因子（C 反馈闭环）。
+    sem：语义相似度（B 语义通路）——模糊信号，只加权不置强（跨域不采信）。
     """
     q = (query or "").lower()
     if not q:
         return 0.0, False
     s = 0.0
     strong = False
-    if q in exp.title.lower():
+    if _field_hit(exp.title, q):
         s += 3.0
         strong = True
-    if exp.what_worked and q in exp.what_worked.lower():
+    if _field_hit(exp.what_worked, q):
         s += 2.0
         strong = True
     for ind in exp.indicators:
@@ -68,10 +162,14 @@ def _score(query: str, exp: LearnedExperience) -> tuple[float, bool]:
     if exp.technique and _term_hit(exp.technique, q):
         s += 2.0
         strong = True
+    # B 语义通路：与技术名命中同级贡献（2 分×相似度），低于阈值不算命中
+    if sem is not None and sem >= _SEM_MIN:
+        s += 2.0 * sem
     if s <= 0:
         return 0.0, False
     importance_w = 0.5 + (exp.importance or 5.0) / 10.0  # 0.6 ~ 1.5
-    return s * importance_w * _recency_factor(exp.ts), strong
+    h, m = (usage or {}).get(exp.id, (0, 0))
+    return s * importance_w * _recency_factor(exp.ts) * _usage_factor(h, m), strong
 
 
 def search_experiences(
@@ -90,9 +188,12 @@ def search_experiences(
     if os.environ.get("SECPT_EXPERIENCE") == "0":
         return []
     jr = journal or ExperienceJournal()
+    usage = jr.load_usage()  # C 反馈闭环：历史命中率参与排序
+    exps = jr.load()
+    sem = _semantic_scores(query, exps)  # B 语义通路（None=降级纯字面）
     out: list[tuple[float, LearnedExperience]] = []
-    for e in jr.load():
-        s, strong = _score(query, e)
+    for e in exps:
+        s, strong = _score(query, e, usage, sem=(sem.get(e.id) if sem else None))
         if s <= 0:
             continue
         if (

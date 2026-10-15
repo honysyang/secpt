@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import os
 
-MAX_TRANSCRIPT_CHARS = 6000  # 送进摘要模型的对话截断上限（防 prompt 爆炸）
+MAX_TRANSCRIPT_CHARS = 6000  # 单次送进摘要模型的对话渲染上限（分段预算）
+_MERGE_BATCH = 8  # 分段摘要合并的批大小（超出则多级 reduce）
 
 
 def build_summary_prompt(objective: str, transcript: str) -> str:
@@ -38,7 +39,15 @@ def build_summary_prompt(objective: str, transcript: str) -> str:
     )
 
 
-def transcript_text(messages: list[dict]) -> str:
+_MERGE_PROMPT = (
+    "把下面的分段摘要合并成一份结构化总摘要，必须保留全部事实/凭据/已排除的尝试，"
+    "按六段式组织（1 任务目标 / 2 已确认事实 / 3 已获取凭据 / 4 已排除的尝试 / "
+    "5 当前进展 / 6 下一步候选），不要新增原文没有的信息。\n\n"
+    "任务目标原文：\n{objective}\n\n分段摘要：\n{parts}\n\n只输出合并后的摘要正文。"
+)
+
+
+def transcript_text(messages: list[dict], *, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
     """把 messages 渲染成纯文本供摘要（system 跳过，内容截断）。"""
     lines = []
     for i, m in enumerate(messages):
@@ -56,7 +65,34 @@ def transcript_text(messages: list[dict]) -> str:
             lines.append(f"[step {i}] tool_result: {content[:300]}")
         elif content.strip():
             lines.append(f"[step {i}] {role}: {content[:500]}")
-    return "\n".join(lines)[:MAX_TRANSCRIPT_CHARS]
+    return "\n".join(lines)[:max_chars]
+
+
+def segment_messages(
+    messages: list[dict], *, budget_chars: int = MAX_TRANSCRIPT_CHARS
+) -> list[list[dict]]:
+    """按渲染预算把被删消息切成若干段（每段渲染 ≤ budget，段数 ≥1）。
+
+    E 修复：旧实现只把 transcript 头部若干字符送进摘要——单次删 200 组时
+    后面的组"删了但没被摘要到"（静默信息丢失）。分段保证**全覆盖**：
+    逐段摘要后合并（见 LlmSummarizer）。单条消息自身超预算时独占一段
+    （渲染层已做逐条截断，实际不会超）。
+    """
+    if not messages:
+        return [[]]
+    segs: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_len = 0
+    for m in messages:
+        piece_len = len(transcript_text([m], max_chars=10**9)) + 1
+        if cur and cur_len + piece_len > budget_chars:
+            segs.append(cur)
+            cur, cur_len = [], 0
+        cur.append(m)
+        cur_len += piece_len
+    if cur:
+        segs.append(cur)
+    return segs
 
 
 class StubSummarizer:
@@ -74,15 +110,19 @@ class StubSummarizer:
 
 
 class LlmSummarizer:
-    """真实摘要器：调 deepseek-chat（便宜模型）生成六段摘要。"""
+    """真实摘要器：调便宜模型生成六段摘要。
+
+    覆盖保证（E 修复）：被删消息渲染超预算时分段摘要（每段 ≤ 6000 字符渲染）
+    再多级合并——不再只摘要头部一批。段级失败降级为占位文本继续合并；
+    全部段失败才抛（由调用方的重试/失败兜底路径接手）。
+    """
 
     def __init__(self, llm, model: str = "deepseek-chat", api_key: str | None = None) -> None:
         self.llm = llm
         self.model = model
         self.api_key = api_key
 
-    async def __call__(self, objective: str, messages: list[dict]) -> str:
-        prompt = build_summary_prompt(objective, transcript_text(messages))
+    async def _call(self, prompt: str) -> str:
         req = [{"role": "user", "content": prompt}]
         if hasattr(self.llm, "call"):
             resp = await self.llm.call(req, [], self.model)
@@ -90,6 +130,34 @@ class LlmSummarizer:
             # 兼容 harness.py 函数签名 call_llm(messages, tools, model, api_key)
             resp = await self.llm(req, [], self.model, self.api_key or "")
         return (resp.choices[0].message.content or "").strip()
+
+    async def __call__(self, objective: str, messages: list[dict]) -> str:
+        segs = segment_messages(messages)
+        if len(segs) <= 1:
+            return await self._call(build_summary_prompt(objective, transcript_text(messages)))
+        parts: list[str] = []
+        failures = 0
+        last_err: Exception | None = None
+        for i, seg in enumerate(segs, 1):
+            try:
+                part = await self._call(build_summary_prompt(objective, transcript_text(seg)))
+                parts.append(f"【第 {i}/{len(segs)} 段】\n{part}")
+            except Exception as e:
+                failures += 1
+                last_err = e
+                parts.append(f"【第 {i}/{len(segs)} 段】（本段摘要失败）")
+        if failures == len(segs):
+            raise last_err or RuntimeError("全部段摘要失败")
+        while len(parts) > 1:
+            parts = [
+                await self._call(
+                    _MERGE_PROMPT.format(objective=objective, parts="\n\n".join(batch))
+                )
+                for batch in (
+                    parts[i : i + _MERGE_BATCH] for i in range(0, len(parts), _MERGE_BATCH)
+                )
+            ]
+        return parts[0]
 
 
 def get_summarizer(llm, *, model: str = "deepseek-chat", api_key: str | None = None):
