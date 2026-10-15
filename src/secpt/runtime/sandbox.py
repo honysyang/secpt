@@ -87,9 +87,11 @@ class DockerSandbox:
             self.name,
             "--network",
             self.network,
-            # 以宿主 uid 运行：bind mount 两侧 uid 一致，文件归属不打架
+            # 以宿主 uid 运行：bind mount 两侧 uid 一致，文件归属不打架。
+            # Windows 无 getuid/getgid（CI 有 windows runner）→ 缺省 1000:1000（仅影响
+            # 容器内文件归属，宿主直跑路径完全不经过此处，不影响 Windows 使用）
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            f"{getattr(os, 'getuid', lambda: 1000)()}:{getattr(os, 'getgid', lambda: 1000)()}",
             "-v",
             f"{src}:/work",
             "-w",

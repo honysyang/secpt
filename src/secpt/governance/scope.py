@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 
 import structlog
 
@@ -14,6 +15,10 @@ logger = structlog.get_logger(__name__)
 
 class ScopeError(Exception):
     """目标不在授权范围内。"""
+
+    # duck-typing 拒绝信号：engine 层据此区分"治理拒绝（fail-closed）"与
+    # "校验器自身异常（fail-open 放行）"，避免 engine 反向依赖 governance
+    scope_denied = True
 
 
 class ScopeValidator:
@@ -70,4 +75,26 @@ class ScopeValidator:
         logger.debug("scope.allowed", target=target)
 
 
-__all__ = ["ScopeError", "ScopeValidator"]
+def build_scope_validator(entries: list[str] | None = None) -> ScopeValidator | None:
+    """装配 ScopeValidator（worker.py / engine_runner.py 装配处调用）。
+
+    白名单来源：TaskSpec.entries（题面抽取的入口）+ 环境变量 SECPT_SCOPE_ALLOW
+    （逗号分隔，CIDR/域名/IP 均可）。
+
+    返回 None 的情形（= 不启用 scope 校验，与 SECPT_SCOPE=0 等效）：
+    - SECPT_SCOPE=0（全局关闭，与 SECPT_INTERCEPT 对称）
+    - entries 与 SECPT_SCOPE_ALLOW 双空：无授权信息无从校验，此时启用会把
+      所有网络命令 fail-closed 拒绝、任务瘫痪——宁可不启用，等有入口信息再开
+    全放行：SECPT_SCOPE_ALLOW=0.0.0.0/0（显式声明，不做隐式魔法）。
+    """
+    if os.environ.get("SECPT_SCOPE", "1") == "0":
+        return None
+    allowed = [e.strip() for e in (entries or []) if e and e.strip()]
+    env_allow = os.environ.get("SECPT_SCOPE_ALLOW", "")
+    allowed += [a.strip() for a in env_allow.split(",") if a.strip()]
+    if not allowed:
+        return None
+    return ScopeValidator(allowed)
+
+
+__all__ = ["ScopeError", "ScopeValidator", "build_scope_validator"]

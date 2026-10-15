@@ -18,7 +18,8 @@ pip install -e ".[dev]"
 make test        # = pytest tests/ -q（基线：255 passed / 4 skipped）
 make lint        # ruff check（必须全绿才算完成）
 make format      # ruff format
-make check       # lint + test（提交前必跑）
+make format-check  # ruff format --check（只查不改，与 CI 一致）
+make check       # lint + format-check + test（提交前必跑）
 
 # 无 key 干跑（ FakeLLM，全链路可测 ）
 SECPT_FAKE_LLM=1 python -m secpt.cli.app solve challenges/rois-saml-sso

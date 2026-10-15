@@ -15,8 +15,12 @@ format:
 test:
 	PYTHONPATH=src pytest tests/ -q
 
-# CI 入口：lint + 测试（+ 可选报告门禁）
-check: lint test
+# 格式一致性检查（只查不改，与 CI 一致）
+format-check:
+	ruff format --check src tests scripts
+
+# CI 入口：lint + format-check + test（+ 可选报告门禁）
+check: lint format-check test
 	@if [ -n "$(REPORT)" ] && [ -f "$(REPORT)" ]; then \
 		echo "=== recheck ==="; \
 		python scripts/recheck.py $(REPORT); \

@@ -99,6 +99,26 @@ class TestCoverage:
         assert len(untested) == 1 and "admin" in untested[0]["value"]
 
 
+class TestReverseLookup:
+    """⑧ 资产反查探索图：从资产回溯测过哪些路径（双图锚点的读出通道）。"""
+
+    def test_nodes_for_asset(self, tmp_path):
+        st = IntelStore(tmp_path / "i.db")
+        aid = st.observe_asset("endpoint", "http://t/admin")
+        st.add_node("intent", "[exploit] 打后台越权", anchor_assets=[aid])
+        st.add_node("finding", "越权成功", anchor_assets=[aid])
+        st.add_node("fact", "无关资产的事实")  # 未挂锚 → 不应出现
+        rows = st.nodes_for_asset("endpoint", "http://T/admin/")  # 归一化等价
+        types = {r["type"] for r in rows}
+        assert types == {"intent", "finding"}
+        assert st.nodes_for_asset_id(aid) == rows
+
+    def test_nodes_for_asset_empty(self, tmp_path):
+        st = IntelStore(tmp_path / "i.db")
+        st.observe_asset("ip", "10.0.0.1")
+        assert st.nodes_for_asset("ip", "10.0.0.1") == []
+
+
 class TestTools:
     def test_tool_flow(self, tmp_path):
         st = IntelStore(tmp_path / "i.db")

@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -48,6 +50,12 @@ def resolve_models(primary: str | None, fallback: str | None) -> tuple[str, str]
 
 def _prod_llm():
     """生产 LLM 入口：SECPT_MODEL_POOL 设置时走多 provider 故障转移链。"""
+    if os.environ.get("SECPT_FAKE_LLM"):
+        # fake 环境（无 key 可测）：与 run_engine 的 worker 分支一致，统一 FakeLLM——
+        # 否则 run_frontier/planner 解析到真实客户端会 401 空烧（solve --mode frontier 冒烟即此）
+        from secpt.core.job.fakellm import FakeLLM
+
+        return FakeLLM(n_steps=1)
     if os.environ.get("SECPT_MODEL_POOL"):
         from secpt.runtime.llm.pool import call_pooled
 
@@ -58,28 +66,41 @@ def _prod_llm():
 
 
 def write_attachments_index(work_dir: Path, artifacts: list[str]) -> None:
-    """把附件索引写进工作区：ws/ATTACHMENTS.md（绝对路径清单）+ 每目录一个 symlink。
+    """把附件落到工作区，保证容器内也能读到（P1 断链修复）。
 
-    bash 的工作目录就是 ws/——有了 `attachments/xxx` 短路径，模型不会再凭感觉拼
-    `src/author_plus/...` 之类的漂移路径（author_plus 真实运行暴露的浪费源）。
+    断链根因：此前只建指向宿主机绝对路径的 symlink，而沙箱容器只挂载工作区，
+    容器内访问 symlink 目标必然失效（run-0939 已见 No such file）。现在把附件
+    （文件/目录）以真实副本落到 ws/attachments/ 下，容器内用相对短路径
+    attachments/xxx 直接可读；ATTACHMENTS.md 仍列绝对路径供宿主侧参考。
     """
     if not artifacts:
         return
     try:
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
-        lines = ["# 附件源码索引（绝对路径为准；同名 symlink 已建在本目录下）", ""]
+        adir = work_dir / "attachments"
+        adir.mkdir(parents=True, exist_ok=True)
+        lines = ["# 附件源码索引（attachments/ 下已有真实副本，直接用相对路径读取）", ""]
         for a in artifacts:
             ap = Path(a)
             if not ap.is_absolute():
                 ap = ap.resolve()
-            lines.append(f"- {ap}")
+            if not ap.exists():
+                lines.append(f"- {ap}（宿主侧缺失，已跳过）")
+                continue
+            dest = adir / ap.name
             if ap.is_dir():
-                link = work_dir / "attachments" / ap.name
-                link.parent.mkdir(exist_ok=True)
-                if not link.exists():
-                    with contextlib.suppress(OSError):
-                        link.symlink_to(ap, target_is_directory=True)
+                # 目录副本（覆盖式重建，防旧副本残留）
+                with contextlib.suppress(OSError):
+                    if dest.exists():
+                        shutil.rmtree(dest, ignore_errors=True)
+                    shutil.copytree(ap, dest)
+            else:
+                with contextlib.suppress(OSError):
+                    if dest.exists():
+                        dest.unlink()
+                    shutil.copy2(ap, dest)
+            lines.append(f"- {ap} → attachments/{ap.name}")
         (work_dir / "ATTACHMENTS.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError as e:
         print(f"[engine] 附件索引写入失败（忽略）: {e}")
@@ -101,11 +122,15 @@ def run_engine(
     llm=None,
     stage=None,
     verbose: bool = False,
-    sandbox: str = "auto",
+    sandbox: str = "none",
+    hook_factory=None,  # 外部包装层工厂：inner_hooks -> hooks（团队模式完成广播让出用）
+    scope_entries: list[str] | None = None,  # G1 目标授权白名单来源（题面入口/意图资产）
 ) -> _engine.RunResult:
     """新建任务跑一次 Engine，全程落盘。profile 决定 tools/terminator/budget/先验。
 
     stage（多阶段编排用）：Stage 对象，覆盖 role/tools/prior/stop_condition。
+    hook_factory：在内部 hooks 链（watchdog/scribe/steer）最外层再包一层，
+      用于注入协作感知（如 per-asset 完成广播让出）；None 表示不包（向后兼容）。
     verbose：引擎步进详情输出。
     """
 
@@ -181,6 +206,15 @@ def run_engine(
         max_steps=prof.budget.steps if max_steps is None else max_steps,
         max_wall_s=prof.budget.wall_s if max_wall_s is None else max_wall_s,
     )
+    # profile 级 bash 工具超时覆盖（pwn 等长交互场景）
+    if getattr(prof, "bash_timeout_s", 0) > 0:
+        cfg.bash_timeout_s = prof.bash_timeout_s
+    if getattr(prof, "stuck_wait_cap", 0) > 0:
+        cfg.stuck_wait_cap = prof.stuck_wait_cap
+    _wait_env = os.environ.get("SECPT_STUCK_WAIT_CAP")
+    if _wait_env:
+        with contextlib.suppress(ValueError):
+            cfg.stuck_wait_cap = max(1, int(_wait_env))
     cfg.bash_whitelist = (
         frozenset(_engine.DEFAULT_BASH_WHITELIST)
         | frozenset(prof.merged_whitelist_extra())
@@ -191,6 +225,15 @@ def run_engine(
     _ctx_env = os.environ.get("SECPT_CONTEXT_WINDOW")
     if _ctx_env:
         cfg.context_window = int(_ctx_env)
+
+    # G1+G5 治理装配：目标授权范围 + per-job JSONL 审计（治理与生命周期事件）
+    from secpt.governance.audit import AuditLogger
+    from secpt.governance.scope import build_scope_validator
+
+    cfg.scope = build_scope_validator(scope_entries)
+    cfg.audit = AuditLogger(
+        str(Path(os.environ.get("SECPT_VAR", "var")) / "audit" / f"{job_id}.jsonl")
+    )
     constraints = list(prof.constraints) or [DEFAULT_CONSTRAINTS]
     stop_cond = stage_stop or prof.terminator.stop_condition
     if stop_cond:
@@ -211,11 +254,16 @@ def run_engine(
 
     # 历史经验注入（learning 闭环；SECPT_EXPERIENCE=0 关闭）
     try:
-        from secpt.learning.retrieve import experience_section
+        from secpt.learning.retrieve import experience_section, search_experiences
 
-        exp_sec = experience_section(objective)
-        if exp_sec:
-            cfg.system_extra += "\n\n" + exp_sec
+        exps = search_experiences(objective, task_type=profile)
+        if exps:
+            cfg.system_extra += "\n\n" + experience_section(objective, task_type=profile)
+            print(
+                f"[learn] 注入 {len(exps)} 条历史经验（objective 检索命中）："
+                f"{'；'.join(e.title[:24] for e in exps[:3])}",
+                file=sys.stderr,
+            )
     except Exception as e:
         print(f"[learn] experience injection failed (ignored): {e}")
 
@@ -227,8 +275,9 @@ def run_engine(
         task_type=profile,
         objective=objective,
         budget=TaskBudget(wall_s=cfg.max_wall_s, steps=cfg.max_steps),
+        entries=list(scope_entries or []),  # G1：scope 白名单来源随快照持久化（resume 一致）
     )
-    cfg.sandbox = sandbox
+    cfg.sandbox = getattr(prof, "sandbox", "") or sandbox
     # profile 指定沙箱镜像（pwn/crypto 等重工具镜像）：运行期注入 env，结束恢复
     _img_env = None
     if getattr(prof, "sandbox_image", ""):
@@ -245,6 +294,7 @@ def run_engine(
         "model_fallback": cfg.model_fallback,
         "stuck_threshold": cfg.stuck_threshold,
         "stuck_increment": cfg.stuck_increment,
+        "stuck_wait_cap": cfg.stuck_wait_cap,
         "context_window": cfg.context_window,
         "budget_cost_cny": cfg.budget_cost_cny,
         "round_max_steps": cfg.round_max_steps,
@@ -270,12 +320,19 @@ def run_engine(
 
     hooks = SteerHook(hooks, job_id=job_id)
 
+    if hook_factory is not None:
+        # 外部包装层（团队模式 per-asset 完成广播让出）：包在最外层，
+        # on_step 返回 steer 消息由 engine 自动注入 user 消息引导收尾
+        hooks = hook_factory(hooks)
+
     # JobRecord
     write_attachments_index(cfg.work_dir, artifacts or [])
 
     rec = JobRecord(job_id=job_id, spec=spec, status="running")
     store.upsert_job(rec)
     sink.status_change("running")
+    with contextlib.suppress(Exception):
+        cfg.audit.log("job.started", profile=profile, objective=(objective or "")[:120])
 
     from secpt.traffic.harness import traffic_scope
 
@@ -296,6 +353,8 @@ def run_engine(
         rec.set_status("failed", error=str(e))
         store.upsert_job(rec)
         sink.error(str(e))
+        with contextlib.suppress(Exception):
+            cfg.audit.log("job.finished", status="error", steps=0, wall_s=0.0)
         raise
 
     rec = store.get_job(job_id) or rec
@@ -307,6 +366,10 @@ def run_engine(
         _apply_terminal_status(rec, result)
     store.upsert_job(rec)
     sink.status_change(rec.status)
+    with contextlib.suppress(Exception):
+        cfg.audit.log(
+            "job.finished", status=result.status, steps=result.steps, wall_s=result.wall_s
+        )
 
     if _img_env is None:
         os.environ.pop("SECPT_SANDBOX_IMAGE", None)

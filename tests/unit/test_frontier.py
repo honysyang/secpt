@@ -158,7 +158,7 @@ class _WorkerLLM:
         answered = getattr(self, "_n", 0)
         self._n = answered + 1
         if self._n % 2 == 0 or "admin" in system:
-            return _answer_resp("PWNED")
+            return _answer_resp("FLAG{pwned}")  # 真实 flag 形态（P0-1 成果语义）
         return _tool_resp(self._n)
 
 
@@ -229,9 +229,16 @@ class TestRunFrontier:
         )
         assert summary["mode"] == "frontier"
         # admin intent priority 9 先执行并拿到 flag → 整体收敛
-        assert summary["flags"] == ["PWNED"]
+        assert summary["flags"] == ["FLAG{pwned}"]  # P0-1：只采信真实 flag 形态
         statuses = {c["intent"]: c["status"] for c in summary["chains"]}
         assert statuses.get("打admin后台") == "done"
+        # P0-2：父 job 事件流已聚合（watch 导出 / 评判的数据源）
+        assert summary.get("sub_jobs")  # 有子任务
+        parent_events = tmp_path / "jobs" / "ht1" / "events.jsonl"
+        assert parent_events.is_file()
+        lines = [json.loads(x) for x in parent_events.read_text().splitlines() if x.strip()]
+        assert all(ev["job_id"] == "ht1" for ev in lines)  # job_id 统一为父 job
+        assert any((ev.get("payload") or {}).get("sub_jobs") for ev in lines)  # 收尾 summary
 
     def test_intent_objective_shape(self, tmp_path):
         fr = Frontier(tmp_path / "f.db")
@@ -240,3 +247,62 @@ class TestRunFrontier:
         assert intent is not None
         obj = build_intent_objective("总目标", intent, fr.recent_results())
         assert "当前意图" in obj and "完成判据" in obj and "总目标" in obj
+
+
+class TestProgressAwareResume:
+    """⑦ 进展感知续步判据：ws 有实质产出（除 api.py 模板）才续预算。"""
+
+    def test_ws_output_detection(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.orchestrator.frontier import _has_ws_output
+
+        assert _has_ws_output("") is False  # 无 job_id
+        assert _has_ws_output("j-none") is False  # 无 job 目录
+        ws = tmp_path / "jobs" / "j1" / "ws"
+        ws.mkdir(parents=True)
+        (ws / "api.py").write_text("print(1)")
+        assert _has_ws_output("j1") is False  # 仅模板 → 不算进展（空转不续）
+        (ws / "exploit.py").write_text("payload")
+        assert _has_ws_output("j1") is True  # 实质产出 → 攻击路径成型，可续
+
+
+class TestIncrementalAggregation:
+    """④ 事件增量聚合：settle 即并入父事件流，重复聚合幂等。"""
+
+    def test_incremental_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.orchestrator.frontier import _aggregate_sub_events
+
+        sub = tmp_path / "jobs" / "base-i1"
+        sub.mkdir(parents=True)
+        (sub / "events.jsonl").write_text(
+            json.dumps({"seq": 1, "type": "round_start", "payload": {"n": 1}}) + "\n",
+            encoding="utf-8",
+        )
+        agg: set[str] = set()
+        chains = [{"intent": "x", "status": "done"}]
+        _aggregate_sub_events("base", ["base-i1"], chains, ["F{}"], aggregated=agg, final=False)
+        parent = tmp_path / "jobs" / "base" / "events.jsonl"
+        n1 = len(parent.read_text().splitlines())
+        assert n1 == 1 and agg == {"base-i1"}
+        # 重复增量（同一子 job 已并入）→ 跳过，不重复写
+        _aggregate_sub_events("base", ["base-i1"], chains, ["F{}"], aggregated=agg, final=False)
+        assert len(parent.read_text().splitlines()) == n1
+        # 收尾（final=True）：无新子 job 时补 summary 事件
+        _aggregate_sub_events("base", ["base-i1"], chains, ["F{}"], aggregated=agg, final=True)
+        lines = parent.read_text().splitlines()
+        assert len(lines) == 2 and json.loads(lines[-1])["payload"]["chains"] == 1
+
+
+class TestGraphAnchor:
+    """⑧ 双图锚点：意图落探索图并挂靠资产 → 资产可反查测过的路径。"""
+
+    def test_intent_recorded_and_reverse_lookup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.intel.store import IntelStore
+
+        fr = Frontier(tmp_path / "f.db")
+        fr.add("打后台越权", role="exploit", asset_scope="http://t/admin")
+        st = IntelStore(tmp_path / "intel.sqlite")
+        rows = st.nodes_for_asset("endpoint", "http://t/admin")
+        assert any(r["type"] == "intent" and "打后台越权" in r["content"] for r in rows)

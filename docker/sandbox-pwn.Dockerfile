@@ -1,16 +1,15 @@
-# secpt 沙箱·二进制/crypto 扩展镜像（pwntools 官方底 + 密码学 Python 库）
-# 构建: make sandbox-pwn-image；profile 的 sandbox_image 字段自动选用
-FROM pwntools/pwntools:latest
+# secpt pwn 专用执行沙箱：基于通用沙箱叠加二进制利用工具链
+# 构建: make sandbox-pwn-image（先构建基础镜像 make sandbox-image）
+# 覆盖 pwn/crypto/QEMU 逃逸场景：pwntools 脚本化交互、ROP/格式化、内核题
+FROM secpt-sandbox
 
-USER root
-# checksec 随 pwntools 自带（/usr/local/bin/checksec）；PEP668 环境需 --break-system-packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        qemu-user \
-    && pip install --no-cache-dir --break-system-packages \
-        pycryptodome sympy gmpy2 z3-solver \
+        patchelf \
+    && pip3 install --break-system-packages --no-cache-dir \
+        pwntools ROPgadget \
     && rm -rf /var/lib/apt/lists/*
+# checksec/cyclic 由 pwntools 提供；qemu 用题目自带二进制（不进镜像）
 
 WORKDIR /work
-RUN chmod 777 /work
-# pwntools 镜像自带 pwntools 用户；以宿主 uid 注入运行（同 web 沙箱语义）
+USER secpt
 CMD ["sleep", "infinity"]

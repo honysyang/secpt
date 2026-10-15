@@ -20,6 +20,11 @@ _PROMPT = """你是渗透测试经验提炼器。根据下面的任务与轨迹�
 只输出 JSON：
 {{"title": "一句话标题", "technique": "技术分类(英文小写下划线)", "indicators": ["特征关键词1", "特征关键词2"], "what_worked": "行之有效的做法（200字内）", "pitfalls": ["无效尝试/坑"], "outcome": "success|fail|partial", "importance": 1-10}}
 
+indicators：题型/入口特征标签，供同类任务启动时检索命中。用目标平台、入口或漏洞类型描述，例如：
+admin bot（机器人代付/敏感操作）、xss exfil（外带通道）、sql injection、command injection、ssrf、
+lfi/rfi（文件读取包含）、反序列化、auth bypass（认证绕过）、越权（idor）、crypto（密码学）、
+binary pwn（二进制利用）、源码审计、内网横向。至少 3 个，越贴合目标越优先。
+
 importance：这条经验对同类任务的价值（10=直接决定成败的打法，1=细枝末节）
 
 【任务】

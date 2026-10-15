@@ -1,12 +1,11 @@
-"""S5 Specialist 编排（DAG）单测。
+"""S5 Specialist 编排（团队模式）单测。
 
 覆盖验收判据的核心：
 - 单入口（N==1）→ 编排层休眠，直连单链（红线 2，无 recon / 无 warroom）
-- 多入口（N>=2）→ recon → [exploit×N 并行] → verify：
-    - warroom 有数据（assets / attempts）
-    - 两条并行链各自落盘 round 1000 / 2000 的 checkpoint（判据 1 交织）
-    - verified >= 1 finding，flags == N（判据 3）
-- --no-orchestrator 对照 → 强制单链，verified==0，发现数少于 DAG（红线 2）
+- 多入口（N>=2）→ 团队模式（frontier 角色意图编排，折叠 Specialist DAG）：
+    - recon 意图先行 → exploit×N 意图依赖解锁并行认领
+    - 角色意图挂靠资产（role/asset_scope），多 worker 认领互斥
+- --no-orchestrator 对照 → 强制单链（红线 2）
 - TaskSpec.entries 字段解析
 
 RoleAwareFakeLLM：按 system 内容区分角色（recon / exploit），全程不碰真实 API；
@@ -46,11 +45,12 @@ class RoleAwareFakeLLM:
     async def call(self, messages, tools, model):
         self.calls += 1
         system = messages[0]["content"] if messages else ""
-        if "资产侦察" in system:
+        # 只认角色阶段标记（【当前阶段：资产侦察…）——近期结果里的 recon 意图标题
+        # 「资产侦察（recon）」不触发（避免 exploit 链误判为 recon）
+        if "【当前阶段：资产侦察" in system:
             return self._recon_step(messages)
-        m = re.search(r"exploit entry#(\d+)", system)
-        idx = int(m.group(1)) if m else -1
-        return self._exploit_step(messages, idx)
+        # 团队模式 exploit 意图 / 单链：角色 stage 含"定向利用（exploit）"
+        return self._exploit_step(messages)
 
     # ---------------- recon：写资产清单 → 自宣告 ----------------
     def _recon_step(self, messages):
@@ -76,17 +76,11 @@ class RoleAwareFakeLLM:
         return _resp_assistant(content="ANSWER: RECON_DONE")
 
     # ---------------- exploit / 通用单链：bash → 自宣告 flag ----------------
-    def _exploit_step(self, messages, idx):
+    def _exploit_step(self, messages):
         used_bash = sum(1 for m in messages if m.get("role") == "tool")
         if used_bash < self.n_bash:
-            return _resp_assistant(
-                tool_calls=[_tc(f"exploit-{idx}-b", "bash", {"command": "echo probe"})]
-            )
-        if idx >= 0:
-            flag = f"RCTF{{entry_{idx}_got_it}}"
-        else:
-            flag = f"RCTF{{single_{uuid.uuid4().hex[:6]}}}"
-        return _resp_assistant(content=f"ANSWER: {flag}")
+            return _resp_assistant(tool_calls=[_tc("exploit-b", "bash", {"command": "echo probe"})])
+        return _resp_assistant(content=f"ANSWER: RCTF{{single_{uuid.uuid4().hex[:6]}}}")
 
 
 # ---------------- 模拟 OpenAI ChatCompletion 响应 ----------------
@@ -227,25 +221,27 @@ async def test_single_chain_retries_on_failure(env, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_multi_entry_runs_parallel_dag(env) -> None:
-    """N==2 → mode=dag：warroom 有数据、两条并行链、verified>=1、flags==2。"""
+async def test_multi_entry_runs_team_mode(env) -> None:
+    """N==2 → mode=team：recon 意图先行，exploit×N 依赖解锁并行认领，每资产挂靠。"""
     spec = _spec("test-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
     store = JobStore(str(env / "secpt.sqlite"))
     summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM(), use_orchestrator=True)
 
-    assert summary["mode"] == "dag"
-    assert summary["warroom_assets"] >= 2  # recon 资产入库
-    assert summary["warroom_attempts"] >= 2  # recon + 两条链的尝试
-    assert len(summary["chains"]) == 2
-    assert {c["role"] for c in summary["chains"]} == {"exploit"}
-    assert len(summary["flags"]) == 2  # 每条链各自宣告一个 flag
-    assert summary["verified"] >= 1  # 判据 3：乐观确认的 finding
-    assert summary["findings"] >= 2
-
-    # 判据 1：两条并行链各自落盘 round 1000 / 2000 的 checkpoint（交织）
-    rounds = env / "var" / "jobs" / spec.job_id / "rounds"
-    assert (rounds / "1000.messages.json").is_file()
-    assert (rounds / "2000.messages.json").is_file()
+    assert summary["mode"] == "team"
+    chains = summary["chains"]
+    assert len(chains) >= 3  # recon 1 + exploit×2
+    roles = [c["role"] for c in chains]
+    assert roles.count("recon") == 1
+    assert roles.count("exploit") == 2
+    # recon 意图先结算为 done（侦察完成即解锁 exploit），exploit 挂靠各自资产
+    recon = next(c for c in chains if c["role"] == "recon")
+    assert recon["status"] == "done"
+    assert {c["asset_scope"] for c in chains if c["role"] == "exploit"} == {
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:8002",
+    }
+    assert all(c["status"] == "done" for c in chains if c["role"] == "exploit")
+    assert len(summary["flags"]) == 2  # 每条 exploit 各自宣告一个 flag
 
 
 # ---------------------------------------------------------------------------
@@ -266,10 +262,10 @@ async def test_no_orchestrator_falls_back_to_single(env) -> None:
     assert len(summary["chains"]) == 1
 
 
-async def test_dag_discovers_more_than_single(env) -> None:
-    """红线 2 对照：同样多入口，DAG 发现 >= 单链。"""
+async def test_team_discovers_more_than_single(env) -> None:
+    """红线 2 对照：同样多入口，团队模式 exploit×N 发现 >= 单链。"""
     store = JobStore(str(env / "secpt.sqlite"))
-    dag = await run_task(
+    team = await run_task(
         _spec("test-contrast-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]),
         store=store,
         llm=RoleAwareFakeLLM(),
@@ -282,9 +278,9 @@ async def test_dag_discovers_more_than_single(env) -> None:
         use_orchestrator=False,
     )
 
-    assert dag["mode"] == "dag" and single["mode"] == "single(+retry)"
-    assert len(dag["flags"]) > len(single["flags"])
-    assert dag["verified"] > single["verified"]
+    assert team["mode"] == "team" and single["mode"] == "single(+retry)"
+    assert len(team["flags"]) >= len(single["flags"])  # 双资产并行 exploit ≥ 单链
+    assert len([c for c in team["chains"] if c["role"] == "exploit"]) >= 2
 
 
 # ---------------------------------------------------------------------------

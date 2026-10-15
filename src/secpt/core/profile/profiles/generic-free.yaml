@@ -1,0 +1,16 @@
+name: generic-free
+sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
+role: 通用任务执行者（不预设渗透方向：按任务描述自由发挥，支持各类任务）
+tools: [bash, read_file, list_dir, write_file]
+prior: generic.md
+terminator:
+  kind: budget
+  stop_condition: >
+    完成目标后，以 ANSWER: <结论摘要> 输出结论并结束；没有明确结果也要
+    给出分析结论收尾，不要无意义空转。
+budget:
+  steps: 100
+  wall_s: 1200
+constraints:
+  - 只针对任务描述明确提到的目标，不要扫描无关资产
+note: 自由任务入口（对齐 harness 的多任务通用支持）；默认白名单 + 通用先验，-p generic-free 显式启用

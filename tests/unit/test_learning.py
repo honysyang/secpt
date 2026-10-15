@@ -155,3 +155,37 @@ class TestRetrieve:
     def test_no_match_empty(self, tmp_path):
         jr = self._seed(tmp_path)
         assert experience_section("完全无关的内容 xyz", journal=jr) == ""
+
+    def test_short_indicator_no_substring_noise(self, tmp_path):
+        """⑥ 2 字符指标不得以子串命中英文单词（'SP' 曾误中 resp/response）。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.append(
+            LearnedExperience(title="SAML SSO 越权", technique="saml_sso", indicators=["SP", "IdP"])
+        )
+        # benchmark 模板里满是 resp/response → 旧实现对 "SP" 子串命中而误注入
+        obj = "resp = urllib.request.urlopen(req)  response_body = resp.read()"
+        assert search_experiences(obj, journal=jr) == []
+
+    def test_task_type_gate_weak_match(self, tmp_path):
+        """⑥ 跨任务类型仅采信强信号：仅指标命中（弱）不注入。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.append(
+            LearnedExperience(
+                title="SAML XSW 绕过签名",
+                technique="saml_xsw",
+                indicators=["saml"],
+                task_type="ctf",
+            )
+        )
+        # benchmark 任务里出现 "saml"（弱信号）→ 跨域不注入
+        assert search_experiences("目标使用 saml 登录", journal=jr, task_type="benchmark") == []
+        # 同任务类型（ctf）→ 正常注入
+        hits = search_experiences("目标使用 saml 登录", journal=jr, task_type="ctf")
+        assert hits and hits[0].technique == "saml_xsw"
+
+    def test_task_type_gate_strong_crosses(self, tmp_path):
+        """⑥ 跨任务类型但强信号（技术名命中）仍可注入。"""
+        jr = ExperienceJournal(tmp_path / "exp.jsonl")
+        jr.append(LearnedExperience(title="某题", technique="saml_xsw", task_type="ctf"))
+        hits = search_experiences("尝试 saml_xsw 手法", journal=jr, task_type="benchmark")
+        assert hits and hits[0].technique == "saml_xsw"

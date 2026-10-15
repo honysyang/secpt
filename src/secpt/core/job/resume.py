@@ -77,10 +77,11 @@ def make_run_config(job_id: str, spec: TaskSpec, run_config: dict) -> RunConfig:
         model_fallback=run_config.get("model_fallback", "deepseek-reasoner"),
         stuck_threshold=run_config.get("stuck_threshold", 6),
         stuck_increment=run_config.get("stuck_increment", 2),
+        stuck_wait_cap=run_config.get("stuck_wait_cap", 12),
         context_window=run_config.get("context_window", 64_000),
         budget_cost_cny=run_config.get("budget_cost_cny", spec.budget.cost_cny),
         round_max_steps=run_config.get("round_max_steps", 60),
         round_max_wall_s=run_config.get("round_max_wall_s", 1500),
-        sandbox=run_config.get("sandbox", "auto"),
+        sandbox=run_config.get("sandbox", "none"),
     )
     return cfg

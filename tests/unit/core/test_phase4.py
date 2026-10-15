@@ -1,4 +1,8 @@
-"""Phase 4 治理测试：G1 Scope / G2 限速 / G3 高危确认 / G4 分级 / G5 审计持久化。"""
+"""Phase 4 治理测试：G1 Scope / G2 限速 / G5 审计持久化。
+
+注：G3/G4（RiskManager 高危确认）用例已随 risk.py 删除——该模块为死代码，
+能力与 bash 白名单 + intercept 规则引擎重复。
+"""
 
 from __future__ import annotations
 
@@ -6,10 +10,7 @@ import pytest
 
 from secpt.governance import (
     AuditLogger,
-    ConfirmationRequired,
     RateLimiter,
-    RiskLevel,
-    RiskManager,
     ScopeError,
     ScopeValidator,
 )
@@ -60,38 +61,6 @@ async def test_rate_limiter_acquire() -> None:
     await rl.acquire()
     elapsed = time.monotonic() - start
     assert elapsed > 0.1  # 有等待
-
-
-# ---- G3 + G4: Risk ----
-
-
-def test_risk_levels() -> None:
-    rm = RiskManager()
-    assert rm.get_risk("echo") == RiskLevel.READONLY
-    assert rm.get_risk("nmap") == RiskLevel.MEDIUM
-    assert rm.get_risk("nikto") == RiskLevel.HIGH
-
-
-def test_needs_confirmation() -> None:
-    rm = RiskManager()
-    assert not rm.needs_confirmation("echo")
-    assert rm.needs_confirmation("nikto")
-
-
-def test_confirm_required_raises() -> None:
-    rm = RiskManager()
-    with pytest.raises(ConfirmationRequired):
-        rm.confirm("nikto", "-h 127.0.0.1", approved=False)
-
-
-def test_confirm_approved() -> None:
-    rm = RiskManager()
-    rm.confirm("nikto", "-h 127.0.0.1", approved=True)  # 不应抛
-
-
-def test_low_risk_no_confirmation() -> None:
-    rm = RiskManager()
-    rm.confirm("echo", "hello", approved=False)  # 不应抛
 
 
 # ---- G5: Audit ----

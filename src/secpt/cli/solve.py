@@ -81,7 +81,10 @@ def _download_attachment_urls(challenge_dir: Path, objective: str) -> int:
     dest_dir.mkdir(exist_ok=True)
     n = 0
     for url in dict.fromkeys(urls):  # 去重保序
-        name = url.split("/")[-1].split("?")[0] or f"attachment-{n}.zip"
+        # 落盘名净化：剥 "?attname=" 查询串 + 替换 Windows 禁止字形（跨平台安全）
+        from secpt.challenge.attachments import sanitize_filename
+
+        name = sanitize_filename(url.split("/")[-1]) or f"attachment-{n}.zip"
         dest = dest_dir / name
         if dest.is_file() and dest.stat().st_size > 0:
             n += 1
@@ -266,6 +269,39 @@ def solve(
         profile = asyncio.run(route_objective(objective))
         print(f"[solve] profile 自动路由 → {profile}")
 
+    # 目标拆解层（阶段一）：客户自然语言 → 结构化 GoalSpec，objective 替换为结构化文本。
+    # benchmark 跑分是程序化协议（平台 API 流程），不拆解保持原文；其余 profile 理解层介入。
+    # SECPT_GOALS=0 跳过拆解直接使用原文（与 SECPT_EXPERIENCE 等开关风格一致）
+    from secpt.core.orchestrator.goals import (
+        decompose_objective,
+        filter_goal_assets,
+        is_rendered,
+        render_goal_system,
+        seed_goal_assets,
+    )
+
+    goals_on = os.environ.get("SECPT_GOALS", "1") != "0" and profile != "benchmark"
+    print(
+        f"[solve] 目标拆解层：{'启用' if goals_on else '关闭'}（SECPT_GOALS={os.environ.get('SECPT_GOALS', '1')}）"
+    )
+    if goals_on and not is_rendered(objective):
+        goal = asyncio.run(decompose_objective(objective, llm=None, model=model))
+        # 输入可信边界：拆解层产出的 asset_scope 逐项过白名单（与 bash scope 同源 =
+        # entries + SECPT_SCOPE_ALLOW），防污染题面经注入产虚假资产入图谱。
+        # entries 与 SECPT_SCOPE_ALLOW 双空时整段跳过校验（单题无入口场景不误伤）
+        _env_allow = os.environ.get("SECPT_SCOPE_ALLOW", "")
+        _allow_src = [e for e in entries if e and e.strip()] + [
+            a for a in _env_allow.split(",") if a.strip()
+        ]
+        goal.asset_scope = filter_goal_assets(goal.asset_scope, _allow_src)
+        seeded = seed_goal_assets(goal)
+        objective = render_goal_system(goal)
+        print(
+            f"[goals] 目标拆解：asset_scope={len(goal.asset_scope)} "
+            f"constraints={len(goal.constraints)} attack_steps={len(goal.attack_steps)} "
+            f"种子资产 {seeded} 个"
+        )
+
     job_id = uuid.uuid4().hex[:8]
     spec = TaskSpec(
         job_id=job_id,
@@ -311,6 +347,22 @@ def solve(
             return await run_stages(
                 spec, prof, store=store, model_primary=model, model_fallback=fallback
             )
+        if run_mode == "frontier":
+            # 团队模式：frontier 角色意图编排（recon→exploit×N 并行→verify→report），
+            # 多 worker 按角色认领互斥；entries 作为资产兜底（无 goal 拆解资产时用入口）
+            from secpt.core.orchestrator.frontier import run_frontier
+
+            summary = await run_frontier(
+                objective,
+                profile=profile,
+                base_job_id=job_id,
+                llm=None,
+                model=model,
+                role_plan=True,
+                default_assets=list(entries),
+            )
+            summary["mode"] = "team"
+            return summary
         return await _dag.run_task(
             spec, store=store, use_orchestrator=False, model_primary=model, model_fallback=fallback
         )
@@ -350,7 +402,7 @@ def solve(
     flags = summary.get("flags") or []
     flag = flags[0] if flags else None
     print(
-        f"\n[solve] 运行结束：mode={run_mode} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
+        f"\n[solve] 运行结束：mode={summary.get('mode', run_mode)} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
     )
 
     # 失败自动升级：single 无成果 → frontier 意图驱动继续（懒升级阶梯）

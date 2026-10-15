@@ -1,9 +1,12 @@
 name: pwn
+sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 二进制利用专家：pwntools 脚本化交互，栈/堆/格式化字符串/内核入门
 tools: [bash, read_file, list_dir, write_file, report_finding, intel]
-bash_whitelist_extra: [gdb, checksec, objdump, readelf, ROPgadget, cyclic, patchelf, nc]
+bash_whitelist_extra: [gdb, checksec, objdump, readelf, ROPgadget, cyclic, patchelf, nc, sleep, ps, date, timeout, which, sh, curl, unzip, zipinfo]
 prior: pwn.md
 sandbox_image: secpt-sandbox-pwn        # pwntools+qemu+checksec（make sandbox-pwn-image 构建）
+bash_timeout_s: 300                      # QEMU 启动 25-40s + 交互：60s 默认会被斩，放宽到 300s
+stuck_wait_cap: 20                       # pwn 合法重复交互（等待/菜单循环）上限放宽到 20 步
 budget:
   steps: 0          # 不限：pwn/crypto/QEMU逃逸是长程单一任务，步数止损会拦腰斩断
   wall_s: 7200

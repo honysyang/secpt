@@ -156,12 +156,22 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         max_rps=max_parallel_rps,
     )
 
+    # G1+G5 治理装配：目标授权范围（题面入口 + SECPT_SCOPE_ALLOW）+ per-job JSONL 审计
+    from secpt.governance.audit import AuditLogger
+    from secpt.governance.scope import build_scope_validator
+
+    cfg.scope = build_scope_validator(list(getattr(spec, "entries", None) or []))
+    audit = AuditLogger(str(jobs_dir().parent / "audit" / f"{job_id}.jsonl"))
+    cfg.audit = audit
+
     # 事件流 + 状态
     sink = EventSink(job_id, jobs_dir(), store=store)
     rec = store.get_job(job_id) or JobRecord(job_id=job_id, spec=spec, status="running")
     rec.set_status("running")
     store.upsert_job(rec)
     sink.status_change("running", round_=n)
+    with contextlib.suppress(Exception):
+        audit.log("job.started", profile=spec.task_type, objective=(spec.objective or "")[:120])
 
     # 心跳线程
     hb = threading.Thread(target=_heartbeat, args=(store, job_id, HEARTBEAT_S), daemon=True)
@@ -225,10 +235,14 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         if _stop.is_set():
             rec.set_status("cancelled")
             store.upsert_job(rec)
+            with contextlib.suppress(Exception):
+                audit.log("job.finished", status="cancelled", steps=0, wall_s=0.0)
             return 130
         rec.set_status("failed", error=str(e))
         store.upsert_job(rec)
         sink.error(str(e))
+        with contextlib.suppress(Exception):
+            audit.log("job.finished", status="failed", steps=0, wall_s=0.0)
         return 3
     finally:
         _stop.set()
@@ -255,6 +269,8 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
         exit_code = 1
     store.upsert_job(rec)
     sink.status_change(rec.status)
+    with contextlib.suppress(Exception):
+        audit.log("job.finished", status=rec.status, steps=result.steps, wall_s=result.wall_s)
 
     print(f"[worker] job={job_id} status={rec.status} flag={result.flag or ''}")
     return exit_code

@@ -59,8 +59,11 @@ class Profile(BaseModel):
     stages: list[Stage] = Field(default_factory=list)  # 非空 → 多阶段编排
     traffic: bool = False  # true → 任务级 MITM 流量录制（B3）
     sandbox_image: str = ""  # 非空 → 本 profile 的沙箱镜像（如 secpt-sandbox-pwn）
+    bash_timeout_s: int = 0  # 非 0 → 覆盖引擎 bash 工具超时（如 pwn 的 QEMU 长交互）
+    stuck_wait_cap: int = 0  # 非 0 → 覆盖卡死检测 waiting 上限（pwn 长时交互调大）
     constraints: list[str] = Field(default_factory=list)
     note: str = ""
+    sandbox: str = ""  # 非空 → 覆盖全局 sandbox 默认（none）；需容器时写 docker/auto
 
     @property
     def prior_path(self) -> Path:

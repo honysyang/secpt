@@ -118,10 +118,18 @@ class TestLegitCommandsWork:
         assert not out.startswith("Error:"), out
         assert "nexturl = fix(2)" in out
 
-    def test_unquoted_glob_rejected(self, tools):
-        # glob * 未引用：argv 不展开，拒绝并引导写脚本
+    def test_unquoted_glob_passes_literal(self, tools):
+        # P1 低摩擦：未引用 glob * 在 argv 直传下是字面量（无注入面），放行按字面
+        # 传参——ls 因找不到字面名 *.py 自行报错，不再整条硬拦截
         out = _run(tools["bash"]({"command": "ls *.py"}))
-        assert out.startswith("Error:")
+        assert not out.startswith("Error:"), out
+        assert "*.py" in out
+
+    def test_bare_dollar_passes_literal(self, tools):
+        # 裸 $VAR 也是字面量（argv 直传不展开），不产生 shell 副作用
+        out = _run(tools["bash"]({"command": "echo $NOPE"}))
+        assert not out.startswith("Error:"), out
+        assert "$NOPE" in out
 
     def test_binary_analysis_tools_available(self, tools):
         """二进制/取证工具进默认白名单：objdump 等可直接调用。"""

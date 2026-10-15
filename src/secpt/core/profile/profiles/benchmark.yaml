@@ -1,6 +1,12 @@
 name: benchmark
+sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 评测跑分员：严格按平台 API 流程循环拿分，一题一清、逐题推进
 tools: [bash, read_file, list_dir, write_file, report_finding, intel]
+# P0-4：补常用交互命令——timeout/sleep 限时等待、which 探测、chmod 脚本执行
+# P1-3：补 env/printenv 探测环境（曾被白名单拦截烧步）
+bash_whitelist_extra: [timeout, sleep, which, chmod, env, printenv]
+# P1-3：跑分含 pwn/RE 题，二进制解析/ropper 定向搜索在 60s 下易超时 → 放宽到 120s
+bash_timeout_s: 120
 prior: benchmark.md
 terminator:
   kind: budget

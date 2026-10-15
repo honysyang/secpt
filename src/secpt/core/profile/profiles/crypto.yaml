@@ -1,4 +1,5 @@
 name: crypto
+sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 密码学解题专家：识别算法→找实现弱点→脚本化验证，拒绝无推导爆破
 tools: [bash, read_file, list_dir, write_file, report_finding, intel]
 prior: crypto.md

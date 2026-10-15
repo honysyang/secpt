@@ -46,6 +46,19 @@ async def run_task(
     needs_orchestrator(spec, use_dag=use_orchestrator)。
     返回汇总 dict（兼容两分支字段），chains 含 attempt-1/attempt-2。
     """
+    # 目标拆解层（阶段一）：spec.objective 未经结构化且非 benchmark 时先拆解再分流
+    from secpt.core.orchestrator.goals import (
+        decompose_objective,
+        is_rendered,
+        render_goal_system,
+        seed_goal_assets,
+    )
+
+    if spec.task_type != "benchmark" and not is_rendered(spec.objective):
+        goal = await decompose_objective(spec.objective, llm=llm, model=model_primary)
+        seed_goal_assets(goal)
+        spec.objective = render_goal_system(goal)
+
     use_dag = needs_orchestrator(spec, use_dag=use_orchestrator)
     if not use_dag:
         return await run_single_chain(
@@ -57,11 +70,30 @@ async def run_task(
             model_fallback=model_fallback,
         )
 
-    from .specialist import SpecialistOrchestrator
+    # P2 执行策略路由（跑关+渗透统一编排）：benchmark → 并行跑分器；
+    # 多入口渗透 → frontier 角色意图编排（recon→exploit×N 并行→verify→report）
+    from .policy import route_policy
 
-    orch = SpecialistOrchestrator(spec, store=store, llm=llm, db_path=db_path)
-    summary = await orch.run()
-    summary["mode"] = "dag"
+    policy = route_policy(spec.task_type, entries_of(spec))
+    if policy == "benchmark":
+        from .benchmark import run_benchmark
+
+        summary = await run_benchmark(spec, llm=llm, model=model_primary)
+        return summary
+
+    from .frontier import run_frontier
+
+    summary = await run_frontier(
+        spec.objective,
+        profile=spec.task_type,
+        base_job_id=spec.job_id,
+        llm=llm,
+        planner_llm=llm,  # 团队模式规划与执行同源（测试/低成本路径不碰真实 API）
+        model=model_primary,
+        role_plan=True,
+        default_assets=list(entries_of(spec)),
+    )
+    summary["mode"] = "team"
     return summary
 
 

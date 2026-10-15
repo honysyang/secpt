@@ -238,6 +238,9 @@ class SpecialistOrchestrator:
             flag_regex=prof.terminator.flag_regex,
             round_offset=round_offset,
         )
+        # profile 级 bash 工具超时覆盖（DAG 各 agent 与单链一致）
+        if getattr(prof, "bash_timeout_s", 0) > 0:
+            cfg.bash_timeout_s = prof.bash_timeout_s
         cfg.bash_whitelist = frozenset(_engine.DEFAULT_BASH_WHITELIST) | frozenset(
             prof.merged_whitelist_extra()
         )

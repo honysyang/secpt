@@ -92,11 +92,12 @@ class TestExecConstruction:
 
 
 class TestEngineIntegration:
-    def test_runcfg_default_auto(self):
+    def test_runcfg_default_none(self):
+        """阶段一：全局宿主直跑——RunConfig 默认 sandbox=none（不再自动进容器）。"""
         from secpt.runtime.engine import RunConfig
 
         cfg = RunConfig(job_id="j", objective="o", system_extra="x", workspace="/tmp")
-        assert cfg.sandbox == "auto"
+        assert cfg.sandbox == "none"
 
     def test_bash_sandbox_unavailable_falls_back(self, tmp_path, monkeypatch):
         """auto + docker 不可用 → 静默回退宿主执行（不炸任务）。"""

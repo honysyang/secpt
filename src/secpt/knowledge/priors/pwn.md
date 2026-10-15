@@ -28,3 +28,21 @@
 - 脚本名带阶段后缀（exploit_leak.py / exploit_final.py），别覆盖能跑的版本
 - 泄露型漏洞先稳 leak（跑 5 次全成）再搭利用链，否则 PIE/ASLR 会教你做人
 - glibc 版本不匹配是远程打不通的首因——附件给 libc.so 就用它（pwn 脚本地加载）
+
+## 环境与执行经验（实战教训）
+
+- **bash 工具超时默认 60s**：QEMU 启动 ~21-25s（负载高时 233s）+ 交互极易超时被斩。
+  跑远程长流程必须**后台分离 + 日志轮询**：write_file 写启动器（`subprocess.Popen(..., start_new_session=True)`，
+  stdout 重定向到 log），再 `python3 -c "import time;time.sleep(50)"` 等待后 `cat log` 轮询；
+  不要用超时的前台单条命令。
+- **等待标记会匹配到回显的命令行本身**（`echo E_ID` 会被串口回显，`readuntil(E_ID)` 提前返回）：
+  waitfor/recvuntil 用**唯一、且不出现在命令文本里的标记**，或按正则累积读到完整行（4 个 leak 值一次拿全）。
+- **多行 for/if 逐行发送会被 PS2 续行提示打断**：串口交互要逐行同步（每条命令等到提示符再发下一条），
+  避免一次性 send 整段 shell 片段导致丢字节/行序错乱。
+- **容器工具缺失是常态**：curl/unzip/zipinfo 可能没装、`which`/`cd` 不在白名单——
+  直接用 `python3 -c` / zipfile 模块代偿，别反复重试同一条命令浪费步数。
+- **远程题单实例竞争**：上一连接未释放会 SSL handshake 失败——先 sleep 退避重试；
+  清理挂起客户端用 /proc 读 cmdline 手杀（killrecon 模式），别依赖 ps。
+- **boot 时长漂移（21s→233s）**：题目有 300s 时限时，boot 慢会耗尽配额——
+  先做带超时的连通性探测（socket+TLS+读内核日志判引导进度），再决定是否完整跑 exploit；
+  高负载期减少多轮探测，改为单次干净运行。

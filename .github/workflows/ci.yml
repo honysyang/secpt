@@ -7,7 +7,12 @@ on:
 
 jobs:
   lint-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest：暴露平台差异（文件名禁字形、os.getuid、路径分隔符等）
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +31,8 @@ jobs:
         run: ruff format --check src tests scripts
 
       - name: Tests（FakeLLM 无 key 全链路）
+        # shell: bash：统一 PYTHONPATH=src 语法（Windows 默认 pwsh 不兼容 VAR=x cmd）
+        shell: bash
         run: PYTHONPATH=src pytest tests/ -q
         env:
           SECPT_FAKE_LLM: "1"

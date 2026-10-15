@@ -1,4 +1,5 @@
 name: codeaudit
+sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 代码审计员
 tools: [bash, read_file, list_dir, write_file, semgrep]
 bash_whitelist_extra: [semgrep, grep]

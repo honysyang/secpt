@@ -174,6 +174,34 @@ class IntelStore:
             row = c.execute("SELECT id FROM assets WHERE dedup_key=?", (key,)).fetchone()
         return int(row["id"]) if row else None
 
+    def nodes_for_asset(self, atype: str, value: str, *, limit: int = 50) -> list[dict]:
+        """⑧ 资产反查探索图：该资产挂靠的全部节点（意图/事实/漏洞/线索）。
+
+        ARTEX 双图的读出通道——"某方向测过哪些资产"（neighbors）与"某资产被哪些
+        路径测过"（本方法）互为反查，标题里的 asset_scope 经 anchors 关联两图。
+        """
+        key = normalize_asset(atype, value)
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT n.* FROM anchors a
+                   JOIN nodes n ON n.id = a.node_id
+                   JOIN assets s ON s.id = a.asset_id
+                   WHERE s.dedup_key = ?
+                   ORDER BY n.ts DESC LIMIT ?""",
+                (key, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def nodes_for_asset_id(self, asset_id: int, *, limit: int = 50) -> list[dict]:
+        """按资产 id 反查节点（供已有 asset_id 的场景，免二次归一化）。"""
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT n.* FROM anchors a JOIN nodes n ON n.id = a.node_id
+                   WHERE a.asset_id = ? ORDER BY n.ts DESC LIMIT ?""",
+                (int(asset_id), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def assets(self, *, atype: str | None = None, limit: int = 500) -> list[dict]:
         sql, args = "SELECT * FROM assets WHERE 1=1", []
         if atype:
