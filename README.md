@@ -2,7 +2,7 @@
 
 自主渗透/复杂任务 Agent harness。Python 3.12 + asyncio + pydantic-settings + structlog + typer。
 
-> 当前架构以 `docs/架构现状.md` 为准（`secpt-开发文档.md` v0.3 为历史文档）。
+> 作者：**一片丹心** ｜ 许可证：[Apache-2.0](LICENSE) ｜ 架构以 `docs/架构现状.md` 为准
 
 ## 快速开始（推荐主入口 solve）
 
@@ -16,11 +16,16 @@ secpt solve <dir> -p multistage               # 多阶段：recon → getshell �
 ## 核心能力
 
 - **一键解题（solve）**：入口 URL 抽取、附件自动解压、先验关键词匹配（`knowledge/prior_map.yaml` 可扩展）、跑完自动评判 + 经验沉淀
+- **多智能体团队模式（frontier）**：意图队列 + 四角色分工（侦察 / 利用×N 并行 / 验证 / 报告），事件流协作 + L2 warroom 共享作战记忆，跨进程账本互斥防重复解题
+- **非阻塞 compaction**：主循环仅同步删组+插占位（微秒级），LLM 摘要交后台 worker（`secpt worker summarize` 补偿入口），`compaction_requested/completed` 事件全链路可观测
+- **断点续跑（checkpoint resume）**：重启后从 `events.jsonl` 恢复轮次/预算/检测器状态，预算累计无缝衔接；仅顶层任务路径开启，编排层防串扰
+- **多链并发安全**：EventSink 线程锁 + flock 文件锁 + 跨进程 seq 单调；工具调用按 `call_id` 精确配对（不再依赖 FIFO）；warroom 写入 busy 指数退避重试
+- **可观测性**：structlog JSON 日志（`SECPT_LOG_JSON=1`，按 job_id/agent 检索）+ 零依赖 Prometheus 指标（`secpt worker metrics --port 9100`）+ 18 类事件流 `events.jsonl`
 - **越用越好用（learning 闭环）**：每次运行 LLM 蒸馏经验入 `var/knowledge/experiences.jsonl`，下次同类任务自动注入 top-3 历史经验（`SECPT_EXPERIENCE=0` 关闭）
 - **工具插件（tools/plugins/）**：YAML 声明式集成外部工具/其他智能体能力（如 getshell），模板参数 shlex.quote 防注入；profile `tools:` 声明即装配
 - **多阶段渗透（profile stages）**：recon → getshell → privesc 串行编排，共享 workspace，阶段交付物自动交接
 - **AI 评判（不依赖 flag 正则）**：`secpt judge <job_id> [--ground-truth FILE]`——反作弊 → Jev 门控 → LLM judge 终裁
-- **7×24 长任务**：`--wall 0` 不限墙钟，compaction(0.72 批量)/rollover 上下文自愈，协作式取消
+- **7×24 长任务**：`--wall 0` 不限墙钟，compaction/rollover 上下文自愈，卡死切换器（六判据）自动纠偏，协作式取消
 - **多任务**：`secpt submit -t spec.yaml -j 4` / `secpt forever`（进程池 + 优先级队列）
 - **多模型**：`--model openai/gpt-4o` 或 `SECPT_MODEL_BASE_<PREFIX>` 接入任意 OpenAI 兼容端点
 
@@ -75,18 +80,20 @@ make recheck REPORT=<report.json>      # 可选：复跑判据门禁
 ```
 secpt/
 ├── AGENTS.md                  # 项目约定（构建/测试/风格/红线）——修改前必读
+├── LICENSE                    # Apache-2.0
 ├── Makefile                   # make check = lint + format-check + test
 ├── pyproject.toml             # ruff(line-length 100, py312) / pytest / coverage
 ├── src/secpt/
-│   ├── cli/                   # typer 薄注册层：solve(★主入口) / watch / cmd_run / cmd_findings / cmd_jobs
-│   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由+池) / sandbox(Docker沙箱)
+│   ├── cli/                   # typer 薄注册层：app / solve(★主入口) / watch / cmd_jobs / cmd_ops(worker)
+│   ├── runtime/               # engine.py(★主循环) / llm client(多模型路由+池) / sandbox(Docker沙箱) / logsetup / metrics
 │   ├── core/
-│   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event/manager/worker
-│   │   ├── orchestrator/      # dag 分流(默认单链) / stages 多阶段 / frontier 意图调度
+│   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event(并发安全)/resume/summarize_worker/worker
+│   │   ├── orchestrator/      # dag 分流(默认单链) / specialist 团队编排(四角色) / frontier 意图调度
 │   │   ├── profile/           # profile YAML loader + system_extra 渲染
-│   │   ├── context/           # S3 四件套：compaction / rollover / budget / summarize
-│   │   ├── memory/            # warroom 共享作战记忆（作业内暂存）
+│   │   ├── context/           # S3 四件套：compaction(非阻塞) / rollover / budget / summarize
+│   │   ├── memory/            # warroom 共享作战记忆（busy 重试）
 │   │   └── watchdog.py        # 空转监控
+│   ├── governance/            # scope / ratelimit / intercept / audit（审计 JSONL）
 │   ├── evaluation/            # AI 评判层（anticheat→Jev→judge→verdict）
 │   ├── findings/              # 漏洞发现全生命周期（验证纪律/CWE/CVE 去重）
 │   ├── intel/                 # 图记忆（资产图+血缘图+覆盖度+冷压缩）
@@ -94,12 +101,18 @@ secpt/
 │   ├── report/                # CWE 映射 + 报告交付（md/md-zip 证据包）
 │   ├── learning/              # 经验闭环（distill / store / retrieve）
 │   ├── tools/                 # plugin_loader（plugins/ 外部能力集成）
-│   ├── governance/            # scope / ratelimit / risk / audit
 │   ├── challenge/             # 挑战加载（题面/入口/附件，solve 的原材料）
 │   └── knowledge/             # priors/ 先验打法 + prior_map.yaml 路由表
-├── tests/unit/**              # 255 个单测（FakeLLM 为地基，无 key 全链路可测）
+├── tests/unit/**              # 544 个单测（FakeLLM 为地基，无 key 全链路可测）
 ├── tools/plugins/             # 用户插件（YAML 声明式 / Python）
 ├── docs/                      # 架构现状(权威) + 索引 + 实验报告
+├── logs/                      # 运行日志归档（gitignored）
 ├── var/                       # 运行时数据（jobs/knowledge/audit…，gitignored）
 └── archive/                   # 历史资料（v0.3 文档/旧格式数据），仅供考古
 ```
+
+## 许可证
+
+本项目基于 [Apache License 2.0](LICENSE) 开源。
+
+Copyright (c) 2025-2026 **一片丹心**

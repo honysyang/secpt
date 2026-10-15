@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "secpt — security penetration testing agent (Python 3.12, self-hosted ReAct on top of litellm/DeepSeek)"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
-authors = [{ name = "secpt" }]
+license = { text = "Apache-2.0" }
+authors = [{ name = "一片丹心" }]
 keywords = ["security", "pentest", "react", "agent", "litellm", "deepseek"]
 
 dependencies = [
