@@ -60,7 +60,7 @@ packages = ["src/secpt"]
 minversion = "8.0"
 addopts = "-ra -q --strict-markers --strict-config"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 asyncio_mode = "auto"
 markers = [
     "integration: 涉及真实网络/数据库的慢用例",

@@ -1,4 +1,4 @@
-.PHONY: install test lint format check recheck sandbox-image
+.PHONY: install test lint format check recheck archive sandbox-image
 
 # 安装依赖
 install:
@@ -32,6 +32,13 @@ check: lint format-check test
 # 用法: make recheck REPORT=<report.json 路径>
 recheck:
 	python scripts/recheck.py $(REPORT)
+
+# 运行时数据归档：var/jobs 终态任务整包 tar.gz + 散落日志 gzip（默认 dry-run）
+archive:
+	python scripts/archive_runtime.py
+
+archive-apply:
+	python scripts/archive_runtime.py --apply --purge-days 30
 
 # 构建执行沙箱镜像（agent 的 bash 工具在容器内运行，宿主隔离）
 sandbox-image:
