@@ -200,7 +200,7 @@ class _RecordingHooks:
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
 
-    def on_tool(self, name: str, args: dict) -> None:
+    def on_tool(self, call_id: str, name: str, args: dict) -> None:
         self.events.append(("tool", name))
 
     def on_result(self, call_id: str, out: str) -> None:

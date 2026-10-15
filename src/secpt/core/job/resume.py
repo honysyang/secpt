@@ -16,6 +16,7 @@ resume 流程：
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -31,6 +32,69 @@ def jobs_dir() -> Path:
     import os
 
     return Path(os.environ.get("SECPT_VAR", "var")) / "jobs"
+
+
+def load_last_checkpoint(job_id: str, base: Path | None = None) -> dict | None:
+    """事件驱动恢复：rounds 快照 + events.jsonl 重放，聚合出可续跑状态。
+
+    返回 dict：
+        round             最新 round 编号（session_round 接续）
+        messages          最新完整消息链（含首条 system）
+        prompt_tokens / completion_tokens / cost_cny   tokens 事件累计（预算恢复）
+        nudges            user_msg(kind=nudge) 计数（detector.trigger_count 近似恢复）
+        summary_k         已发生的压缩摘要数（compaction/…事件最大 k + 1）
+        steps             已执行步数（step 事件最大 n，防重启绕过 max_steps）
+
+    无消息快照或无事件流 → None（首次运行）。
+    """
+    jd = (Path(base) if base else jobs_dir()) / job_id
+    events_path = jd / "events.jsonl"
+    from secpt.core.job.rounds import load_latest_round
+
+    rnd, msgs = load_latest_round(job_id, base or jobs_dir())
+    if not msgs or not events_path.is_file():
+        return None
+
+    prompt = completion = 0
+    cost = 0.0
+    nudges = 0
+    summary_k = -1
+    steps = 0
+    with open(events_path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # 半截行（断电窗口）跳过
+            t = ev.get("type")
+            pl = ev.get("payload") or {}
+            if t == "tokens":
+                prompt += int(pl.get("prompt") or 0)
+                completion += int(pl.get("completion") or 0)
+                cost += float(pl.get("cost_cny") or 0.0)
+            elif t == "user_msg" and pl.get("kind") == "nudge":
+                nudges += 1
+            elif t in ("compaction", "compaction_requested", "compaction_completed"):
+                summary_k = max(summary_k, int(pl.get("k") or 0))
+            elif t == "step":
+                steps = max(steps, int(pl.get("n") or 0))
+
+    if cost == 0.0 and (prompt or completion):
+        # 旧日志无 tokens 事件时按当前单价估算（合理近似）
+        from secpt.core.context.budget import tokens_cost
+
+        cost = tokens_cost(prompt, completion)
+
+    return {
+        "round": rnd,
+        "messages": msgs,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "cost_cny": round(cost, 6),
+        "nudges": nudges,
+        "summary_k": summary_k + 1,
+        "steps": steps,
+    }
 
 
 def write_task_snapshot(job_dir: Path, spec: TaskSpec, run_config: dict) -> None:

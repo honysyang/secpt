@@ -26,7 +26,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+import structlog
+
+from secpt.runtime.logsetup import configure_logging
+from secpt.runtime.metrics import counter_inc
 from secpt.runtime.stuck import StuckDetector
+
+# 结构化日志：生命周期事件（start/progress/compact/rollover/nudge/fallback/fatal）
+# 统一走 structlog（SECPT_LOG_JSON=1 → JSON，按 job_id 检索链路；默认控制台友好）
+_log = structlog.get_logger("secpt.engine")
 
 DEFAULT_BASH_WHITELIST = frozenset(
     {
@@ -320,6 +328,8 @@ class RunConfig:
     stuck_wait_cap: int = 12  # P3-11：合法重复交互（pwn 等待）的 waiting 上限
     initial_messages: list[dict] | None = None  # S1 resume：非空则直接作为初始链（含首条 system）
     round_offset: int = 0  # S1 resume：续跑后 round 编号继续，避免覆盖旧 checkpoint
+    autoresume: bool = False  # 任务二：启动时自动从检查点恢复（仅顶层单任务路径开启；
+    # 编排层 stage 复用同一 job_id，必须保持 False 防 stage 链串扰）。SECPT_AUTORESUME=0 全局关闭
     ratelimit: object | None = None  # S2 全局限速器（.check(command)->list[str]，非空拦截）
     # G1 目标授权范围（duck-typing：.validate(target)->None or raise，避免反向依赖 governance）
     scope: object | None = None
@@ -327,6 +337,7 @@ class RunConfig:
     audit: object | None = None
     context_window: int | None = None  # S3 上下文窗口（token）；None=按模型查表
     sandbox: str = "none"  # bash 执行环境：none（宿主直跑，默认）/ docker（强制）/ auto
+    agent_id: str = ""  # 事件 trace：结构化日志与事件行的 agent 维度（编排层传角色名）
 
     # （MODEL_WINDOWS），可用 SECPT_FAKE_WINDOW 覆盖
     budget_cost_cny: float = 0.0  # S3 成本上限（元），0 表示不限
@@ -851,12 +862,76 @@ class Engine:
         self.verbose = verbose
         # 引擎侧 finding 去重（避免同一条 URL/凭据刷屏事件流）
         self._finding_seen: set[tuple[str, str]] = set()
+        # 非阻塞 compaction 状态：待回填占位摘要的 k 集合 + 后台摘要 worker 任务
+        self._pending_summary_ks: set[int] = set()
+        self._bg_task: asyncio.Task | None = None
+
+    async def _compaction_worker(self, log) -> None:
+        """后台摘要 worker：拉取 pending 请求生成六段摘要（不阻塞主循环）。
+
+        崩溃/取消时残留请求保留在 pending 队列，由 resume 后的下一轮 run 或
+        `secpt worker summarize` 兜底处理；摘要文件（<k>.summary.md）是完成真相源。
+        """
+        from secpt.core.context.compaction import (
+            complete_request_summary,
+            read_pending_requests,
+        )
+        from secpt.core.job.resume import jobs_dir
+
+        while True:
+            reqs = read_pending_requests(jobs_dir(), self.cfg.job_id)
+            if not reqs:
+                await asyncio.sleep(0.5)
+                continue
+            for path, req in reqs:
+                try:
+                    await complete_request_summary(path, req, self.summarizer, self.hooks)
+                    log.info(
+                        "engine.compact_completed",
+                        k=int(req.get("k") or 0),
+                        removed=int(req.get("removed_n") or 0),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # 单请求失败不拖垮 worker（请求留在队列重试）
+                    log.warning("engine.compact_worker_error", error=str(e))
+                    await asyncio.sleep(1.0)
 
     async def run(self) -> RunResult:
         cfg = self.cfg
         cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        configure_logging()
+        # trace 维度：job_id 必有；agent_id 非空才 bind（编排层传角色名，JSON 日志可按 agent 检索）
+        _agent = {"agent": cfg.agent_id} if cfg.agent_id else {}
+        log = _log.bind(job_id=cfg.job_id, **_agent)
 
         api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
+        # 事件驱动恢复：无显式 initial_messages 且存在存档（rounds+events.jsonl）
+        # 时自动从检查点续跑——round/预算/detector/steps 全部接续，防重启绕预算。
+        # SECPT_AUTORESUME=0 关闭（想对同 job_id 全新重跑时用）。
+        _checkpoint = None
+        if (
+            cfg.autoresume
+            and cfg.initial_messages is None
+            and os.environ.get("SECPT_AUTORESUME", "1") != "0"
+        ):
+            try:
+                from secpt.core.job.resume import load_last_checkpoint
+
+                _checkpoint = load_last_checkpoint(cfg.job_id)
+            except Exception as e:
+                log.warning("engine.autoresume_failed", error=str(e))
+            if _checkpoint:
+                cfg.initial_messages = _checkpoint["messages"]
+                cfg.round_offset = _checkpoint["round"]
+                log.info(
+                    "engine.autoresume",
+                    round=_checkpoint["round"],
+                    steps=_checkpoint["steps"],
+                    cost_cny=_checkpoint["cost_cny"],
+                    nudges=_checkpoint["nudges"],
+                )
 
         # system prompt：system_extra 已含先验+工具说明+约束
         system = cfg.system_extra + (
@@ -903,16 +978,34 @@ class Engine:
         session_start_t = time.time()
         session_steps = 0
 
-        _v = self.verbose
-        print(
-            f"[engine] job={cfg.job_id} model={model}  max_steps={cfg.max_steps}  "
-            f"timeout={cfg.max_wall_s}s",
-            file=sys.stderr,
-        )
-        print(f"[engine] workspace: {cfg.work_dir}", file=sys.stderr)
-        if self.extra_tools:
-            print(f"[engine] 插件工具: {sorted(self.extra_tools)}", file=sys.stderr)
+        # 检查点恢复预算/detector/steps/摘要编号（事件流重放的合理近似）
+        if _checkpoint:
+            steps = int(_checkpoint["steps"])
+            summary_k = int(_checkpoint["summary_k"])
+            detector.trigger_count = int(_checkpoint["nudges"])
+            if budget is not None:
+                # tokens 记入累计（后续 add() 按总额重算 cost），warned 同步防重复告警
+                budget.prompt_tokens += int(_checkpoint["prompt_tokens"])
+                budget.completion_tokens += int(_checkpoint["completion_tokens"])
+                budget.cost_cny = float(_checkpoint["cost_cny"])
+                if (
+                    budget.cost_limit_cny > 0
+                    and budget.cost_cny >= budget.cost_limit_cny * budget.warn_pct
+                ):
+                    budget.warned = True
 
+        log.info(
+            "engine.start",
+            model=model,
+            max_steps=cfg.max_steps,
+            max_wall_s=cfg.max_wall_s,
+            workspace=str(cfg.work_dir),
+            resumed=bool(_checkpoint),
+        )
+        if self.extra_tools:
+            log.info("engine.extra_tools", tools=sorted(self.extra_tools))
+
+        _v = self.verbose
         try:
             # max_steps/max_wall_s <= 0 表示不限（7×24 长任务）
             while (cfg.max_steps <= 0 or steps < cfg.max_steps) and (
@@ -933,12 +1026,13 @@ class Engine:
                         if _v:
                             print(f"  [steer] {_steer[:80]}...", file=sys.stderr)
 
-                # 每 10 步打印进度行（常驻，不进 verbose 门控）
+                # 每 10 步打进度（structlog：JSON 模式下可按 job_id 检索链路）
                 if steps % 10 == 0:
-                    print(
-                        f"[progress] 已用 {steps} 步 / 已过 {elapsed:.0f}s / 最近工具"
-                        f"{'有' if last_tool_has_new_info else '无'}新信息",
-                        file=sys.stderr,
+                    log.info(
+                        "engine.progress",
+                        steps=steps,
+                        elapsed_s=round(elapsed, 1),
+                        has_new_info=last_tool_has_new_info,
                     )
 
                 if _v:
@@ -957,13 +1051,13 @@ class Engine:
                         # 兼容 harness.py 的函数签名 call_llm(messages, tools, model, api_key)
                         resp = await self.llm(req_messages, tool_schemas, model, api_key)
                 except Exception as e:
-                    print(f"[engine] LLM error: {e}", file=sys.stderr)
+                    log.warning("engine.llm_error", error=str(e))
                     if model == cfg.model_primary:
-                        print(f"[engine] fallback to {cfg.model_fallback}", file=sys.stderr)
+                        log.warning("engine.model_fallback", to=cfg.model_fallback)
                         model = cfg.model_fallback
                         continue
                     else:
-                        print("[engine] fallback also failed", file=sys.stderr)
+                        log.error("engine.model_fallback_exhausted")
                         status = "error"
                         break
 
@@ -1116,8 +1210,9 @@ class Engine:
 
                     # 串行记账：按原始顺序逐个执行原有回调体（语义与改造前逐一一致）
                     for (tc, fn_name, fn_args), result in zip(group, results, strict=True):
+                        counter_inc("tool_calls_total", tool=fn_name)
                         if self.hooks and hasattr(self.hooks, "on_tool"):
-                            self.hooks.on_tool(fn_name, fn_args)
+                            self.hooks.on_tool(tc.id, fn_name, fn_args)
 
                         # 卡死切换器：更新计数器（含⑥完全重复调用判定，按调用指纹）
                         has_new = detector.update(result, call_key=_call_key(fn_name, fn_args))
@@ -1145,33 +1240,71 @@ class Engine:
                     messages.append({"role": "user", "content": nudge_msg})
                     if self.hooks and hasattr(self.hooks, "on_user_message"):
                         self.hooks.on_user_message(nudge_msg, kind="nudge")
-                    print(f"  [nudge] {nudge_msg[:80]}...", file=sys.stderr)
+                    log.info("engine.nudge", trigger_count=detector.trigger_count)
 
                 # S1：本轮结束，落盘 round 快照（会话轮次号，resume 接续用）
                 if self.hooks and hasattr(self.hooks, "on_round_end"):
                     self.hooks.on_round_end(session_round, messages)
 
-                # ---- S3 上下文压缩：token 超阈值 → 删最老整组 + 原位插六段摘要 ----
+                # ---- S3 上下文压缩（非阻塞）：删组+占位同步做，摘要后台生成 ----
                 # 红线：messages 整条 append；压缩与 rollover 是仅有的删改/重建点。
                 # 放在本轮消息全部 append 之后、rollover 之前：同一阈值下压缩优先
                 # （删组把 est 拉回阈值下），轮转只在压缩救不回或步数/墙钟到时触发。
-                if window > 0 and summary_k < 999:
-                    from secpt.core.context.compaction import compact_messages
+                # 主循环只做微秒级操作（删组/插占位/落请求文件），LLM 摘要交给
+                # _compaction_worker 后台任务——compaction 不再阻塞下一步 LLM 调用。
+                if self._pending_summary_ks:
+                    # 已生成摘要回填占位（从盘上 summary 文件读，主循环单线程改写）
+                    from secpt.core.context.compaction import swap_summary_placeholders
+                    from secpt.core.job.resume import jobs_dir as _jobs_dir
 
-                    messages, removed_n, summary = await compact_messages(
-                        messages, cfg.objective, self.summarizer, window, k=summary_k
+                    _swapped = swap_summary_placeholders(
+                        messages, _jobs_dir(), cfg.job_id, self._pending_summary_ks
                     )
-                    if removed_n:
+                    if _swapped:
+                        log.info("engine.summary_backfilled", count=_swapped)
+
+                if window > 0 and summary_k < 999:
+                    from secpt.core.context.compaction import (
+                        placeholder_content,
+                        plan_compaction,
+                        write_compaction_request,
+                    )
+                    from secpt.core.job.resume import jobs_dir as _jobs_dir
+
+                    plan = plan_compaction(messages, window)
+                    if plan is not None:
+                        remaining, removed_msgs, first_idx = plan
+                        k = summary_k
                         summary_k += 1
-                        print(f"[engine] compact #{summary_k}: 删 {removed_n} 条", file=sys.stderr)
+                        # 落请求文件（file-backed 队列）：后台 worker 拉取生成摘要
+                        write_compaction_request(
+                            cfg.job_id,
+                            _jobs_dir(),
+                            k=k,
+                            window=window,
+                            objective=cfg.objective,
+                            removed_msgs=removed_msgs,
+                        )
+                        # 原位插占位摘要（明细已删，先给模型交代）
+                        remaining.insert(
+                            min(first_idx, len(remaining)),
+                            {"role": "user", "content": placeholder_content(k)},
+                        )
+                        messages = remaining
+                        self._pending_summary_ks.add(k)
+                        counter_inc("compaction_count")
+                        log.info("engine.compact_requested", k=k, removed=len(removed_msgs))
+                        if self.hooks and hasattr(self.hooks, "on_compaction_requested"):
+                            self.hooks.on_compaction_requested(k, len(removed_msgs), window)
                         if summary_k == 5:
                             print(
                                 "[engine] 提示：压缩已 5 次仍频繁——若网关模型为 128k 上下文，"
                                 "设 SECPT_CONTEXT_WINDOW=128000 可显著减少压缩",
                                 file=sys.stderr,
                             )
-                        if self.hooks and hasattr(self.hooks, "on_compaction"):
-                            self.hooks.on_compaction(summary_k - 1, summary, removed_n, window)
+                        # 懒启动后台摘要 worker（崩溃残留请求也会被它扫到）
+                        if self._bg_task is None or self._bg_task.done():
+                            self._bg_task = asyncio.create_task(self._compaction_worker(log))
 
                 # ---- S3 会话轮转（rollover 是唯一允许"重建 messages"的地方）----
                 do_roll, reason = should_rollover(
@@ -1195,12 +1328,17 @@ class Engine:
                     messages = new_messages
                     session_steps = 0
                     session_start_t = time.time()
-                    print(
-                        f"[engine] rollover → session {session_round}（{reason}）", file=sys.stderr
-                    )
+                    log.info("engine.rollover", session_round=session_round, reason=reason)
         except Exception as e:
-            print(f"[engine] fatal error: {e}", file=sys.stderr)
+            log.error("engine.fatal", error=str(e))
             status = "error"
+        finally:
+            # 收尾：停掉后台摘要 worker（残留 pending 请求由 resume 或
+            # `secpt worker summarize` 兜底，摘要文件才是完成真相源）
+            if self._bg_task is not None:
+                self._bg_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._bg_task
 
         # ------------------------------------------------------------------
         # 结束

@@ -77,32 +77,34 @@ class WarroomHooks:
     def __init__(self, inner, warroom: Warroom) -> None:
         self._inner = inner
         self._warroom = warroom
-        # Engine 的 on_tool 无 call_id，on_result 才有；按同轮调用顺序 FIFO 关联
-        self._pending: list[tuple[str, str]] = []
+        # PR-A：按 call_id 精确关联（并行多链下 FIFO 顺序会被其他链交错打乱；
+        # LLM 产出的 call_id 全局唯一，dict 映射天然并发安全）
+        self._pending: dict[str, tuple[str, str]] = {}
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
     # ---------------- attempts ----------------
 
-    def on_tool(self, name: str, args: dict) -> None:
+    def on_tool(self, call_id: str, name: str, args: dict) -> None:
         action = f"{name}({json.dumps(args, ensure_ascii=False)[:200]})"
         target = _extract_target(args)
-        self._pending.append((action, target))
+        self._pending[call_id] = (action, target)
         try:
             self._warroom.add_attempt(action, target=target)
         except Exception as e:
             print(f"[warroom] add_attempt failed (ignored): {e}")
         inner = getattr(self._inner, "on_tool", None)
         if inner is not None:
-            inner(name, args)
+            inner(call_id, name, args)
 
     def on_result(self, call_id: str, out: str) -> None:
-        if self._pending:
-            action, target = self._pending.pop(0)
-            # 补记结果（attempts 行已存在，只更新 result）
+        pending = self._pending.pop(call_id, None)
+        if pending is not None:
+            action, target = pending
+            # 补记结果：UPDATE 已有行（INSERT OR IGNORE 撞 UNIQUE 后 result 不落盘）
             try:
-                self._warroom.add_attempt(action, target=target, result=out[:1000])
+                self._warroom.update_attempt_result(action, target=target, result=out[:1000])
             except Exception as e:
                 print(f"[warroom] update attempt failed (ignored): {e}")
         inner = getattr(self._inner, "on_result", None)
@@ -237,6 +239,7 @@ class SpecialistOrchestrator:
             max_wall_s=int(prof.budget.wall_s),
             flag_regex=prof.terminator.flag_regex,
             round_offset=round_offset,
+            agent_id=role,  # 事件 trace：结构化日志按角色检索（recon/exploit/verify/report）
         )
         # profile 级 bash 工具超时覆盖（DAG 各 agent 与单链一致）
         if getattr(prof, "bash_timeout_s", 0) > 0:

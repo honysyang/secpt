@@ -20,8 +20,18 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
+
+# PR-D：busy 重试参数（WAL 下写写冲突仍可能 OperationalError: database is locked）
+_BUSY_RETRY = 3  # 首次失败后最多重试 3 次
+_BUSY_BASE_S = 0.1  # 指数退避：0.1s / 0.2s / 0.4s
+
+
+def _is_busy(e: sqlite3.OperationalError) -> bool:
+    msg = str(e).lower()
+    return "lock" in msg or "busy" in msg
 
 
 def attempt_key(action: str, target: str) -> str:
@@ -49,6 +59,21 @@ class Warroom:
             conn.commit()
         finally:
             conn.close()
+
+    def _write(self, fn):
+        """短事务写 + busy 重试（指数退避）：写写冲突时退避后重开连接重试，
+        避免 'database is locked' 导致写入被吞或上抛。非 busy 异常直接上抛。"""
+        last: Exception | None = None
+        for attempt in range(_BUSY_RETRY + 1):
+            try:
+                with self._conn() as conn:
+                    return fn(conn)
+            except sqlite3.OperationalError as e:
+                if not _is_busy(e) or attempt == _BUSY_RETRY:
+                    raise
+                last = e
+                time.sleep(_BUSY_BASE_S * (2**attempt))
+        raise last  # pragma: no cover - 循环必在最后一轮 return 或 raise
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
@@ -106,13 +131,18 @@ class Warroom:
         source_step: str = "",
     ) -> int:
         """写入一条资产，返回 id。"""
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO assets (job_id, host, port, service, tech, source_step)"
-                " VALUES (?,?,?,?,?,?)",
-                (self.job_id, host, port, service, tech, source_step),
+        return (
+            self._write(
+                lambda conn: (
+                    conn.execute(
+                        "INSERT INTO assets (job_id, host, port, service, tech, source_step)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (self.job_id, host, port, service, tech, source_step),
+                    ).lastrowid
+                )
             )
-            return int(cur.lastrowid)
+            or 0
+        )
 
     def list_assets(self) -> list[dict]:
         with self._conn() as conn:
@@ -131,13 +161,18 @@ class Warroom:
     def add_credential(
         self, kind: str, value: str, source_step: str = "", valid: bool = False
     ) -> int:
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO credentials (job_id, kind, value, source_step, valid)"
-                " VALUES (?,?,?,?,?)",
-                (self.job_id, kind, value, source_step, int(valid)),
+        return (
+            self._write(
+                lambda conn: (
+                    conn.execute(
+                        "INSERT INTO credentials (job_id, kind, value, source_step, valid)"
+                        " VALUES (?,?,?,?,?)",
+                        (self.job_id, kind, value, source_step, int(valid)),
+                    ).lastrowid
+                )
             )
-            return int(cur.lastrowid)
+            or 0
+        )
 
     def list_credentials(self) -> list[dict]:
         with self._conn() as conn:
@@ -157,8 +192,8 @@ class Warroom:
         severity: str = "info",
         verified: bool = False,
     ) -> None:
-        with self._conn() as conn:
-            conn.execute(
+        self._write(
+            lambda conn: conn.execute(
                 """INSERT INTO findings (id, job_id, kind, title, evidence, severity, verified, ts)
                    VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(job_id, id) DO UPDATE SET
@@ -176,6 +211,7 @@ class Warroom:
                     __import__("time").time(),
                 ),
             )
+        )
 
     def list_findings(self) -> list[dict]:
         with self._conn() as conn:
@@ -185,11 +221,12 @@ class Warroom:
         return [dict(r) for r in rows]
 
     def mark_verified(self, fid: str, verified: bool = True) -> None:
-        with self._conn() as conn:
-            conn.execute(
+        self._write(
+            lambda conn: conn.execute(
                 "UPDATE findings SET verified=? WHERE job_id=? AND id=?",
                 (int(verified), self.job_id, fid),
             )
+        )
 
     def count_verified(self) -> int:
         with self._conn() as conn:
@@ -206,14 +243,17 @@ class Warroom:
         返回 True 表示新增（之前未尝试过），False 表示重复命中被跳过。
         """
         key = attempt_key(action, target)
-        with self._conn() as conn:
-            cur = conn.execute(
-                """INSERT OR IGNORE INTO attempts
+        rowcount = self._write(
+            lambda conn: (
+                conn.execute(
+                    """INSERT OR IGNORE INTO attempts
                        (job_id, key_hash, action, result, reason)
                    VALUES (?,?,?,?,?)""",
-                (self.job_id, key, action, result[:1000], reason[:500]),
+                    (self.job_id, key, action, result[:1000], reason[:500]),
+                ).rowcount
             )
-            return cur.rowcount > 0
+        )
+        return rowcount > 0
 
     def has_attempt(self, action: str, target: str = "") -> bool:
         key = attempt_key(action, target)
@@ -223,6 +263,20 @@ class Warroom:
                 (self.job_id, key),
             ).fetchone()
         return row is not None
+
+    def update_attempt_result(self, action: str, target: str = "", result: str = "") -> bool:
+        """补记结果：按 key_hash 定位已有行 UPDATE result（PR-A 修正：原 INSERT OR IGNORE
+        撞 UNIQUE 后 result 永远不落盘）。行不存在返回 False。"""
+        key = attempt_key(action, target)
+        rowcount = self._write(
+            lambda conn: (
+                conn.execute(
+                    "UPDATE attempts SET result=? WHERE job_id=? AND key_hash=?",
+                    (result[:1000], self.job_id, key),
+                ).rowcount
+            )
+        )
+        return rowcount > 0
 
     def list_attempts(self, limit: int = 500) -> list[dict]:
         with self._conn() as conn:

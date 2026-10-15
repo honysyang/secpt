@@ -2,18 +2,26 @@
 
 同时实现 Engine 需要的 hooks 回调接口：
     on_step / on_assistant / on_tool / on_result / on_round_end
-    on_tokens / on_finding / on_compaction / on_rollover / on_budget_exceeded
+    on_tokens / on_finding / on_compaction(_requested/_completed) / on_rollover
+    on_budget_exceeded
 
-事件类型固定，不许扩展：
+事件类型固定，不许随意扩展（新增须配运行时读路径与测试）：
     assistant / tool_call / tool_result / finding / round_end
     / budget_warning / rollover / status_change / error / compaction
-（compaction 为 S3 验收要求的事件，S3 spec 覆盖了 S1 的 9 种固定集合）
+    / routed / step / user_msg / verdict
+    / tokens / compaction_requested / compaction_completed（非阻塞 compaction）
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX：跨进程 append 文件锁（Windows 不可用则降级为纯线程锁）
+except ImportError:  # pragma: no cover - Windows 分支
+    fcntl = None
 
 from secpt.core.job.store import JobStore
 
@@ -32,6 +40,9 @@ EVENT_TYPES = {
     "step",  # 步进心跳（watch 实时视图的分界）
     "user_msg",  # 注入的 user 消息（人工操舵/换层提醒/预算警告）
     "verdict",  # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
+    "tokens",  # 每步 LLM token 记账（checkpoint 恢复预算的数据源）
+    "compaction_requested",  # 主循环已删组+插占位（非阻塞 compaction 的请求入队）
+    "compaction_completed",  # 后台摘要完成、<k>.summary.md 已落盘
 }
 
 
@@ -50,13 +61,26 @@ def _classify_output(out: str) -> str:
 class EventSink:
     """写 var/jobs/<job_id>/events.jsonl（append-only）+ 转存 SQLite。"""
 
-    def __init__(self, job_id: str, jobs_dir: Path, store: JobStore | None = None) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        jobs_dir: Path,
+        store: JobStore | None = None,
+        *,
+        agent_id: str = "",
+        chain_id: str = "",
+    ) -> None:
         self.job_id = job_id
         self.jobs_dir = Path(jobs_dir)
         self.job_dir = self.jobs_dir / job_id
         self.job_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.job_dir / "events.jsonl"
         self.store = store
+        self.agent_id = agent_id  # 事件行 trace 字段（非空才写入，缺省保持旧行格式）
+        self.chain_id = chain_id
+        # 进程内写锁：specialist 多链 to_thread 并行共享同一 sink 写同一文件，
+        # _seq 自增与 append 必须原子（PR-A 并发安全）
+        self._lock = threading.Lock()
         # 初始 seq = 已有行数（jsonl 用行号做 seq）
         self._seq = self._count_lines()
 
@@ -68,28 +92,70 @@ class EventSink:
         with open(self.events_path, encoding="utf-8") as f:
             return sum(1 for _ in f)
 
+    def _tail_seq(self) -> int:
+        """读文件末尾 8KB 解析最后一行 seq，保证跨进程并发时 seq 单调不回退。
+
+        用独立 "rb" 句柄：append 模式的 fh 不可读（read 会抛 UnsupportedOperation）。
+        """
+        try:
+            with open(self.events_path, "rb") as rf:
+                rf.seek(0, 2)
+                size = rf.tell()
+                rf.seek(max(0, size - 8192))
+                tail = rf.read().decode("utf-8", errors="replace")
+            for line in reversed(tail.splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    return int(json.loads(line).get("seq", 0))
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    return 0
+            return 0
+        except OSError:
+            return 0
+
     def write(self, etype: str, payload: dict, round_: int = 0) -> int:
         if etype not in EVENT_TYPES:
             raise ValueError(f"unknown event type: {etype!r}")
-        self._seq += 1
-        line = {
-            "seq": self._seq,
-            "job_id": self.job_id,
-            "ts": __import__("time").time(),
-            "round": round_,
-            "type": etype,
-            "payload": payload,
-        }
-        # 主写：jsonl append（断电最多丢一步）
-        with open(self.events_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        # 次写：SQLite（失败不阻断）
-        if self.store is not None:
-            try:
-                self.store.add_event(self.job_id, etype, payload, round_)
-            except Exception as e:
-                print(f"[sink] sqlite event failed (ignored): {e}")
-        return self._seq
+        with self._lock:
+            self._seq += 1
+            line = {
+                "seq": self._seq,
+                "job_id": self.job_id,
+                "ts": __import__("time").time(),
+                "round": round_,
+                "type": etype,
+                "payload": payload,
+            }
+            if self.agent_id:
+                line["agent_id"] = self.agent_id
+            if self.chain_id:
+                line["chain_id"] = self.chain_id
+            data = json.dumps(line, ensure_ascii=False) + "\n"
+            # 主写：jsonl append（断电最多丢一步）。POSIX 下叠 flock 排他锁：
+            # 本进程与其他进程（secpt worker summarize 等）写同一文件时单行不交错
+            with open(self.events_path, "a", encoding="utf-8") as f:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        # 其他进程可能已追加：尾读同步 seq，保证全局单调
+                        tail = self._tail_seq()
+                        if tail >= self._seq:
+                            self._seq = tail + 1
+                            line["seq"] = self._seq
+                            data = json.dumps(line, ensure_ascii=False) + "\n"
+                        f.write(data)
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                else:
+                    f.write(data)
+            # 次写：SQLite（失败不阻断）
+            if self.store is not None:
+                try:
+                    self.store.add_event(self.job_id, etype, payload, round_)
+                except Exception as e:
+                    print(f"[sink] sqlite event failed (ignored): {e}")
+            return self._seq
 
     # ---------------- Engine hooks ----------------
 
@@ -118,10 +184,12 @@ class EventSink:
             },
         )
 
-    def on_tool(self, name: str, args: dict) -> None:
+    def on_tool(self, call_id: str, name: str, args: dict) -> None:
+        """PR-A：带 call_id 落 tool_call 事件（与 on_result 精确配对，不再依赖 FIFO）。"""
         self.write(
             "tool_call",
             {
+                "call_id": call_id,
                 "tool": name,
                 "args": json.dumps(args, ensure_ascii=False)[:500],
             },
@@ -181,13 +249,28 @@ class EventSink:
     # ---------------- S3 hooks ----------------
 
     def on_tokens(self, prompt_tokens: int, completion_tokens: int) -> None:
-        """每步 LLM 调用后记账：按 config 单价更新 jobs.cost_cny（失败不阻断）。"""
-        if self.store is None:
-            return
+        """每步 LLM 调用后记账：tokens 事件落流（恢复预算的真相源）+ cost 记账。"""
+        cost = 0.0
         try:
             from secpt.core.context.budget import tokens_cost
 
             cost = tokens_cost(prompt_tokens, completion_tokens)
+        except Exception as e:
+            print(f"[sink] tokens_cost failed (ignored): {e}")
+        try:
+            self.write(
+                "tokens",
+                {
+                    "prompt": int(prompt_tokens),
+                    "completion": int(completion_tokens),
+                    "cost_cny": round(cost, 6),
+                },
+            )
+        except Exception as e:
+            print(f"[sink] tokens event failed (ignored): {e}")
+        if self.store is None:
+            return
+        try:
             rec = self.store.get_job(self.job_id)
             if rec is not None:
                 rec.cost_cny = round(rec.cost_cny + cost, 6)
@@ -207,9 +290,32 @@ class EventSink:
                 print(f"[sink] add_finding failed (ignored): {e}")
 
     def on_compaction(self, k: int, summary: str, removed: int, window: int) -> None:
-        """记录一次 Compaction（S3 验收要求事件类型）。"""
+        """记录一次 Compaction 完成（S3 验收要求的 legacy 类型，watch 兼容）。"""
         self.write(
             "compaction",
+            {
+                "k": k,
+                "removed_messages": removed,
+                "window": window,
+                "summary": summary[:2000],
+            },
+        )
+
+    def on_compaction_requested(self, k: int, removed: int, window: int) -> None:
+        """非阻塞 compaction：主循环已删组+插占位，摘要请求入队（pending 队列）。"""
+        self.write(
+            "compaction_requested",
+            {
+                "k": k,
+                "removed_messages": removed,
+                "window": window,
+            },
+        )
+
+    def on_compaction_completed(self, k: int, summary: str, removed: int, window: int) -> None:
+        """非阻塞 compaction：后台摘要已生成并落盘 <k>.summary.md。"""
+        self.write(
+            "compaction_completed",
             {
                 "k": k,
                 "removed_messages": removed,

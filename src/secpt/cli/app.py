@@ -220,6 +220,7 @@ def metrics_entry(
 
 app.add_typer(cmd_ops.intent_app, name="intent")
 app.add_typer(cmd_ops.intercept_app, name="intercept")
+app.add_typer(cmd_ops.worker_app, name="worker")
 
 
 @app.command("archive")

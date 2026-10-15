@@ -206,6 +206,9 @@ def run_engine(
         max_steps=prof.budget.steps if max_steps is None else max_steps,
         max_wall_s=prof.budget.wall_s if max_wall_s is None else max_wall_s,
     )
+    # 顶层单任务路径开启事件驱动恢复（断点续跑防重启绕预算）；
+    # 编排层 stage 直构 RunConfig 保持默认 False（stage 链独立预算，防串扰）
+    cfg.autoresume = True
     # profile 级 bash 工具超时覆盖（pwn 等长交互场景）
     if getattr(prof, "bash_timeout_s", 0) > 0:
         cfg.bash_timeout_s = prof.bash_timeout_s

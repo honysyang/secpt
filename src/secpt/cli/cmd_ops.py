@@ -16,6 +16,41 @@ import typer
 
 intent_app = typer.Typer(help="直投意图：人点单、AI 干活（规划者自动暂停）")
 intercept_app = typer.Typer(help="拦截审批规则管理")
+worker_app = typer.Typer(help="后台 worker：摘要补偿 / 指标端点")
+
+
+# ---------------------------------------------------------------------------
+# 后台 worker
+# ---------------------------------------------------------------------------
+
+
+@worker_app.command("summarize")
+def worker_summarize(
+    job_id: str = typer.Argument(None, help="限定 job_id；缺省扫描全部 job"),
+) -> None:
+    """补偿处理 compaction/pending 残留摘要请求（引擎崩溃后兜底）。"""
+    from secpt.core.job.summarize_worker import run_summarize_worker
+
+    raise typer.Exit(run_summarize_worker(job_id))
+
+
+@worker_app.command("metrics")
+def worker_metrics(
+    port: int = typer.Option(9100, "--port", "-p", help="监听端口"),
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+) -> None:
+    """启动 Prometheus 文本格式指标端点（GET /metrics）。"""
+    import time as _time
+
+    from secpt.runtime.metrics import start_metrics_server
+
+    start_metrics_server(port, host)
+    typer.echo(f"metrics 端点已启动: http://{host}:{port}/metrics （Ctrl-C 退出）")
+    try:
+        while True:
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------------------------------------------------------------------------

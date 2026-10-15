@@ -49,7 +49,7 @@ def test_jsonl_primary_sqlite_secondary(tmp_path):
     store = JobStore(tmp_path / "t.sqlite")
     sink = EventSink("j1", tmp_path, store=store)
     sink.on_assistant({"content": "think", "tool_calls": []})
-    sink.on_tool("bash", {"command": "ls"})
+    sink.on_tool("c8", "bash", {"command": "ls"})
     sink.on_result("c9", "out")
     sink.on_round_end(1, [{"role": "system", "content": "s"}])
 
@@ -77,7 +77,8 @@ def test_hooks_all_wired(tmp_path):
     sink = EventSink("j1", tmp_path, store=None)
     for hook in ("on_step", "on_assistant", "on_tool", "on_result", "on_round_end"):
         assert callable(getattr(sink, hook)), f"missing hook {hook}"
-    # 事件类型全集（S3：compaction；S4：routed；Phase A：verdict 评判层写入）
+    # 事件类型全集（S3：compaction；S4：routed；Phase A：verdict 评判层写入；
+    # 非阻塞 compaction：tokens/compaction_requested/compaction_completed）
     assert {
         "assistant",
         "tool_call",
@@ -93,4 +94,27 @@ def test_hooks_all_wired(tmp_path):
         "step",
         "user_msg",
         "verdict",
+        "tokens",
+        "compaction_requested",
+        "compaction_completed",
     } == EVENT_TYPES
+
+
+def test_tokens_and_compaction_events(tmp_path):
+    """on_tokens 落 tokens 事件（checkpoint 恢复预算的数据源）；
+    on_compaction_requested/_completed 落对应事件（非阻塞 compaction 验收）。"""
+    sink = EventSink("j-events2", tmp_path, store=None)
+    sink.on_tokens(1000, 200)
+    sink.on_compaction_requested(0, 42, 60000)
+    sink.on_compaction_completed(0, "六段摘要", 42, 60000)
+    lines = [
+        json.loads(line)
+        for line in (tmp_path / "j-events2" / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    types = [ev["type"] for ev in lines]
+    assert types == ["tokens", "compaction_requested", "compaction_completed"]
+    payload = lines[0]["payload"]
+    assert payload["prompt"] == 1000 and payload["completion"] == 200
+    assert payload["cost_cny"] > 0

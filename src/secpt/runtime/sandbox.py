@@ -203,6 +203,10 @@ def sandbox_scope(job_id: str, *, work_dir: str, mode: str = "auto"):
         if not docker_available():
             if mode == "docker":
                 raise SandboxUnavailable("docker 不可用但强制容器模式（SECPT_SANDBOX_MODE=docker）")
+            # auto 回退宿主：计入沙箱降级指标（可观测容器执行覆盖率）
+            from secpt.runtime.metrics import counter_inc
+
+            counter_inc("sandbox_fallbacks_total", mode=mode)
             yield None
             return
         # 持久化复用：同一 job 的所有 bash 命令共享一个容器（退出 scope 不销毁）

@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import time
+
+from secpt.runtime.metrics import counter_inc, histogram_observe
 
 BASE_URL = "https://api.deepseek.com"
 REQUEST_TIMEOUT_S = 180
@@ -190,21 +193,34 @@ async def call_llm(
         httpx.HTTPStatusError,
     )
     last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            client = _get_client()
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            return _wrap_response(r.json())
-        except retryable_exc as e:
-            retryable = not isinstance(e, httpx.HTTPStatusError)
-            if isinstance(e, httpx.HTTPStatusError):
-                code = e.response.status_code
-                retryable = code == 429 or 500 <= code < 600
-            if not retryable or attempt == MAX_RETRIES:
-                raise
-            last_exc = e
-            delay = _BACKOFF_BASE_S * (2**attempt) + random.random()
-            await asyncio.sleep(delay)
-    assert last_exc is not None
-    raise last_exc
+    _t0 = time.perf_counter()
+
+    def _metric(status: str) -> None:
+        """指标插桩：llm_calls_total{model,status} + llm_latency_seconds{model}。"""
+        counter_inc("llm_calls_total", model=model_id, status=status)
+        histogram_observe("llm_latency_seconds", time.perf_counter() - _t0, model=model_id)
+
+    try:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                client = _get_client()
+                r = await client.post(url, json=payload, headers=headers)
+                r.raise_for_status()
+                resp = _wrap_response(r.json())
+                _metric("ok")
+                return resp
+            except retryable_exc as e:
+                retryable = not isinstance(e, httpx.HTTPStatusError)
+                if isinstance(e, httpx.HTTPStatusError):
+                    code = e.response.status_code
+                    retryable = code == 429 or 500 <= code < 600
+                if not retryable or attempt == MAX_RETRIES:
+                    raise
+                last_exc = e
+                delay = _BACKOFF_BASE_S * (2**attempt) + random.random()
+                await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
+    except Exception:
+        _metric("error")
+        raise
