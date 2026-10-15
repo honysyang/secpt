@@ -31,7 +31,10 @@ _CHROME_TIMEOUT_S = 20
 SANITIZE_SCHEMA = {
     "type": "object",
     "properties": {
-        "attachments_dir": {"type": "string", "description": "附件源码目录（含 sanitize.js 的那层，如 attachments/author_plus/blog）"},
+        "attachments_dir": {
+            "type": "string",
+            "description": "附件源码目录（含 sanitize.js 的那层，如 attachments/author_plus/blog）",
+        },
         "payload": {"type": "string", "description": "待净化的 HTML payload"},
     },
     "required": ["attachments_dir", "payload"],
@@ -98,9 +101,13 @@ def _prepare_workspace(src_dir: Path) -> Path:
     if (ws / "package.json").is_file() and not (ws / "node_modules").is_dir():
         if not _which("npm"):
             raise RuntimeError("附件需要 npm install 但系统无 npm")
-        r = subprocess.run(["npm", "install", "--no-audit", "--no-fund"],
-                           cwd=str(ws), capture_output=True, text=True,
-                           timeout=_NPM_TIMEOUT_S)
+        r = subprocess.run(
+            ["npm", "install", "--no-audit", "--no-fund"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            timeout=_NPM_TIMEOUT_S,
+        )
         if r.returncode != 0:
             raise RuntimeError(f"npm install 失败: {(r.stderr or '')[:300]}")
     marker.write_text("ok", encoding="utf-8")
@@ -114,7 +121,10 @@ def _run_sanitize(ws: Path, payload: str) -> str:
     r = subprocess.run(
         ["node", str(script)],
         input=json.dumps({"content": payload}),
-        capture_output=True, text=True, timeout=30, cwd=str(script.parent),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(script.parent),
     )
     if r.returncode != 0:
         raise RuntimeError(f"sanitize.js 执行失败: {(r.stderr or '')[:300]}")
@@ -136,9 +146,19 @@ def _browser_parse(fragment: str) -> dict:
         encoding="utf-8",
     )
     r = subprocess.run(
-        [chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
-         "--virtual-time-budget=2000", "--dump-dom", f"file://{page}"],
-        capture_output=True, text=True, timeout=_CHROME_TIMEOUT_S, errors="replace",
+        [
+            chrome,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--virtual-time-budget=2000",
+            "--dump-dom",
+            f"file://{page}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=_CHROME_TIMEOUT_S,
+        errors="replace",
     )
     dom = r.stdout
     import re
@@ -182,13 +202,16 @@ def register() -> dict:
             clean = _run_sanitize(ws, str(args["payload"]))
             check = _browser_parse(clean)
             verdict = check["has_event_handlers"] or check["has_javascript_url"]
-            return json.dumps({
-                "mxss": verdict,
-                "clean": clean[:800],
-                **check,
-                "note": "mxss=true：净化输出在浏览器解析时复活为可执行 markup——" 
-                        "验证真实触发（起 bot/浏览器）后再 report_finding",
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "mxss": verdict,
+                    "clean": clean[:800],
+                    **check,
+                    "note": "mxss=true：净化输出在浏览器解析时复活为可执行 markup——"
+                    "验证真实触发（起 bot/浏览器）后再 report_finding",
+                },
+                ensure_ascii=False,
+            )
         except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
             return f"Error: {e}"
 

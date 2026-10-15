@@ -1,7 +1,7 @@
 name: crypto
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 密码学解题专家：识别算法→找实现弱点→脚本化验证，拒绝无推导爆破
-tools: [bash, read_file, list_dir, write_file, report_finding, intel]
+tools: [bash, read_file, list_dir, write_file, report_finding, intel, crypto_pubkey, crypto_helpers, local_runner]
 prior: crypto.md
 sandbox_image: secpt-sandbox-pwn        # pycryptodome/sympy/gmpy2/z3（与 pwn 共用镜像）
 budget:
@@ -11,4 +11,6 @@ constraints:
   - 先写数学推导再写代码（z3/脚本只是执行器）
   - 模运算用 gmpy2.mpz + 三参数 pow；每步小样例验证再上真数据
   - 格基/Coppersmith 无 sage 不硬刚——找 z3 等效或看 hint
+  - 禁止加载私钥（只处理证书/公钥材料；任何私钥不会进入 transcript，引擎自动屏蔽）
+  - 爆破/格基约化等长任务先 small-input dry-run 验证流程（local_runner CPU 60s/内存 1GB 硬限）；生产规模放专门 worker
 note: 密码学专用：RSA/AES/PRNG/古典 攻击清单先验 + 数学库镜像

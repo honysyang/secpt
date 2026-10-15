@@ -7,7 +7,14 @@ import tarfile
 import time
 from pathlib import Path
 
-from scripts.archive_runtime import archive_job, archive_log, is_stale, run
+from scripts.archive_runtime import (
+    archive_job,
+    archive_log,
+    is_stale,
+    redact_text,
+    run,
+    scan_job_for_secrets,
+)
 
 
 def _make_job(jobs_dir: Path, name: str, age_days: float = 10.0) -> Path:
@@ -96,3 +103,76 @@ def test_run_apply_archives_stale_only(tmp_path: Path) -> None:
     assert (tmp_path / "archive" / "jobs" / "job-old.tar.gz").exists()
     assert fresh.exists()  # 活跃 job 不触碰
     assert not log.exists() and (tmp_path / "y.log.gz").exists()  # 日志已压缩
+
+
+# ---------------- secrets 扫描与 redact ----------------
+
+
+def test_redact_text_replaces_and_keeps_key_name() -> None:
+    text = 'api_key=sk-abcdef1234567890abcdef and password="supersecret12345" remain'
+    out, n = redact_text(text)
+    assert n >= 2
+    assert "sk-abcdef1234567890abcdef" not in out
+    assert "supersecret12345" not in out
+    assert "api_key=" in out and "password=" in out  # 键名保留，便于事后定位
+    assert "remain" in out  # 普通内容不受影响
+
+
+def test_scan_job_detects_secrets_without_value_leak(tmp_path: Path) -> None:
+    d = tmp_path / "job-x"
+    d.mkdir()
+    (d / "events.jsonl").write_text(
+        '{"payload": {"env": "DEEPSEEK_API_KEY=sk-abcdef1234567890abcdef"}}\n',
+        encoding="utf-8",
+    )
+    hits = scan_job_for_secrets(d)
+    assert hits and hits[0][0].name == "events.jsonl"
+    assert all(t in {"openai_key", "keyval"} for _, t in hits)  # 只报类型不回显值
+
+
+def test_scan_job_clean_text_no_false_positive(tmp_path: Path) -> None:
+    d = tmp_path / "job-y"
+    d.mkdir()
+    (d / "report.md").write_text(
+        "# 报告\n发现 flag{test_flag} 于 /etc/passwd，端口 8080 开放。\n",
+        encoding="utf-8",
+    )
+    (d / "exploit.py").write_text(
+        "import requests\nrequests.post('http://127.0.0.1:8000/api', json={'a': 1})\n",
+        encoding="utf-8",
+    )
+    assert scan_job_for_secrets(d) == []
+
+
+def test_archive_job_blocked_on_secrets(tmp_path: Path) -> None:
+    """含密钥的 job：跳过归档（fail-closed），源目录与归档包均不存在。"""
+    jobs_dir = tmp_path / "jobs"
+    d = _make_job(jobs_dir, "job-secret")
+    (d / "events.jsonl").write_text("key=sk-abcdef1234567890abcdef\n", encoding="utf-8")
+    import os
+
+    old = time.time() - 10 * 86400
+    os.utime(d / "events.jsonl", (old, old))
+    archive_dir = tmp_path / "archive" / "jobs"
+
+    dst = archive_job(d, archive_dir)
+
+    assert dst is None
+    assert d.exists()  # 源目录保留待人工处理
+    assert not list(archive_dir.glob("*.tar.gz"))
+
+
+def test_archive_log_redacts_before_compress(tmp_path: Path) -> None:
+    log = tmp_path / "run-2.log"
+    log.write_text(
+        "echo DEEPSEEK_API_KEY=sk-abcdef1234567890abcdef\nclean line\n", encoding="utf-8"
+    )
+
+    dst = archive_log(log)
+
+    assert dst is not None
+    with gzip.open(dst, "rt") as fh:
+        content = fh.read()
+    assert "sk-abcdef1234567890abcdef" not in content  # 敏感值不落档
+    assert "clean line" in content
+    assert not log.exists()

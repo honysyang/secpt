@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from secpt.runtime.keyguard import redact_private_keys
 from secpt.runtime.logsetup import configure_logging
 from secpt.runtime.metrics import counter_inc
 from secpt.runtime.stuck import StuckDetector
@@ -901,6 +902,12 @@ class Engine:
         cfg = self.cfg
         cfg.work_dir.mkdir(parents=True, exist_ok=True)
         configure_logging()
+        # 插件上下文注入：local_runner / analyze_binary 等经环境变量定位
+        # job 审计文件与 work_dir（outputs 落盘基准）；SECPT_VAR 若上层已设
+        # （如 benchmark 导出）则尊重不覆盖
+        os.environ["SECPT_JOB_ID"] = cfg.job_id
+        os.environ["SECPT_WORK_DIR"] = str(cfg.work_dir)
+        os.environ.setdefault("SECPT_VAR", "var")
         # trace 维度：job_id 必有；agent_id 非空才 bind（编排层传角色名，JSON 日志可按 agent 检索）
         _agent = {"agent": cfg.agent_id} if cfg.agent_id else {}
         log = _log.bind(job_id=cfg.job_id, **_agent)
@@ -1211,6 +1218,14 @@ class Engine:
                     # 串行记账：按原始顺序逐个执行原有回调体（语义与改造前逐一一致）
                     for (tc, fn_name, fn_args), result in zip(group, results, strict=True):
                         counter_inc("tool_calls_total", tool=fn_name)
+                        # keyguard：PEM 私钥块一律在进入记账/上下文前替换为占位符
+                        # （私钥不进 transcript / warroom / 上下文；占位符保留长度信息）
+                        result, _n_pk = redact_private_keys(result)
+                        if _n_pk:
+                            counter_inc("keyguard_redactions_total")
+                            if cfg.audit is not None:
+                                cfg.audit.log("keyguard.redact", tool=fn_name, blocks=_n_pk)
+                            log.warning("engine.keyguard_redact", tool=fn_name, blocks=_n_pk)
                         if self.hooks and hasattr(self.hooks, "on_tool"):
                             self.hooks.on_tool(tc.id, fn_name, fn_args)
 

@@ -1,7 +1,7 @@
 name: pwn
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 二进制利用专家：pwntools 脚本化交互，栈/堆/格式化字符串/内核入门
-tools: [bash, read_file, list_dir, write_file, report_finding, intel]
+tools: [bash, read_file, list_dir, write_file, report_finding, intel, pwn_checksec, analyze_binary, local_runner]
 bash_whitelist_extra: [gdb, checksec, objdump, readelf, ROPgadget, cyclic, patchelf, nc, sleep, ps, date, timeout, which, sh, curl, unzip, zipinfo]
 prior: pwn.md
 sandbox_image: secpt-sandbox-pwn        # pwntools+qemu+checksec（make sandbox-pwn-image 构建）
@@ -14,4 +14,6 @@ constraints:
   - 所有交互必须 pwntools 脚本化（write_file 写脚本，bash 执行）；不要裸 nc 手打
   - 本地 process() 调通再切 remote(host, port)
   - 脚本分阶段命名（leak/final），不覆盖能跑的版本
+  - 禁止加载私钥（本地执行/脚本均不得读取 id_rsa 等私钥材料）；任何私钥不会进入 transcript（引擎自动屏蔽）
+  - 爆破/符号执行等长任务先 small-input dry-run 验证流程（local_runner CPU 60s/内存 1GB 硬限，超限即杀）；生产规模放专门 worker
 note: 二进制利用专用：工具镜像 + pwn 先验；若无附件源码先 checksec 定防御面

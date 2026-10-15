@@ -1,0 +1,20 @@
+# crypto 插件模板：公钥材料查看（crypto 场景前置步骤）
+# 装配：profile:crypto 的 tools 里声明 crypto_pubkey（显式引用才装配，admin enable 语义）。
+# 安全边界：仅支持公钥/证书材料（openssl pkey -pubin 只读）；
+# 默认 profile 禁止加载私钥，keyguard 会拦截任何 PEM 私钥块写入 transcript。
+# 批量 helper（parse_cert/pubkey_info/rsa_modexp/hash_compare）见 crypto_helpers.py，
+# 需 SECPT_ENABLE_CRYPTO_HELPERS=1 admin enable。
+name: crypto_pubkey
+description: >
+  查看公钥参数（模数/指数/曲线），crypto 场景识别算法与弱参数的第一步。只读，
+  仅接受公钥材料（-pubin），拒绝私钥。
+schema:
+  type: object
+  properties:
+    pubkey:
+      type: string
+      description: 公钥文件路径（PEM 公钥；相对 work_dir 或绝对路径）
+  required: [pubkey]
+# 命令模板：{参数} 经 shlex.quote 后替换，argv 数组执行（禁 shell=True）
+run: "openssl pkey -pubin -in {pubkey} -text -noout"
+timeout_s: 30
