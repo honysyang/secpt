@@ -1619,12 +1619,15 @@ class Engine:
                                 file=sys.stderr,
                             )
                             break
-                    # 预算接近耗尽（wrap_at_pct）也触发收尾（单次，不重复注入）
-                    if (
-                        loop_phase == "running"
-                        and budget is not None
-                        and budget.cost_limit_cny > 0
-                        and budget.cost_cny >= budget.cost_limit_cny * _wrap_at_pct() / 100.0
+                    # 预算/步数接近耗尽（wrap_at_pct，设计 2.1 ②：步数或预算达
+                    # 该百分比直接收尾）也触发收尾（单次，不重复注入）
+                    if loop_phase == "running" and (
+                        (
+                            budget is not None
+                            and budget.cost_limit_cny > 0
+                            and budget.cost_cny >= budget.cost_limit_cny * _wrap_at_pct() / 100.0
+                        )
+                        or (cfg.max_steps > 0 and steps >= cfg.max_steps * _wrap_at_pct() / 100.0)
                     ):
                         loop_phase = "wrapping"
                         wrap_reason = "budget_pct"
