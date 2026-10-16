@@ -72,7 +72,9 @@ def role_stage(role: str, asset_scope: str = "") -> str:
         return (
             "【当前阶段：复验（verify）】\n对前置意图声称的 finding/flag 用独立 PoC "
             "重新复现（新 workspace / 新请求），复验通过才确认；复现失败的给出否定结论。\n"
-            "复验结论输出 ANSWER: <复验结果>。"
+            "复验结论输出 ANSWER: <复验结果>。\n"
+            "【硬约束】禁止 read_file 查看前置意图的旧 transcript/日志来照搬原证据——"
+            "复验必须用你自己发起的全新请求得出结论（独立 PoC），旧证据只作线索不作依据。"
         )
     if role == "report":
         return (
