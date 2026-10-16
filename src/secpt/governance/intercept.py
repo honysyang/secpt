@@ -25,7 +25,14 @@ import time
 import uuid
 from pathlib import Path
 
-DEFAULT_DB = Path(os.environ.get("SECPT_VAR", "var")) / "intercept.sqlite"
+
+def _default_db() -> Path:
+    # 调用时解析（模块级常量是 import 期快照：SECPT_VAR 在测试/多任务间漂移，
+    # 快照会把审批记录写进别的任务目录——与 JobStore 同款修复口径）
+    return Path(os.environ.get("SECPT_VAR", "var")) / "intercept.sqlite"
+
+
+DEFAULT_DB = _default_db()  # 兼容存量引用；新代码请用 _default_db()
 
 BLOCK_TAG = "【平台管控·非目标防御】"
 
@@ -103,7 +110,7 @@ class Interceptor:
     """规则求值 + 审批等待。eval 永远返回 (allowed: bool, message: str)。"""
 
     def __init__(self, db_path: Path | str | None = None, *, seed: bool = True) -> None:
-        self.db_path = Path(db_path) if db_path else DEFAULT_DB
+        self.db_path = Path(db_path) if db_path else _default_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)

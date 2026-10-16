@@ -97,6 +97,7 @@ def test_hooks_all_wired(tmp_path):
         "tokens",
         "compaction_requested",
         "compaction_completed",
+        "loop_phase",  # 三档止损状态机档位迁移（设计 §2）
     } == EVENT_TYPES
 
 
