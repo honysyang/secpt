@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -107,6 +109,7 @@ async def evaluate_job(
             reasoning=f"评判链异常（{e}），结果不可信，需人工复核",
         )
         _persist(verdict, job_dir)
+        _register_heuristic_review(verdict)
         return verdict
 
 
@@ -233,7 +236,63 @@ async def _evaluate(
             verdict.confidence = 0.6
             verdict.reasoning += "；自报答案与 ground truth 不符"
     _persist(verdict, job_dir)
+    if verdict.method == "heuristic":
+        _register_heuristic_review(verdict)
     return verdict
+
+
+def _register_heuristic_review(verdict: Verdict) -> None:
+    """heuristic 兜底 verdict（低置信，未经真实 judge）登记 intercept pending 人工复核队列。
+
+    幂等：同一 job 已有未结算复核记录则跳过。评判是观测层——登记失败绝不影响 verdict。
+    """
+    try:
+        from secpt.governance.intercept import Interceptor
+
+        icp = Interceptor()
+        with icp._conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) n FROM intercept_pending"
+                " WHERE job_id=? AND rule_name=? AND status='pending'",
+                (verdict.job_id, "评判复核-heuristic"),
+            ).fetchone()["n"]
+        if int(n) > 0:
+            return
+        pid = f"icp-verdict-{uuid.uuid4().hex[:8]}"
+        preview = (
+            f"job={verdict.job_id} complete={verdict.complete}"
+            f" conf={verdict.confidence} method={verdict.method}"
+            f" reason={verdict.reasoning[:120]}"
+        )
+        with icp._conn() as c:
+            c.execute(
+                """INSERT INTO intercept_pending
+                   (id,job_id,target,preview,rule_id,rule_name,status,ts)
+                   VALUES (?,?,?,?,?,?, 'pending', ?)""",
+                (
+                    pid,
+                    verdict.job_id,
+                    "verdict_review",
+                    preview[:200],
+                    -1,
+                    "评判复核-heuristic",
+                    time.time(),
+                ),
+            )
+        print(
+            f"[verdict] ⏸ heuristic 兜底已登记人工复核 #{pid}：{preview[:120]}"
+            f"（复核后 secpt approve {pid}）"
+        )
+        with contextlib.suppress(Exception):
+            from secpt.runtime.notify import notify
+
+            notify(
+                "approval_pending",
+                f"secpt 评判待复核 #{pid}（heuristic 兜底）",
+                f"{preview[:200]}\n人工复核后：secpt approve {pid}",
+            )
+    except Exception as e:
+        print(f"[verdict] 复核登记失败（忽略，不影响判定结果）: {e}")
 
 
 def _persist(verdict: Verdict, job_dir: Path) -> None:
