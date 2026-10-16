@@ -110,11 +110,24 @@ class StuckDetector:
     """
 
     # 同类报错指纹提取：取错误行首段做归一化（数字/时间戳/随机 id 脱敏）
-    _ERR_LINE_RE = re.compile(r"^\s*(?:Error|error|ERROR|错误)[:：]", re.MULTILINE)
+    # 平台状态类报错（JSON 形态，复评修复）：{"error": 409,...} / "code":"invalid_state"
+    # / max active challenge instances——非 "Error:" 前缀，旧口径完全抓不到
+    # （实测：跑分撞容器配额时模型对 409 反复重试烧步数，无任何"同类报错"提醒）
+    _PLATFORM_ERR_ALT = (
+        r'"error"\s*:\s*[45]\d{2}\b'
+        r'|"code"\s*:\s*"invalid_state"'
+        r"|max active challenge instances"
+    )
+    _ERR_LINE_RE = re.compile(
+        r"^\s*(?:Error|error|ERROR|错误)[:：]" + "|" + _PLATFORM_ERR_ALT,
+        re.MULTILINE,
+    )
     # P3 ⑤：滑动窗口口径的同类错误输入定义——治理类拒绝（元字符/白名单/限速）
-    # 也算错误输入；环境类输出（如 409 body 无 Error: 前缀）由调用方无须特判
+    # 也算错误输入；平台 JSON 状态错误同样计入（见 _PLATFORM_ERR_ALT）
     _ERR_INPUT_RE = re.compile(
-        r"^\s*(?:Error|error|ERROR|错误)[:：]|命令含未引用的 shell 组合构造|不在白名单",
+        r"^\s*(?:Error|error|ERROR|错误)[:：]|命令含未引用的 shell 组合构造|不在白名单"
+        + "|"
+        + _PLATFORM_ERR_ALT,
         re.MULTILINE,
     )
 

@@ -75,7 +75,6 @@ def _margin_window() -> int:
 def _margin_cost_cny() -> float:
     return _env_float("SECPT_MARGIN_COST_CNY", 0.05)
 
-
 WRAP_MSG = (
     "【收尾阶段】本步起进入收尾：剩余预算有限/本策略收益已趋零。\n"
     "只做三件事（严禁开新战线）：\n"
@@ -105,7 +104,6 @@ def _emit_loop_phase(
     except Exception:
         pass
     log.info("engine.loop_phase", phase=phase, reason=reason)
-
 
 # 结构化日志：生命周期事件（start/progress/compact/rollover/nudge/fallback/fatal）
 # 统一走 structlog（SECPT_LOG_JSON=1 → JSON，按 job_id 检索链路；默认控制台友好）
@@ -1239,13 +1237,16 @@ class Engine:
         # （nudge 后无改善→收尾注入→判 stalled 优雅退出）。STALLED 不抛异常、
         # 正常落 transcript/rounds，交编排层决定 RESET 或终态（红线：治理链不受
         # 循环状态影响，WRAPPING 只是追加 user 消息 + 记账，不锁工具）。
-        # （循环档位状态机由 detector nudge + 硬预算墙承担，见 §2；
-        # SECPT_LOOP_STOP=0 一键回退旧行为。）
+        loop_enabled = _loop_stop_enabled()
+        loop_phase = "running"  # running | nudged | wrapping
+        steps_since_nudge = 0  # nudge 后无结构性改善的步数（有改善清零）
+        wrap_steps = 0  # 进入 wrapping 后的步数（>= STALL_AFTER_WRAP 判 stalled）
+        wrap_reason = ""  # 进入 wrapping 的原因（nudge_no_improve/budget_pct/no_yield）
         _margin_win: deque = deque(maxlen=_margin_window())
         _margin_findings = 0  # 窗口内成果数滚动和（finding=产出，不是"新信息"）
         _margin_cost = 0.0  # 窗口内成本滚动和（CNY；无 budget tracker 时恒 0）
-        _prev_cost = 0.0
-        _step_findings = 0  # 本步新 finding 数（工具记账循环里累加）
+        _step_findings = 0  # 本步新 finding 数（工具记账循环里累加，步首清零）
+        _step_cost = 0.0  # 本步成本（budget.add 后算增量，步首清零）
 
         # ---------- S3 运行时四件套状态 ----------
         from secpt.core.context.estimator import effective_window, est_messages_tokens, est_tokens
@@ -1305,6 +1306,8 @@ class Engine:
                 steps += 1
                 session_steps += 1
                 elapsed = time.time() - t0
+                _step_findings = 0  # 三档止损：本步成果/成本计数（步首清零）
+                _step_cost = 0.0
 
                 if self.hooks and hasattr(self.hooks, "on_step"):
                     # 人在环路（steer）：hook 返回字符串则注入为 user 消息
