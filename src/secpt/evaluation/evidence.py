@@ -37,14 +37,29 @@ class Evidence:
     n_assistant_msgs: int = 0
 
     def transcript_excerpt(self, max_chars: int = 4000) -> str:
-        """给 judge 的紧凑轨迹摘要。"""
+        """给 judge 的紧凑轨迹摘要：头 + 尾双窗口采样。
+
+        单一尾部窗口会让多 rollover 的长任务丢失前段攻击路径成型过程（利用
+        链怎么搭起来的对"是否真正完成"的判定至关重要）。头窗给前 20 条调用
+        （侦察/路径成型），尾窗给最近 40 条（收尾证据），中间以省略标记断开。
+        """
+        head_n, tail_n = 20, 40
+        calls = self.tool_calls
+        if len(calls) <= head_n + tail_n + 5:
+            window = calls
+            omitted = 0
+        else:
+            window = calls[:head_n] + calls[-tail_n:]
+            omitted = len(calls) - head_n - tail_n
         lines: list[str] = []
-        for tc in self.tool_calls[-60:]:
+        for i, tc in enumerate(window):
+            if omitted and i == head_n:
+                lines.append(f"...（中间省略 {omitted} 条调用）...")
             arg = tc.args[:120]
             lines.append(f"[{tc.status or '?'}] {tc.name}({arg}) -> {tc.preview[:200]}")
         text = "\n".join(lines)
         if len(text) > max_chars:
-            text = text[-max_chars:]
+            text = text[: max_chars // 2] + "\n...(截断)...\n" + text[-max_chars // 2 :]
         return text
 
 

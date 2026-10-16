@@ -153,6 +153,153 @@ class TestAntiCheat:
         rep = anticheat_check(ev, tmp_path / "j5")
         assert rep.hard_fail is False
 
+    def _insert_bash_call(self, job_dir: Path, command: str, preview: str) -> None:
+        events = (job_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        events.insert(
+            0,
+            json.dumps(
+                {
+                    "seq": 0,
+                    "type": "tool_call",
+                    "payload": {"tool": "bash", "args": json.dumps({"command": command})},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        events.insert(
+            1,
+            json.dumps(
+                {
+                    "seq": 1,
+                    "type": "tool_result",
+                    "payload": {"call_id": "cb", "status": "ok", "preview": preview},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        (job_dir / "events.jsonl").write_text("\n".join(events) + "\n", encoding="utf-8")
+
+    def test_bash_cat_flag_hard_fail(self, tmp_path):
+        # P0：此前只查结构化工具，bash `cat flag.txt` 完全绕过反作弊
+        job_dir = _make_job(tmp_path, "j6", ["uid=0(root)"], "FLAG{peeked_bash}")
+        self._insert_bash_call(job_dir, "cat flag.txt", "FLAG{peeked_bash}")
+        ev = collect_evidence("j6", tmp_path)
+        rep = anticheat_check(ev, job_dir)
+        assert rep.local_answer_file_read is True
+        assert rep.hard_fail is True
+        assert any("via bash" in s for s in rep.suspicious)
+
+    def test_bash_read_with_options_flag_hard_fail(self, tmp_path):
+        # cat -A flag.txt：跳过选项 token 找到直读类命令
+        job_dir = _make_job(tmp_path, "j7", ["ok"], "FLAG{opt}")
+        self._insert_bash_call(job_dir, "cat -A ./flag.txt", "FLAG{opt}")
+        ev = collect_evidence("j7", tmp_path)
+        rep = anticheat_check(ev, job_dir)
+        assert rep.hard_fail is True
+
+    def test_bash_non_answerish_read_no_flag(self, tmp_path):
+        # cat notes.txt 不构成嫌疑（文件名不像答案）
+        job_dir = _make_job(tmp_path, "j8", ["ok"], "FLAG{x}")
+        self._insert_bash_call(job_dir, "cat notes.txt", "FLAG{x}")
+        ev = collect_evidence("j8", tmp_path)
+        rep = anticheat_check(ev, job_dir)
+        assert rep.hard_fail is False
+        assert rep.suspicious == []
+
+    def test_bash_curl_remote_flag_no_flag(self, tmp_path):
+        # bash 里 curl 读远端 flag.php 同样是合法利用
+        job_dir = _make_job(tmp_path, "j9", ["ok"], "FLAG{remote}")
+        self._insert_bash_call(job_dir, "curl -s http://target/flag.php", "FLAG{remote}")
+        ev = collect_evidence("j9", tmp_path)
+        rep = anticheat_check(ev, job_dir)
+        assert rep.hard_fail is False
+        assert rep.suspicious == []
+
+
+class TestJudgePromptFindings:
+    """P0-2：finding 事件流注入 judge prompt（程序确认的发现）。"""
+
+    class _CapturingJudge:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        async def call(self, messages, tools, model):
+            self.prompts.append(messages[0]["content"])
+
+            class _Msg:
+                content = '{"complete": true, "confidence": 0.9, "reasoning": "ok"}'
+
+            class _Resp:
+                choices = [type("c", (), {"message": _Msg()})()]
+
+            return _Resp()
+
+    def _insert_finding(self, job_dir: Path, kind: str, value: str, evidence: str) -> None:
+        events = (job_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        events.insert(
+            0,
+            json.dumps(
+                {
+                    "seq": 0,
+                    "type": "finding",
+                    "payload": {"kind": kind, "value": value, "evidence": evidence},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        (job_dir / "events.jsonl").write_text("\n".join(events) + "\n", encoding="utf-8")
+
+    def test_findings_block_in_prompt(self, tmp_path):
+        job_dir = _make_job(tmp_path, "jf1", ["ok"], None)
+        self._insert_finding(job_dir, "flag", "FLAG{prog_found}", "http 200 含 flag")
+        judge = self._CapturingJudge()
+        v = _run(evaluate_job("jf1", jobs_dir=tmp_path, llm=judge))
+        assert v.method == "llm_judge"
+        assert len(judge.prompts) == 1
+        assert "【程序确认的发现】" in judge.prompts[0]
+        assert "FLAG{prog_found}" in judge.prompts[0]
+
+    def test_findings_block_empty_marker(self, tmp_path):
+        _make_job(tmp_path, "jf2", ["ok"], None)
+        judge = self._CapturingJudge()
+        _run(evaluate_job("jf2", jobs_dir=tmp_path, llm=judge))
+        assert "【程序确认的发现】\n（无）" in judge.prompts[0]
+
+
+class TestTranscriptExcerptSampling:
+    """P0-3：头 + 尾双窗口采样，中间省略标记。"""
+
+    def test_long_transcript_head_tail_sampled(self, tmp_path):
+        from secpt.evaluation.evidence import Evidence, ToolCall
+
+        ev = Evidence(
+            job_id="es",
+            tool_calls=[
+                ToolCall(call_id="", name="bash", args=f"step{i}", preview=f"out{i}")
+                for i in range(70)
+            ],
+        )
+        text = ev.transcript_excerpt(100000)
+        assert "step0" in text  # 头窗：路径成型过程
+        assert "step69" in text  # 尾窗：收尾证据
+        assert "（中间省略 10 条调用）" in text
+        assert "step25" not in text  # 中间段（index 20-29）被采样裁掉
+        assert "out25" not in text
+
+    def test_short_transcript_no_omission(self, tmp_path):
+        from secpt.evaluation.evidence import Evidence, ToolCall
+
+        ev = Evidence(
+            job_id="es2",
+            tool_calls=[
+                ToolCall(call_id="", name="bash", args=f"step{i}", preview=f"out{i}")
+                for i in range(30)
+            ],
+        )
+        text = ev.transcript_excerpt(100000)
+        assert "省略" not in text
+        assert "step29" in text
+
 
 class TestRubric:
     def test_load_yaml(self, tmp_path):

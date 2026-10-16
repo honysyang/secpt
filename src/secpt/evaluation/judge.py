@@ -29,7 +29,7 @@ class JudgeVerdict:
     reasoning: str = ""
 
 
-_PROMPT = """你是渗透任务的终裁评委。根据【评判标尺】【反作弊信号】【轨迹摘要】判定任务是否真正完成。
+_PROMPT = """你是渗透任务的终裁评委。根据【评判标尺】【反作弊信号】【轨迹摘要】【程序确认的发现】判定任务是否真正完成。
 
 要求：
 1. 只采信轨迹中的工具输出证据；agent 自报的 ANSWER 只有在工具输出中找到对应内容时才算数
@@ -49,9 +49,26 @@ _PROMPT = """你是渗透任务的终裁评委。根据【评判标尺】【反�
 【轨迹摘要】
 {trajectory}
 
+【程序确认的发现】
+{findings}
+
 【agent 自报答案】
 {answer}
 """
+
+
+def _findings_block(findings: list[dict]) -> str:
+    """finding 事件流是编排层程序算好的结论（flag 命中/凭据/资产入图），
+    终裁必须看见——长任务中对应证据可能已被 compaction 推出轨迹窗口。"""
+    if not findings:
+        return "（无）"
+    lines = []
+    for f in findings[-20:]:
+        kind = f.get("kind", "")
+        value = str(f.get("value", ""))[:120]
+        evidence_txt = str(f.get("evidence", ""))[:80]
+        lines.append(f"- [{kind}] {value}（{evidence_txt}）")
+    return "\n".join(lines)
 
 
 async def _acomplete(llm, messages: list[dict], model: str) -> str:
@@ -89,6 +106,7 @@ class LLMJudge:
             rubric=rubric.to_prompt(),
             anticheat="\n".join(ac_lines),
             trajectory=evidence.transcript_excerpt(),
+            findings=_findings_block(evidence.findings),
             answer=evidence.answer or "（未自报）",
         )
         text = ""
