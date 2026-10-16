@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +25,15 @@ from secpt.core.job.models import TaskSpec
 from secpt.core.orchestrator.frontier import Frontier, frontier_db_path, run_frontier
 from secpt.core.orchestrator.ledger import ChallengeLedger
 from secpt.core.orchestrator.summary import ChainResult, RunSummary
+
+
+class BenchmarkUnavailable(RuntimeError):
+    """benchmark 平台不可用（任务已结束 / HTTP 错误 / 网络失败）。
+
+    快速失败而非降级：跑分依赖平台协议，回退单链只会对着死任务烧预算。
+    solve 顶层捕获本异常 → 清晰提示 + 退出码 2。
+    """
+
 
 DIFF_RANK = {"easy": 0, "medium": 1, "hard": 2}
 PER_CHALLENGE_STEP_BUDGET = 25  # 单题硬止损（先验纪律的运行时强制）
@@ -33,23 +43,88 @@ PER_CHALLENGE_STEP_BUDGET = 25  # 单题硬止损（先验纪律的运行时强�
 DIFF_STEP_BUDGET = {"easy": 15, "medium": 25, "hard": 40}
 
 
+def _platform_error(e: urllib.error.HTTPError) -> BenchmarkUnavailable:
+    """HTTPError → 可行动的 BenchmarkUnavailable（解析平台 JSON 错误体）。"""
+    body = ""
+    with contextlib.suppress(Exception):
+        body = e.read().decode("utf-8", errors="replace")[:300]
+    detail = ""
+    with contextlib.suppress(Exception):
+        d = json.loads(body)
+        detail = f"{d.get('code', '')}: {d.get('message', '')}".strip(": ")
+    if "finished" in body or "invalid_state" in body:
+        return BenchmarkUnavailable(
+            f"平台任务已结束（HTTP {e.code} {detail}）——本次跑分无法继续（所有端点都会 409）。\n"
+            "  处理：① 到平台创建**新任务**，更新 .env 的 BENCHMARK_TOKEN 与 vpn/ 配置；\n"
+            "  ② 若新任务复用相同题目编码（g-*）：旧账本会把历史 solved 当断点、running 当在途，\n"
+            "     建议归档 mv var/benchmark_ledger.sqlite var/benchmark_ledger.old.bak，\n"
+            "     或设置 BENCHMARK_TASK_ID=<新任务id> 让账本按任务隔离；\n"
+            "  ③ 重跑同一条 solve 命令。"
+        )
+    return BenchmarkUnavailable(f"平台返回 HTTP {e.code} {detail or body}")
+
+
 def fetch_challenges(
     *, base: str | None = None, token: str | None = None, timeout_s: float = 20.0
 ) -> list[dict]:
-    """拉题目列表（平台 list 即断点：correct_flag_count/is_completed）。"""
+    """拉题目列表（平台 list 即断点：correct_flag_count/is_completed）。
+
+    平台级失败（HTTP/网络/任务结束）统一抛 BenchmarkUnavailable（带可行动提示）；
+    此前 HTTPError 直接裸抛 → solve 顶层 traceback 崩溃。
+    """
     base = (base or os.environ.get("BENCHMARK_BASE_URL", "")).rstrip("/")
     token = token or os.environ.get("BENCHMARK_TOKEN", "")
     if not base or not token:
-        raise RuntimeError("BENCHMARK_BASE_URL / BENCHMARK_TOKEN 未设置（solve 预检应已拦截）")
+        raise BenchmarkUnavailable(
+            "BENCHMARK_BASE_URL / BENCHMARK_TOKEN 未设置（solve 预检应已拦截）"
+        )
     req = urllib.request.Request(
         f"{base}/openapi/v1/challenges",
         headers={"BENCHMARK_TOKEN": token},
     )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        raise _platform_error(e) from None
+    except urllib.error.URLError as e:
+        raise BenchmarkUnavailable(
+            f"平台连接失败: {getattr(e, 'reason', e)}（检查 VPN 是否连通，--vpn 可自举）"
+        ) from None
     if not isinstance(data, list):
-        raise RuntimeError(f"题目列表格式异常: {str(data)[:200]}")
+        raise BenchmarkUnavailable(f"题目列表格式异常: {str(data)[:200]}")
     return data
+
+
+def _load_fail_digest(title: str) -> str:
+    """重试失败上下文：按 title 指纹取回上一轮 settle 摘要（frontier 写台账）。
+
+    仅当上一轮未成功时注入——让重试"带记忆换路线"，而不是从零重打
+    （实测 19 道 exhausted 全是路线问题而非预算不足）。取不到返回空串。
+    """
+    try:
+        from secpt.core.orchestrator.frontier import settle_digest_key
+
+        p = (
+            Path(os.environ.get("SECPT_VAR", "var"))
+            / "knowledge"
+            / "settle_digests"
+            / f"{settle_digest_key(title)}.json"
+        )
+        if not p.is_file():
+            return ""
+        d = json.loads(p.read_text(encoding="utf-8"))
+        if str(d.get("status") or "") in ("success", "done"):
+            return ""
+        tail = str(d.get("tail") or "")[:900]
+        return (
+            "\n\n【上一轮尝试记录（务必换路线，勿原样重跑）】"
+            f"status={d.get('status')} steps={d.get('steps')} "
+            f"{str(d.get('fail_reason') or '')[:120]}\n"
+            f"上一轮最后的结论/卡点摘要：\n{tail}"
+        )
+    except Exception:
+        return ""
 
 
 def _sorted_open(challenges: list[dict], *, limit: int = 60) -> list[dict]:
@@ -74,6 +149,10 @@ BENCH_WORKER_OBJECTIVE = """【评测跑分循环 · 你的当前任务】
 对分配给你的这一道题，严格执行：start → 探测解题 → submit 每个 flag → close。
 铁律（详见已注入的先验 benchmark.md）：只打 API 给的 container_addr；每题必 close；
 超过 {budget} 步未出 flag 会被系统强制止损换题——你自己应先做决策（hint 或主动换题）。
+保留域纪律：example/example.com/.invalid/.test 等保留域与带 SECPT- 标记的 URL 是平台
+测试/金丝雀或占位地址，**不要主动请求**（含 DNS 探测/脚本内 urlopen）；外带类验证一律
+只用平台下发的 container_addr 或题面明确指定的平台通道。撞平台 409（配额/状态类）时：
+先 `python3 api.py holders` 看全局占用再决策，不要对同一条命令反复重试。
 完成后输出 ANSWER: <unique_code 结果：拿到几个 flag / 得分 / 卡点一句话>。
 """
 
@@ -223,12 +302,26 @@ async def run_benchmark(
     ledger: ChallengeLedger | None = None,  # P1：跨进程互斥账本（防重复解题）
 ) -> dict:
     """并行跑分主入口：选题入队（账本 claim 防跨进程重复）→ frontier 3 worker 并行。"""
-    challenges = fetch_challenges()
-    picked = _sorted_open(challenges)
-
     # P1：跨进程互斥账本（默认启用）——本进程已 claim 的题目才入队，
     # 其他 worker 已 claim / 已 solved 的题目跳过（省容器额度与步数）
     led = ledger or ChallengeLedger()
+
+    # 双开闸门（复评修复）：同任务已有活跃 run（其他存活 worker 持未过期租约）→
+    # 快速拒绝——两个 run × 2 worker 争 3 容器上限会互相饿死（实测 62 次 409、
+    # 1.5 小时只 settle 2 次）。死进程残留租约由 active_foreign_leases 过滤；
+    # 确需强制并行：SECPT_BENCHMARK_FORCE=1
+    if os.environ.get("SECPT_BENCHMARK_FORCE") != "1":
+        active = led.active_foreign_leases()
+        if active:
+            raise BenchmarkUnavailable(
+                f"同一跑分任务已有活跃 run（{len(active)} 个未过期租约："
+                f"{'、'.join(active[:5])}{'…' if len(active) > 5 else ''}）——"
+                "并发跑分会争抢平台容器上限导致双方 409 饿死。请等待其结束后重跑；"
+                "确认要强制并行请设 SECPT_BENCHMARK_FORCE=1。"
+            )
+
+    challenges = fetch_challenges()
+    picked = _sorted_open(challenges)
     claimed: list[tuple[dict, int]] = []  # (challenge, flags_total)
     for c in picked:
         uc = str(c.get("unique_code"))
@@ -261,15 +354,24 @@ async def run_benchmark(
         uc = str(c.get("unique_code"))
         flags_done = int(c.get("correct_flag_count") or 0)
         diff = str(c.get("difficulty") or "").lower()
-        budget = DIFF_STEP_BUDGET.get(diff, PER_CHALLENGE_STEP_BUDGET)  # P1 难度感知
+        # P1 难度感知 × 复评修复"旗数放大"：多旗大题按旗数放大预算（实测 b-02
+        # 六旗链式题只给 40×2 步全灭；mult = ceil(flags/2)，封顶 4 防失控）
+        mult = min(4, max(1, (flags_total + 1) // 2))
+        budget = DIFF_STEP_BUDGET.get(diff, PER_CHALLENGE_STEP_BUDGET) * mult
+        # title 保持跨轮稳定（旗数进度移入 goal）——重试摘要台账按 title 指纹取回：
+        # 「上一轮尝试记录（换路线，勿重复）」注入 goal（frontier._write_settle_digest 写）
+        title = f"通关 {uc}（{c.get('difficulty')} L{c.get('level')}）"
+        goal = (
+            f"unique_code={uc}；description={str(c.get('description') or '')[:300]}；\n"
+            f"当前进度: 已得 {flags_done}/{flags_total} 旗"
+            f"（{c.get('total_score')} 分题，剩余 {flags_total - flags_done} 个 flag）。\n"
+            f"先用 api.py start {uc} 拿 container_addr，解题后 submit，最后务必 close。\n"
+            f"脚本命名建议带 {uc} 前缀（便于日志区分）。"
+            f"{_load_fail_digest(title)}"
+        )
         fr.add(
-            f"通关 {uc}（{c.get('difficulty')} L{c.get('level')}，flag {flags_done}/{flags_total}）",
-            goal=(
-                f"unique_code={uc}；description={str(c.get('description') or '')[:300]}；\n"
-                f"已得分 {c.get('total_score')} 分题，剩余 {flags_total - flags_done} 个 flag。\n"
-                f"先用 api.py start {uc} 拿 container_addr，解题后 submit，最后务必 close。\n"
-                f"脚本命名建议带 {uc} 前缀（便于日志区分）。"
-            ),
+            title,
+            goal=goal,
             done_criteria="submit 全部剩余 flag（或判定不可解并已 close）后以 ANSWER: 收尾",
             priority=100 - rank,
             depth=0,
@@ -373,6 +475,11 @@ async def run_benchmark(
             model=model,
             frontier=fr,
             max_workers=max_parallel,
+            # 清单型任务关 planner（复评修复）：预置题即全部工作，规划层只在
+            # "探索型"入口（hunt）才有意义——此前未传 max_intents 撞缺省 60，
+            # 题数<60 时队列排空后 planner 会给已完成题产"幽灵意图"（容器全关
+            # 任务还在跑的直接原因）；钉死 total==max → can_plan 恒 False
+            max_intents=len(claimed),
             max_rounds=len(picked) + 5,
             stop_on_first_flag=False,  # 跑分模式：解完所有已入队题目，不因单个 flag 收敛
             on_started=_on_started,  # P0-2：意图真正开跑时才置 running

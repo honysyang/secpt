@@ -40,6 +40,26 @@ CREATE TABLE IF NOT EXISTS scope_done (
 """
 
 WORKER_ID = f"{os.getpid()}@{socket.gethostname()}"  # worker 标识（pid@host，去重键）
+
+
+def _lease_holder_alive(worker_id: str) -> bool:
+    """租约持有者是否仍存活（解析 pid@host，同主机才可判定）。
+
+    跨主机/解析失败 → 保守视为存活（不误放行）；同主机 pid 不存在 → 已死
+    （崩溃残留租约不该按 15min TTL 阻塞重启）。
+    """
+    try:
+        pid_s, host = worker_id.split("@", 1)
+        if host != socket.gethostname():
+            return True
+        os.kill(int(pid_s), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (ValueError, PermissionError, OSError):
+        return True
+
+
 LEASE_TTL_S = 900.0  # 租约时长（15 分钟，够一题硬止损 25 步）；心跳每 60s 续租
 
 
@@ -49,11 +69,15 @@ class ChallengeLedger:
     def __init__(self, db_path: Path | str | None = None, *, worker_id: str = "") -> None:
         # 默认库按调用时 SECPT_VAR 解析（模块级 DEFAULT_LEDGER 是 import 期快照，
         # 测试/多实例会漂移——与 frontier/findings 的取值口径一致）
-        self.db_path = (
-            Path(db_path)
-            if db_path
-            else Path(os.environ.get("SECPT_VAR", "var")) / "benchmark_ledger.sqlite"
-        )
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            var = Path(os.environ.get("SECPT_VAR", "var"))
+            # BENCHMARK_TASK_ID 设置时账本按任务隔离——新跑分任务复用同题编码（g-*）时，
+            # 旧任务的 solved/exhausted 断点不会误当本任务的进度（无该 env 时保持旧路径）
+            task = os.environ.get("BENCHMARK_TASK_ID", "").strip()
+            name = f"benchmark_ledger_{task}.sqlite" if task else "benchmark_ledger.sqlite"
+            self.db_path = var / name
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.worker_id = worker_id or WORKER_ID
         with self._conn() as c:
@@ -204,6 +228,22 @@ class ChallengeLedger:
             }
             for r in rows
         }
+
+    def active_foreign_leases(self) -> list[str]:
+        """其他 worker 持有的、未过期且持有者仍存活的租约（跑分双开检测用）。
+
+        复评修复：两个 run 并发打同一任务共抢平台容器上限（实测 62 次 409 互相
+        饿死）——启动闸门据此快速失败；死进程的残留租约（pid 已不存在）不计入，
+        避免崩溃后干等 15min TTL。
+        """
+        now = time.time()
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT unique_code, worker_id FROM challenges"
+                " WHERE status IN ('claimed','running') AND lease_until > ? AND worker_id != ?",
+                (now, self.worker_id),
+            ).fetchall()
+        return [str(r["unique_code"]) for r in rows if _lease_holder_alive(str(r["worker_id"]))]
 
     def owns(self, unique_code: str) -> bool:
         """本 worker 是否持有该题租约（close 所有权判定）。"""

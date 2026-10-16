@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -208,6 +210,34 @@ def _find_ground_truth(challenge_dir: Path) -> Path | None:
     return None
 
 
+def _make_cancel_handler(job_id: str):
+    """solve 前台进程的 SIGTERM/SIGHUP 处理器（复评修复）。
+
+    实测事故：终端关闭（SIGHUP）让跑分 run 无痕直死——1.5 小时日志里没有任何
+    取消/中断记录。本处理器保证三件事：① 落盘一条 status_change(cancelled)
+    事件（事后可复盘）② 打印 resume 指引 ③ 退出码 130。
+    不追求完整优雅取消（编排层协作取消链见 core/job/worker._CancelHook，
+    由 submit/forever 池路径使用）。
+    """
+
+    def _on_cancel(signum, _frame):
+        try:
+            from secpt.core.job.event import EventSink
+            from secpt.core.job.resume import jobs_dir
+
+            EventSink(job_id, jobs_dir()).status_change("cancelled")
+        except Exception:
+            pass
+        print(
+            f"\n[solve] 收到信号 {signum}（终端关闭/主动中断）——已中止并落盘。"
+            f"断点保留，恢复：secpt resume {job_id}",
+            file=sys.stderr,
+        )
+        raise SystemExit(130)
+
+    return _on_cancel
+
+
 def _feedback_experiences(job_id: str, outcome: bool) -> int:
     """C 反馈闭环：把本任务注入过的经验按最终成败回写（best-effort）。
 
@@ -363,9 +393,12 @@ def solve(
     # 理解智能体已产 GoalSpec 时直接沿用（不再二次 LLM）；benchmark 跑分是程序化
     # 协议不拆解；SECPT_GOALS=0 跳过（与 SECPT_EXPERIENCE 等开关风格一致）
     goals_on = os.environ.get("SECPT_GOALS", "1") != "0" and profile != "benchmark"
-    print(
-        f"[solve] 目标拆解层：{'启用' if goals_on else '关闭'}（SECPT_GOALS={os.environ.get('SECPT_GOALS', '1')}）"
+    _goals_why = (
+        "benchmark 豁免（程序化协议）"
+        if profile == "benchmark"
+        else f"SECPT_GOALS={os.environ.get('SECPT_GOALS', '1')}"
     )
+    print(f"[solve] 目标拆解层：{'启用' if goals_on else '关闭'}（{_goals_why}）")
     if goals_on and not is_rendered(objective):
         if understanding is not None:
             goal = understanding.goal  # 理解智能体产物：零额外调用
@@ -432,6 +465,7 @@ def solve(
 
     from secpt.core.job.store import JobStore
     from secpt.core.orchestrator import dag as _dag
+    from secpt.core.orchestrator.benchmark import BenchmarkUnavailable
 
     prof = _load_profile(profile)
     run_mode = route_mode(prof, mode)
@@ -440,10 +474,12 @@ def solve(
         store = JobStore()
         # benchmark 评测：并行跑分器（3 题并发 × 意图级止损）
         if prof.name == "benchmark" and run_mode in ("auto", "single"):
-            from secpt.core.orchestrator.benchmark import run_benchmark
+            from secpt.core.orchestrator.benchmark import BenchmarkUnavailable, run_benchmark
 
             try:
                 return await run_benchmark(spec, llm=None, model=model)
+            except BenchmarkUnavailable:
+                raise  # 平台级失败（任务结束/网络）：快速失败不降级，由 solve 顶层清晰提示
             except RuntimeError as e:
                 print(f"[solve] 并行跑分器初始化失败（{e}），回退单链")
         if run_mode == "stages":
@@ -498,8 +534,24 @@ def solve(
     if watch_enable:
         _watcher.start()
 
+    # P2：前台信号收尾（SIGTERM/SIGHUP → 落盘 cancelled + resume 指引 + 130）
+    import signal as _signal
+
+    _cancel = _make_cancel_handler(job_id)
+    for _sig in (_signal.SIGTERM, getattr(_signal, "SIGHUP", None)):
+        if _sig is not None:
+            with contextlib.suppress(ValueError, OSError):
+                _signal.signal(_sig, _cancel)  # 非主线程/平台不支持 → 保持默认行为
+
     try:
         summary = asyncio.run(_run())
+    except BenchmarkUnavailable as e:
+        # 平台级失败（如任务已结束 409）：快速失败——跑分依赖平台协议，降级没意义
+        print(f"\n[solve] Error: {e}")
+        return 2
+    except KeyboardInterrupt:
+        # Ctrl-C：与信号处理器同口径（落盘 + 指引）
+        _cancel(2, None)
     finally:
         _stop_watch.set()
         if watch_enable:
