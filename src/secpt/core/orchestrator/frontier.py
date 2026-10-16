@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -266,7 +267,9 @@ def _has_ws_output(job_id: str) -> bool:
 
     有产出 = 模型已取得中间进展（写出探测脚本/报告/利用代码），只是步数耗尽
     未收尾——按"攻击路径已成型就该打穿"允许续一段预算；无产出 = 空转，
-    硬止损不续。api.py 是编排层预置模板（每个 worker 首步必写），不计为进展。
+    硬止损不续。api.py 是编排层预置模板（每个 worker 首步必写），不计为进展；
+    transcript.json 是引擎收尾自落盘的会话记录，同样不是模型产出（排除它，
+    "空转不续"语义才真实生效——否则任何跑过的 job 都"有产出"）。
     """
     if not job_id:
         return False
@@ -277,7 +280,7 @@ def _has_ws_output(job_id: str) -> bool:
         if not ws.is_dir():
             return False
         for p in ws.rglob("*"):
-            if p.is_file() and p.name != "api.py" and p.stat().st_size > 0:
+            if p.is_file() and p.name not in ("api.py", "transcript.json") and p.stat().st_size > 0:
                 return True
     except Exception:
         return False
@@ -285,6 +288,48 @@ def _has_ws_output(job_id: str) -> bool:
 
 
 _CARRY_EXCLUDE_NAMES = {"transcript.json"}  # 会覆盖续步会话，不搬运
+
+
+async def _reset_handoff_summary(result: object, obj: str, llm: object) -> str:
+    """RESET 首条上下文：上轮会话的 handoff 摘要（设计 §3.2 四件套之一）。
+
+    优先 LLM 六段摘要（与 rollover 同一 summarizer，对上轮 transcript 生成）；
+    LLM 不可用/失败时退化为最后一条 assistant 正文尾部（确定性，与 settle
+    摘要台账同口径）。best-effort：任何失败都不阻断 RESET 主链。
+    """
+    msgs = list(getattr(result, "messages", None) or [])
+    try:
+        if msgs and llm is not None:
+            from secpt.core.context.summarize import get_summarizer
+
+            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+            summarizer = get_summarizer(llm, model="deepseek-chat", api_key=api_key)
+            h = await summarizer(obj, msgs)
+            if h and str(h).strip():
+                return str(h).strip()
+    except Exception:
+        pass
+    tail = ""
+    for m in reversed(msgs):
+        c = str(m.get("content") or "")
+        if m.get("role") == "assistant" and c.strip():
+            tail = c.strip()[:1200]
+            break
+    return tail or "（上轮无正文产出）"
+
+
+def _reset_negative_list(fr: object, intent: object) -> str:
+    """RESET 四件套之四：已验证否定的路线（recent_results 的 exhausted 聚合）。"""
+    try:
+        rows = fr.recent_results(4)  # duck-typing：Frontier.recent_results
+        lines = [
+            f"- [{r.get('status')}] {r.get('title', '')}: {r.get('fail_reason', '')}"
+            for r in rows
+            if r.get("status") in ("exhausted", "blocked") and r.get("fail_reason")
+        ]
+        return "\n".join(lines) if lines else "（暂无可复用否定记录）"
+    except Exception:
+        return "（否定清单不可用）"
 
 
 def _carry_ws_artifacts(old_job: str, new_job: str) -> str:
@@ -549,6 +594,270 @@ def _queue_verify_if_needed(fr: Frontier, base: str) -> bool:
     return True
 
 
+_RECURSE_MARKER = "已递归展开"
+
+
+def _pick_intent_model(role: str, default: str | None) -> str | None:
+    """§4.3 验证异构：verify 意图可用 SECPT_VERIFY_MODEL 指定异构模型（缺省=主模型）。
+
+    独立子 job（会话独立 ✓）+ 容器独立已有；异构模型把"同模型同盲区"概率打掉
+    （MAPTA/XBOW 对照：validation 独立成角色）。只影响 verify 角色，其余角色
+    恒用主模型。
+    """
+    if role == "verify":
+        v = os.environ.get("SECPT_VERIFY_MODEL", "").strip()
+        if v:
+            return v
+    return default
+
+
+def retro(fr: Frontier, *, base: str = "") -> str:
+    """复盘会（设计 §4.1）：确定性阶段路由（零 LLM，纯 SQL/计数）。
+
+    把"planner 该不该再规划"从模型状态里拿出来——阶段由状态定，planner 只管内容：
+    - converge：全部 subgoal settled（与主循环现有收敛判据同口径）
+    - recurse ：存在"复核后仍 exhausted 的路线型失败"（step_exceeded/wallclock，
+                未展开过、资产尚无任何 confirmed finding）→ 主循环做失败驱动
+                局部递归（§4.2，ADaPT 语义）
+    - continue：其余（常规 planner 轮）
+    """
+    try:
+        if fr.all_subgoals_settled():
+            return "converge"
+    except Exception:
+        pass
+    if _find_recurse_candidate(fr, base=base) is not None:
+        return "recurse"
+    return "continue"
+
+
+def _find_recurse_candidate(fr: Frontier, *, base: str = "") -> dict | None:
+    """找一条可局部递归展开的父意图：路线型失败 + 终态穷尽 + 未展开过。
+
+    路线型失败两种形态：
+    - 复核后仍败：fail_reason 含 step_exceeded/wallclock 且"（尝试 2/3 次）"
+      （首轮失败会进自动复核，复核后的 exhausted 才是真路线穷尽）；
+    - 意图级步数预算硬止损："超意图步数预算"（带 max_steps 的意图不进复核、
+      一次即终态——跑分 exhausted 题群正是这种形态，正是递归要救的人群）。
+    """
+    try:
+        with fr._conn() as c:
+            rows = c.execute(
+                """SELECT id,title,asset_scope,depth,done_criteria,fail_reason FROM intents
+                   WHERE status='exhausted'
+                   ORDER BY updated_at DESC LIMIT 8"""
+            ).fetchall()
+        for r in rows:
+            why = str(r["fail_reason"] or "")
+            if _RECURSE_MARKER in why:
+                continue  # 每父意图最多展开一层（防递归爆炸）
+            if "超意图步数预算" in why:
+                pass  # 硬止损：带 max_steps 的意图无复核轮，一次即终态
+            elif ("step_exceeded" in why or "wallclock_exceeded" in why) and (
+                "（尝试 2 次）" in why or "（尝试 3 次）" in why
+            ):
+                pass  # 复核后仍败的路线型失败
+            else:
+                continue  # error/budget/首轮失败等：展开无用
+            asset = str(r["asset_scope"] or "").strip()
+            if asset and _asset_has_confirm(base, asset):
+                continue  # 资产已有 confirmed 产出：不是路线问题，展开无用
+            return dict(r)
+    except Exception:
+        return None
+    return None
+
+
+def _asset_has_confirm(base: str, asset: str) -> bool:
+    """该资产是否已有 confirmed finding（跨子 job，job_id 前缀匹配）。"""
+    try:
+        from secpt.findings.store import FindingStore
+
+        for f in FindingStore(Path(os.environ.get("SECPT_VAR", "var")) / "findings.sqlite").list(
+            status="confirmed", limit=1000
+        ):
+            if not str(f.job_id or "").startswith(base):
+                continue
+            hay = f"{f.target}\n{f.title}\n{f.description}"
+            if asset in hay:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+# §4.4 演化提案：finding 值里的资产形态（URL / IPv4），用于"题面外资产"判定
+_DRIFT_TOKEN_RE = re.compile(r"https?://[^\s'\"]+|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _detect_goal_drift(base: str, objective: str) -> str | None:
+    """题面外资产集中（>50% confirmed 无关 且 ≥2 条）→ 返回演化提案文本。
+
+    侦察推翻题面假设时的确定性信号：已确认发现集中在题面资产之外，说明目标
+    理解可能错了（如题面给的是入口 A，真实可利用面在旁站 B）。纯计数、零 LLM。
+    """
+    try:
+        from secpt.findings.store import FindingStore
+
+        rows = [
+            f
+            for f in FindingStore(
+                Path(os.environ.get("SECPT_VAR", "var")) / "findings.sqlite"
+            ).list(status="confirmed", limit=1000)
+            if str(f.job_id or "").startswith(base)
+        ]
+    except Exception:
+        return None
+    if len(rows) < 2:
+        return None
+    unrelated: list[object] = []
+    for f in rows:
+        val = f.target or f.title
+        toks = set(_DRIFT_TOKEN_RE.findall(val))
+        # URL 归一化到 origin（scheme://host）再比对——题面常只给入口域名，
+        # 全路径 containment 会把同站 finding 误判为题面外资产
+        norm = set()
+        for t in toks:
+            m = re.match(r"(https?://[^/]+)", t)
+            norm.add(m.group(1) if m else t)
+        if toks and not any(t in (objective or "") for t in norm):
+            unrelated.append(f)
+    if len(unrelated) >= 2 and len(unrelated) * 2 > len(rows):
+        lines = [f"- {(f.target or f.title)[:120]}" for f in unrelated[:4]]
+        return "已确认发现集中在题面资产之外（疑似目标理解偏差）：\n" + "\n".join(lines)
+    return None
+
+
+def _queue_goal_revision(
+    fr: Frontier, *, base: str, objective: str, proposal: str, mode: str
+) -> bool:
+    """演化提案意图入队 + 审批处置（§4.4，复用 intercept 审批基建）。
+
+    mode=ask（默认）：提案进 intercept pending 队列等人工审批（扩 scope 的提案
+    永远走这条，ROE 不可自动化）；mode=auto：纯细化类自动批准；mode=off 由
+    调用方先行过滤。幂等：已有未结算的 revision 意图不再重复入队。
+    """
+    try:
+        with fr._conn() as c:
+            n = c.execute(
+                "SELECT COUNT(*) n FROM intents WHERE source='revision'"
+                " AND status IN ('open','running','blocked')"
+            ).fetchone()["n"]
+        if int(n) > 0:
+            return False
+        fr.add(
+            "目标演化提案（待审批）",
+            goal=(
+                f"【提案依据】{proposal}\n"
+                f"【当前目标】{objective[:200]}\n"
+                "处置：人工审批通过后由上层重渲染目标/细化 scope；否决则维持原目标。"
+            ),
+            done_criteria="提案经人工审批处置（批准细化/否决维持）",
+            priority=10,
+            depth=0,
+            source="revision",
+        )
+        if mode == "ask":
+            try:
+                from secpt.governance.intercept import Interceptor
+
+                icp = Interceptor()
+                pid = f"icp-goal-{uuid.uuid4().hex[:8]}"
+                with icp._conn() as c:
+                    c.execute(
+                        """INSERT INTO intercept_pending
+                           (id,job_id,target,preview,rule_id,rule_name,status,ts)
+                           VALUES (?,?,?,?,?,?, 'pending', ?)""",
+                        (
+                            pid,
+                            base,
+                            "goal_revision",
+                            proposal[:200],
+                            -1,
+                            "目标演化提案",
+                            time.time(),
+                        ),
+                    )
+                print(
+                    f"[frontier] ⏸ 目标演化提案待审批 #{pid}：\n{proposal[:200]}\n"
+                    f"（批准：secpt approve {pid} / 拒绝：secpt deny {pid}）"
+                )
+                with contextlib.suppress(Exception):
+                    from secpt.runtime.notify import notify
+
+                    notify(
+                        "approval_pending",
+                        f"secpt 目标演化提案待审批 #{pid}",
+                        f"{proposal[:200]}\n批准：secpt approve {pid} / 拒绝：secpt deny {pid}",
+                    )
+            except Exception as e:
+                print(f"[frontier] 提案审批登记失败（忽略，意图仍在队列）: {e}")
+        return True
+    except Exception:
+        return False
+
+
+def _expand_recurse(fr: Frontier, *, base: str, max_intents: int) -> int:
+    """失败驱动局部递归（§4.2）：编排层直接产结构化子意图（不经 planner LLM）。
+
+    只在失败时展开（ADaPT 核心）；两条子意图走正常租约/依赖/复核链。返回入队条数
+    （0 = 无可展开 / 达意图上限）。planner 也可产同类意图——双轨并存，这条保证
+    "planner 忘了展开"时系统仍会动。
+    """
+    cand = _find_recurse_candidate(fr, base=base)
+    if cand is None:
+        return 0
+    try:
+        with fr._conn() as c:
+            total = int(c.execute("SELECT COUNT(*) n FROM intents").fetchone()["n"])
+        if total + 2 > max_intents:
+            return 0  # 意图预算守门：递归不突破调用方上限
+        pid = cand["id"]
+        title = str(cand["title"] or "")
+        asset = str(cand["asset_scope"] or "").strip()
+        depth = int(cand["depth"] or 0)
+        parent_criteria = str(cand.get("done_criteria") or "").strip()
+        asset_txt = asset or "父意图目标"
+        why = str(cand["fail_reason"] or "")[:80]
+        sub1 = fr.add(
+            f"重勘表层：{title}"[:80],
+            goal=(
+                f"对 {asset_txt} 枚举此前路线未覆盖的表层（读源码/robots/API 目录/参数面）。"
+                f"父意图「{title}」路线型失败（{why}）——只找父路线没试过的新面，"
+                "不重复已验证否定的路线。"
+            ),
+            done_criteria="产出 ≥1 条新端点或明确证明无",
+            priority=7,
+            depth=depth + 1,
+            source="retro_recurse",
+            role="recon",
+            asset_scope=asset,
+        )
+        fr.add(
+            f"换路线再打：{title}"[:80],
+            goal=(
+                f"基于重勘（依赖 {sub1}）的新端点，对 {asset_txt} 换一条与父路线"
+                f"（{why}）完全不同的攻击路线，达成父意图原目标：{title}。"
+            ),
+            done_criteria=parent_criteria
+            or f"达成父意图原目标：{title}（父判据缺失，按原目标验收）",
+            priority=8,
+            depth=depth + 1,
+            source="retro_recurse",
+            role="exploit",
+            asset_scope=asset,
+            depends_on=sub1,
+        )
+        with fr._conn() as c:
+            c.execute(
+                "UPDATE intents SET fail_reason = fail_reason || ? WHERE id = ?",
+                (f" [{_RECURSE_MARKER}]", pid),
+            )
+        return 2
+    except Exception:
+        return 0
+
+
 class Frontier:
     """意图队列（SQLite 持久化 todolist）。"""
 
@@ -805,7 +1114,7 @@ class Frontier:
         """
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM intents WHERE status='blocked'"
+                "SELECT * FROM intents WHERE status='blocked' AND source != 'revision'"
                 " ORDER BY priority DESC, depth DESC LIMIT 20"
             ).fetchall()
         n = 0
@@ -1317,6 +1626,30 @@ async def run_frontier(
         # report 角色：确定性聚合（不耗 LLM 步数），落盘报告后结算
         if getattr(intent, "role", "") == "report":
             return await _run_report(intent)
+        # revision 角色（§4.4 演化提案）：确定性处置——不烧 LLM 步数，登记后
+        # 挂起等人工审批（ask 模式的审批记录在 _queue_goal_revision 已落 intercept 队列）
+        if getattr(intent, "source", "") == "revision":
+            fr.settle(
+                intent.id,
+                status="blocked",
+                result="目标演化提案已登记",
+                fail_reason="等待人工审批（secpt approve/deny 对应 intercept pending 记录）",
+            )
+            async with chains_lock:
+                chains.append(
+                    ChainResult(
+                        intent=intent.title,
+                        role="revision",
+                        asset_scope="",
+                        status="blocked",
+                        steps=0,
+                        depth=intent.depth,
+                        source=intent.source,
+                    )
+                )
+            with contextlib.suppress(Exception):
+                wake_q.put_nowait(intent.id)
+            return None
         # 加强①配套：同资产已被完成（**本次运行**的进程内广播）→ 跳过执行直接
         # 结算 done（省一整轮意图成本）。注意用 local 判定：持久账本里的
         # 历史 scope_done 不足以作废本任务意图（新任务重测同一资产应照跑）。
@@ -1377,7 +1710,7 @@ async def run_frontier(
                 profile=profile,
                 job_id=job,
                 llm=llm,
-                model_primary=model,
+                model_primary=_pick_intent_model(getattr(intent, "role", ""), model),
                 hook_factory=hook_factory,
                 # G1 目标授权：意图资产即该子任务授权目标（无资产意图不启用 scope）
                 scope_entries=[intent.asset_scope] if intent.asset_scope else None,
@@ -1416,6 +1749,55 @@ async def run_frontier(
                 # 续跑也未收尾：累计步数（仍走 exhausted 止损）
                 with contextlib.suppress(Exception):
                     result.steps = int(result.steps) + int(result2.steps)
+        # ---- RESET（设计 §3）：stalled → 换会话重建（restart beats patching）----
+        # 触发：三档止损判 stalled（策略级卡死，区别于预算墙）+ ws 有实质产出。
+        # 与 r2 续步（同会话链延续）不同，与 rollover（同会话换链、保 prefix
+        # cache）也不同：RESET 换会话——新 job_id 独立事件流/工作区，从外部状态
+        # （handoff 四件套）重建上下文，丢掉带着旧假设越跑越脏的会话。
+        # 门：首尝才 RESET（attempts 门 = 每意图上限 1 次，防死循环）；空转
+        # （ws 无产出）不重建，直接走下方 exhausted 语义。
+        if (
+            result.status == "stalled"
+            and not getattr(result, "flag", "")
+            and _budget > 0
+            and int(getattr(intent, "attempts", 1) or 1) <= 1
+            and _has_ws_output(result.job_id or "")
+        ):
+            _job_rs = f"{_job}-rs"
+            _manifest = _carry_ws_artifacts(result.job_id or "", _job_rs)
+            _handoff = await _reset_handoff_summary(result, _obj, llm)
+            _negs = _reset_negative_list(fr, intent)
+            _obj_rs = (
+                _obj + "\n\n【RESET 重建（编排层注入）】上一会话已策略级卡死（stalled），"
+                "本会话从外部状态重建上下文，严禁原样重跑旧路线：\n"
+                f"1. 上轮 handoff 摘要：\n{_handoff}\n"
+                f"2. 已复制工作区产物（继续用，不要推倒重来）：\n{_manifest}\n"
+                f"3. 已验证否定的路线（勿重复踩坑）：\n{_negs}\n"
+                "基于以上状态选一条与上轮不同的路线推进，尽快以 ANSWER: 收尾。"
+            )
+            result_rs = await asyncio.to_thread(_exec, _obj_rs, _job_rs, _budget)
+            if result_rs.job_id:
+                async with chains_lock:
+                    sub_jobs.append(result_rs.job_id)
+            try:
+                from secpt.runtime.metrics import counter_inc
+
+                counter_inc(
+                    "loop_reset_total", outcome="recovered" if result_rs.flag else "exhausted"
+                )
+            except Exception:
+                pass
+            if getattr(result_rs, "flag", ""):
+                # RESET 拿到成果：采用其结果（资产检查保留首段 job_id）
+                _jid_keep = result.job_id
+                result = result_rs
+                result.job_id = _jid_keep
+            else:
+                # RESET 也未收尾：累计步数，按 RESET 后状态走下方 settle 分支
+                # （stalled 不在复核名单 → 直接 exhausted，不再重建，防死循环）
+                with contextlib.suppress(Exception):
+                    result.steps = int(result.steps) + int(result_rs.steps)
+                result.status = result_rs.status
         answer = result.flag or ""
         if answer:
             status, why = "done", ""
@@ -1661,6 +2043,24 @@ async def run_frontier(
                     continue  # worker 认领 report 意图执行；执行完再走收敛判定
             if fr.all_subgoals_settled():
                 break  # Goals 覆盖度驱动收敛：所有子目标已结算（done/exhausted）
+            # 复盘会 retro()（设计 §4.1）：空队列时先确定性路由——失败驱动局部递归
+            # （§4.2）优先于"规划两轮无产出就收敛"。阶段由状态定：recurse 时编排层
+            # 直接产结构化子意图（不经 planner LLM），防"planner 忘了展开"时系统卡死
+            if (
+                retro(fr, base=base) == "recurse"
+                and _expand_recurse(fr, base=base, max_intents=max_intents) > 0
+            ):
+                continue  # 子意图已入队，worker 认领执行
+            # 演化提案（§4.4）：题面外资产集中 → 受控改向通道。ask（默认）进
+            # intercept pending 队列等人工审批；auto 只自动批准纯细化类；
+            # off 关闭。扩 scope 永远 require 人工（ROE 边界不可自动化）
+            _rev_mode = os.environ.get("SECPT_GOAL_REVISION", "ask")
+            if _rev_mode != "off":
+                _drift = _detect_goal_drift(base, objective)
+                if _drift and _queue_goal_revision(
+                    fr, base=base, objective=objective, proposal=_drift, mode=_rev_mode
+                ):
+                    continue  # 提案意图已入队（确定性处置，blocked 等审批）
             if idle_rounds >= 2 or not can_plan:
                 break  # 空队列 + 无法再规划（意图数达上限/规划两轮无产出）→ 收敛
             timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）

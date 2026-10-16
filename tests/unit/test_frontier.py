@@ -534,6 +534,7 @@ class TestRecheckOnce:
                 llm=object(),
                 planner_llm=_PlannerLLM(["[]"]),
                 max_rounds=3,
+                max_intents=1,  # P3 复盘会：意图上限封住失败递归展开（§4.2 受 max_intents 约束），本测只验复核
             )
         )
         assert len(calls) == 2  # 首跑 + 自动复核一次
