@@ -23,7 +23,8 @@ secpt solve <dir> -p multistage               # 多阶段：recon → getshell �
 - **多链并发安全**：EventSink 线程锁 + flock 文件锁 + 跨进程 seq 单调；工具调用按 `call_id` 精确配对（不再依赖 FIFO）；SQLite 写入 busy 指数退避重试
 - **可观测性**：structlog JSON 日志（`SECPT_LOG_JSON=1`，按 job_id/agent 检索）+ 零依赖 Prometheus 指标（`secpt worker metrics --port 9100`）+ 18 类事件流 `events.jsonl`
 - **越用越好用（learning 闭环）**：每次运行 LLM 蒸馏经验入 `var/knowledge/experiences.jsonl`，下次同类任务自动注入 top-3 历史经验（`SECPT_EXPERIENCE=0` 关闭）
-- **工具插件（tools/plugins/）**：YAML 声明式集成外部工具/其他智能体能力（如 getshell），模板参数 shlex.quote 防注入；profile `tools:` 声明即装配
+- **工具插件（tools/plugins/）**：YAML 声明式集成外部工具/其他智能体能力（如 getshell），模板参数 shlex.quote 防注入；profile `tools:` 声明即装配。内置 `web_search`（Tavily/Brave/SearXNG 三选一，服务型靶场"指纹→已知漏洞"打法）+ `browser_*`（Playwright）
+- **子智能体（delegate 工具）**：主链按需派生**一次性子智能体**（独立上下文、结论压缩回传、结构性禁递归、治理继承、子工作区挂靠父 ws）——市场共识形态（Claude Code Task / Deep Agents subagent）；`SECPT_DELEGATE=1` 开启。执行层保持单链，编排层按"清单型关规划（benchmark）/探索型开规划（hunt）"分流
 - **多阶段渗透（profile stages）**：recon → getshell → privesc 串行编排，共享 workspace，阶段交付物自动交接
 - **AI 评判（不依赖 flag 正则）**：`secpt judge <job_id> [--ground-truth FILE]`——反作弊 → Jev 门控 → LLM judge 终裁
 - **7×24 长任务**：`--wall 0` 不限墙钟，compaction/rollover 上下文自愈，卡死切换器（六判据）自动纠偏，协作式取消

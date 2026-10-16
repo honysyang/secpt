@@ -22,6 +22,7 @@ import re
 import shlex
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -32,6 +33,79 @@ from secpt.runtime.keyguard import redact_private_keys
 from secpt.runtime.logsetup import configure_logging
 from secpt.runtime.metrics import counter_inc
 from secpt.runtime.stuck import StuckDetector
+
+
+# ---- 三档止损状态机（设计 docs/设计-工作循环形态.md §2）----
+# 档位由状态机定，模型只负责内容质量（Cognition 教训：不要求模型自己知道该停）。
+# 全部 env 可调；SECPT_LOOP_STOP=0 一键回退旧行为（只留 nudge + 硬预算墙）。
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def _loop_stop_enabled() -> bool:
+    return os.environ.get("SECPT_LOOP_STOP", "1") != "0"
+
+
+def _wrap_after_nudge() -> int:
+    return _env_int("SECPT_WRAP_AFTER_NUDGE", 8)
+
+
+def _wrap_at_pct() -> float:
+    return _env_float("SECPT_WRAP_AT_PCT", 90.0)
+
+
+def _stall_after_wrap() -> int:
+    return _env_int("SECPT_STALL_AFTER_WRAP", 8)
+
+
+def _margin_window() -> int:
+    return _env_int("SECPT_MARGIN_WINDOW", 20)
+
+
+def _margin_cost_cny() -> float:
+    return _env_float("SECPT_MARGIN_COST_CNY", 0.05)
+
+
+WRAP_MSG = (
+    "【收尾阶段】本步起进入收尾：剩余预算有限/本策略收益已趋零。\n"
+    "只做三件事（严禁开新战线）：\n"
+    "1. 用你已确认的事实给出当前结论（含证据：文件:行 / step N / 响应片段）\n"
+    "2. 列出未完成项与已验证否定的路线（防后续会话重复踩坑）\n"
+    "3. 以 ANSWER: <结论> 收尾（有 flag 给 flag；没有就给当前结论摘要）"
+)
+
+
+def _emit_loop_phase(
+    engine_hooks: object, audit: object, log: object, *, phase: str, reason: str = ""
+) -> None:
+    """loop_phase 事件三通道：事件流（EventSink.write）> 审计 > 结构化日志。
+
+    观测层 best-effort：任何通道失败都不阻断主循环（红线 3）。
+    """
+    try:
+        if engine_hooks is not None and hasattr(engine_hooks, "write"):
+            engine_hooks.write("loop_phase", {"phase": phase, "reason": reason})
+            return
+    except Exception:
+        pass
+    try:
+        if audit is not None:
+            audit.log("loop_phase", phase=phase, reason=reason)
+            return
+    except Exception:
+        pass
+    log.info("engine.loop_phase", phase=phase, reason=reason)
+
 
 # 结构化日志：生命周期事件（start/progress/compact/rollover/nudge/fallback/fatal）
 # 统一走 structlog（SECPT_LOG_JSON=1 → JSON，按 job_id 检索链路；默认控制台友好）
@@ -268,8 +342,10 @@ def _split_parallel_groups(items: list) -> list:
 
     for item in items:
         _tc, fn_name, fn_args = item
-        if fn_name == "bash":
-            # bash 一律串行：先冲掉无副作用组，自身独占一组（不并行、不参与依赖追踪）
+        if fn_name in ("bash", "delegate"):
+            # bash / delegate 一律串行：先冲掉无副作用组，自身独占一组。
+            # delegate 串行的理由同 bash：子链 run() 会覆写进程级 SECPT_JOB_ID/
+            # SECPT_WORK_DIR 环境变量，并行多 delegate 会互相踩
             _flush()
             groups.append([item])
             continue
@@ -471,6 +547,19 @@ def extract_scope_targets(command: str) -> list[str]:
     return uniq
 
 
+# RFC 2606/6761 保留域（金丝雀/占位 URL 的典型形态；scope 拒绝时给专属提示）
+_RESERVED_TLDS = (".example", ".invalid", ".test", ".localhost")
+_RESERVED_DOMAINS = {"example.com", "example.net", "example.org", "localhost"}
+
+
+def is_reserved_target(target: str) -> bool:
+    """保留域判定：example/invalid/test 等 TLD 与 example.* 二级域。"""
+    t = target.strip().lower().rstrip(".")
+    if not t:
+        return False
+    return t in _RESERVED_DOMAINS or t.endswith(_RESERVED_TLDS)
+
+
 def is_loopback_target(target: str) -> bool:
     """本地回环一律放行：渗透探测 SSRF 时请求 127.0.0.1:3000 是合法行为。"""
     t = target.strip().lower()
@@ -510,7 +599,20 @@ def _scope_check(cfg: RunConfig, command: str) -> str | None:
             if cfg.audit is not None:
                 with contextlib.suppress(Exception):
                     cfg.audit.log("scope.denied", target=str(e)[:200], command=command[:200])
-            return f"Error: {e}（目标必须在授权范围内；如需扩展设置 SECPT_SCOPE_ALLOW）"
+            # 保留域专属提示（复评修复）：benchmark 金丝雀/占位外带地址尝试会被拦，
+            # 旧消息只教"设 SECPT_SCOPE_ALLOW"——对保留域是错误引导（实测模型据此
+            # 逐字分析 scope 语义烧了十来个步数）
+            _reserved = [t for t in targets if is_reserved_target(t)]
+            _hint = (
+                "\n⚠ "
+                + "、".join(_reserved[:3])
+                + " 属保留域/测试域（example/invalid/test 等）——常见于平台金丝雀或占位"
+                "外带地址，不要对其发起请求（含 DNS 探测与脚本内请求）；"
+                "外带类验证请使用平台下发的 container_addr 或题面明确指定的通道。"
+                if _reserved
+                else ""
+            )
+            return f"Error: {e}（目标必须在授权范围内；如需扩展设置 SECPT_SCOPE_ALLOW）{_hint}"
         # 校验器自身异常：fail-open + audit（观测治理层不阻断主链路）
         print(f"[scope] 求值失败（放行）: {e}", file=sys.stderr)
         if cfg.audit is not None:
@@ -1005,11 +1107,19 @@ class Engine:
         summarizer=None,
         extra_tools: dict | None = None,
         verbose: bool = False,
+        enable_delegate: bool | None = None,
     ) -> None:
         self.cfg = cfg
         self.llm = llm
         self.tools = tools if tools is not None else make_tool_fns(cfg)
         self.extra_tools = extra_tools or {}
+        # delegate 子智能体工具（市场标准形态；默认关，SECPT_DELEGATE=1 开启）。
+        # 子链由 make_delegate_tool 以 enable_delegate=False 构造——结构性禁递归
+        if enable_delegate is None:
+            enable_delegate = os.environ.get("SECPT_DELEGATE", "0") == "1"
+        if enable_delegate and "delegate" not in self.extra_tools:
+            _schema, _fn = make_delegate_tool(cfg, llm)
+            self.extra_tools["delegate"] = (_schema, _fn)
         self._extra_schemas: list[dict] = []
         for name, (schema, fn) in self.extra_tools.items():
             if _extract_governance(schema).get("network"):
@@ -1123,6 +1233,19 @@ class Engine:
         detector = StuckDetector(
             cfg.stuck_threshold, cfg.stuck_increment, wait_cap=cfg.stuck_wait_cap
         )
+
+        # ---- 三档止损状态机（设计 §2）：RUNNING→NUDGED→WRAPPING→STALLED ----
+        # 与 detector 的职责分界：detector 管"检测"（四触发器不变），这里管"档位"
+        # （nudge 后无改善→收尾注入→判 stalled 优雅退出）。STALLED 不抛异常、
+        # 正常落 transcript/rounds，交编排层决定 RESET 或终态（红线：治理链不受
+        # 循环状态影响，WRAPPING 只是追加 user 消息 + 记账，不锁工具）。
+        # （循环档位状态机由 detector nudge + 硬预算墙承担，见 §2；
+        # SECPT_LOOP_STOP=0 一键回退旧行为。）
+        _margin_win: deque = deque(maxlen=_margin_window())
+        _margin_findings = 0  # 窗口内成果数滚动和（finding=产出，不是"新信息"）
+        _margin_cost = 0.0  # 窗口内成本滚动和（CNY；无 budget tracker 时恒 0）
+        _prev_cost = 0.0
+        _step_findings = 0  # 本步新 finding 数（工具记账循环里累加）
 
         # ---------- S3 运行时四件套状态 ----------
         from secpt.core.context.estimator import effective_window, est_messages_tokens, est_tokens
@@ -1590,3 +1713,113 @@ class Engine:
             cache_hit_tokens=cache_hit_tokens,
             cache_miss_tokens=cache_miss_tokens,
         )
+
+
+# ---------------------------------------------------------------------------
+# delegate 子智能体工具（市场共识对齐：子智能体是"工具"不是"层"）
+#
+# Cognition《Don't Build Multi-Agents》与 Claude Code/Deep Agents 的共同形态：
+# 一次委托 → 独立上下文的一次性子链 → 结论压缩成一条消息返回。要点：
+# - 禁递归：子链以 enable_delegate=False 构造（结构性保证，不靠提示词纪律）
+# - 串行执行：子链 run() 覆写进程级 SECPT_JOB_ID/WORK_DIR，并行会互踩（见分组器）
+# - 治理继承：子链继承父级 scope/ratelimit/audit/sandbox 配置（授权边界不放松）
+# - 工作区挂靠：子链 ws 在父 ws 之下（<父ws>/delegate-N/ws），父可 read_file 取其产物
+# - 独立小预算：SECPT_DELEGATE_STEPS（默认 25，5-60）/ SECPT_DELEGATE_WALL（默认 600s）
+# - v1 边界：子链过程不落父事件流（transcript 在子工作区）；结论即返回值
+# ---------------------------------------------------------------------------
+
+DELEGATE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delegate",
+        "description": (
+            "派生一次性子智能体（独立上下文）完成一件聚焦的分析/检索任务，只回最终结论。"
+            "适合：分析二进制/枚举端点/核对指纹/读大文件找线索等独立读重型工作；"
+            "不适合多步利用链（那需要你自己保持上下文连续）。"
+            "子智能体看不到你的对话，task 描述必须自包含（目标/已知信息/期望产出）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "自包含的任务描述（子智能体看不到你的对话历史）",
+                }
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+
+def make_delegate_tool(cfg: RunConfig, llm):
+    """构建 delegate 工具 (schema, fn)。fn 为 async，返回子链结论文本（永不抛）。"""
+    seq = [0]
+
+    async def _delegate(args: dict) -> str:
+        task = str((args or {}).get("task") or "").strip()
+        if not task:
+            return "Error: task 必填（子智能体看不到你的对话，任务描述必须自包含）"
+        seq[0] += 1
+        n = seq[0]
+        try:
+            steps = max(5, min(60, int(os.environ.get("SECPT_DELEGATE_STEPS", "25") or 25)))
+        except ValueError:
+            steps = 25
+        try:
+            wall = max(60.0, float(os.environ.get("SECPT_DELEGATE_WALL", "600") or 600))
+        except ValueError:
+            wall = 600.0
+        child_cfg = RunConfig(
+            job_id=f"{cfg.job_id}-dl{n}",
+            objective=task,
+            system_extra="",
+            workspace=cfg.work_dir / f"delegate-{n}",  # 挂父 ws 下：父可读子产物
+            max_steps=steps,
+            max_wall_s=int(wall),
+            bash_timeout_s=cfg.bash_timeout_s,
+            bash_whitelist=cfg.bash_whitelist,
+            model_primary=cfg.model_primary,
+            model_fallback=cfg.model_fallback,
+            scope=cfg.scope,  # 治理继承：授权边界不放松
+            ratelimit=cfg.ratelimit,
+            audit=cfg.audit,
+            context_window=cfg.context_window,
+            sandbox=cfg.sandbox,
+            agent_id=f"{cfg.agent_id or 'main'}/delegate",
+            round_max_steps=cfg.round_max_steps,
+            round_max_wall_s=cfg.round_max_wall_s,
+        )
+        child_cfg.system_extra = (
+            "你是一次性**子智能体**：只完成父智能体委派的一个聚焦任务，不扩大范围。\n"
+            f"{build_tools_doc(child_cfg)}\n"
+            "完成后用 ANSWER: <结论> 收尾；结论必须自包含（父智能体看不到你的过程）。"
+        )
+        # 环境变量保护：子链 run() 覆写进程级 SECPT_JOB_ID/WORK_DIR，结束恢复
+        _saved = {k: os.environ.get(k) for k in ("SECPT_JOB_ID", "SECPT_WORK_DIR")}
+        try:
+            child = Engine(child_cfg, llm=llm, enable_delegate=False)  # 禁递归
+            result = await asyncio.wait_for(child.run(), timeout=wall)
+        except TimeoutError:
+            return f"[delegate-{n} 超时 {int(wall)}s] 子任务未按时完成（产物在 delegate-{n}/ws）"
+        except Exception as e:
+            return f"[delegate-{n} 失败] {e}"
+        finally:
+            for k, v in _saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        tail = ""
+        for m in reversed(result.messages or []):
+            c = str(m.get("content") or "")
+            if m.get("role") == "assistant" and c.strip():
+                tail = c.strip()[:800]
+                break
+        head = result.flag or f"（无 ANSWER）status={result.status}"
+        return (
+            f"[delegate-{n} 结论] status={result.status} steps={result.steps} "
+            f"ws=delegate-{n}/ws\n{head}\n{tail}"
+        )
+
+    return DELEGATE_SCHEMA, _delegate

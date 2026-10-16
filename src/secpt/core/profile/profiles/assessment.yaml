@@ -1,7 +1,7 @@
 name: assessment
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 安全评估员
-tools: [bash, read_file, list_dir, write_file, nmap, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content]
+tools: [bash, read_file, list_dir, write_file, nmap, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content, web_search]
 bash_whitelist_extra: [nmap]
 prior: assessment.md
 terminator:
