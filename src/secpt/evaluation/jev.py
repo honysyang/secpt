@@ -9,6 +9,8 @@
 - JEV_API_KEY：TypeSafe API key；未设置时 available()=False，评判层自动降级为纯 LLM judge
 - JEV_BASE_URL：端点（默认 https://api.typesafe.ai）
 - JEV_MIN_CONFIDENCE：采信阈值（默认 0.85）
+- SECPT_JEV_CACHE：memo 缓存开关（默认 1；同输入重复判定直接命中磁盘缓存，
+  benchmark 重跑/复盘的判定延迟与成本降为 0；=0 关闭）
 
 注意：TypeSafe 的 REST 形状以官方文档为准；本客户端把路径与 payload 字段集中在本文件，
 接入真实 key 时如字段名有出入只需改这里。已知边界：推导密集型问题（利用链合理性分析等）
@@ -17,12 +19,52 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MIN_CONFIDENCE = 0.85
 TIMEOUT_S = 15.0
+
+# memo 缓存：同输入 → 同 typed decision（typed 模型本身确定性高，缓存只是把
+# 重复判定的延迟和成本降到 0）。仅缓存成功解析的响应；失败/低置信不缓存——
+# 下次重试有机会成功。键为 (question, 截断后 context) 的 sha1。
+_cache_pathname = "jev-decisions.json"
+_caches: dict[
+    str, dict[str, dict]
+] = {}  # 缓存文件路径 → {sha1: decision}（按路径隔离，避免 SECPT_VAR 漂移串库）
+
+
+def _cache_enabled() -> bool:
+    return os.environ.get("SECPT_JEV_CACHE", "1") != "0"
+
+
+def _cache_path() -> Path:
+    return Path(os.environ.get("SECPT_VAR", "var")) / _cache_pathname
+
+
+def _load_cache(path: Path) -> dict[str, dict]:
+    key = str(path)
+    if key not in _caches:
+        data: dict[str, dict] = {}
+        with contextlib.suppress(Exception):
+            data = json.loads(path.read_text(encoding="utf-8"))
+        _caches[key] = data
+    return _caches[key]
+
+
+def _save_cache(path: Path, cache: dict[str, dict]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        print(f"[jev] cache save failed (ignored): {e}")
 
 
 @dataclass
@@ -68,6 +110,16 @@ class JevGate:
             "choices": ["yes", "no"],
             "context": context[:6000],
         }
+        cache_path = _cache_path()
+        cache_key = hashlib.sha1(f"{question}\n{payload['context']}".encode()).hexdigest()
+        if _cache_enabled():
+            cached = _load_cache(cache_path).get(cache_key)
+            if cached is not None:
+                return JevDecision(
+                    answer=bool(cached["answer"]),
+                    probability=float(cached["probability"]),
+                    raw_model=str(cached.get("raw_model", "")),
+                )
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
                 r = await client.post(
@@ -84,9 +136,18 @@ class JevGate:
             if ans not in ("yes", "no"):
                 return None
             prob = float(data.get("probability", 0.0) or 0.0)
-            return JevDecision(
+            decision = JevDecision(
                 answer=(ans == "yes"), probability=prob, raw_model=str(data.get("model", ""))
             )
+            if _cache_enabled():
+                cache = _load_cache(cache_path)
+                cache[cache_key] = {
+                    "answer": decision.answer,
+                    "probability": decision.probability,
+                    "raw_model": decision.raw_model,
+                }
+                _save_cache(cache_path, cache)
+            return decision
         except Exception as e:
             print(f"[jev] decision failed, 降级 LLM judge: {e}")
             return None

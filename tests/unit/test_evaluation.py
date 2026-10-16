@@ -216,6 +216,88 @@ class TestAntiCheat:
         assert rep.suspicious == []
 
 
+class TestJevMemoCache:
+    """P1-4：memo 缓存——同输入重复判定不再发请求。"""
+
+    class _StubResp:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._data
+
+    class _StubClient:
+        instances: ClassVar[list] = []  # 收集实例供请求计数（测试专用）
+
+        def __init__(self, timeout):
+            self.calls: list = []
+            TestJevMemoCache._StubClient.instances.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            self.calls.append(json)
+            return TestJevMemoCache._StubResp({"answer": "yes", "probability": 0.9})
+
+    @classmethod
+    def _total_calls(cls) -> int:
+        return sum(len(i.calls) for i in cls._StubClient.instances)
+
+    @classmethod
+    def _reset(cls) -> None:
+        cls._StubClient.instances.clear()
+
+    def test_repeat_decision_hits_cache(self, tmp_path, monkeypatch):
+        self._reset()
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr("httpx.AsyncClient", self._StubClient)
+        gate = JevGate(api_key="k")
+        d1 = _run(gate.decide("完成了吗", "ctx"))
+        d2 = _run(gate.decide("完成了吗", "ctx"))
+        assert d1 is not None and d2 is not None
+        assert d1.answer is True and d2.answer is True
+        assert d2.probability == 0.9
+        assert self._total_calls() == 1  # 第二次命中缓存，零请求
+
+    def test_different_question_bypasses_cache(self, tmp_path, monkeypatch):
+        self._reset()
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr("httpx.AsyncClient", self._StubClient)
+        gate = JevGate(api_key="k")
+        _run(gate.decide("Q1", "ctx"))
+        _run(gate.decide("Q2", "ctx"))
+        assert self._total_calls() == 2
+
+    def test_cache_persists_across_gate_instances(self, tmp_path, monkeypatch):
+        """落盘语义：内存字典清空（模拟新进程）后从磁盘缓存命中，不发请求。"""
+        import secpt.evaluation.jev as jev_mod
+
+        self._reset()
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr("httpx.AsyncClient", self._StubClient)
+        _run(JevGate(api_key="k").decide("Q", "ctx"))
+        jev_mod._caches.clear()
+        _run(JevGate(api_key="k").decide("Q", "ctx"))
+        assert self._total_calls() == 1
+
+    def test_cache_disabled_by_env(self, tmp_path, monkeypatch):
+        self._reset()
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_JEV_CACHE", "0")
+        monkeypatch.setattr("httpx.AsyncClient", self._StubClient)
+        gate = JevGate(api_key="k")
+        _run(gate.decide("Q", "ctx"))
+        _run(gate.decide("Q", "ctx"))
+        assert self._total_calls() == 2
+
+
 class TestJudgePromptFindings:
     """P0-2：finding 事件流注入 judge prompt（程序确认的发现）。"""
 
@@ -230,7 +312,9 @@ class TestJudgePromptFindings:
                 content = '{"complete": true, "confidence": 0.9, "reasoning": "ok"}'
 
             class _Resp:
-                choices = [type("c", (), {"message": _Msg()})()]
+                @property
+                def choices(self):
+                    return [type("c", (), {"message": _Msg()})()]
 
             return _Resp()
 
@@ -444,17 +528,36 @@ class TestVerdictChain:
         assert v.complete is False
         assert "不符" in v.reasoning
 
-    def test_heuristic_fallback_when_judge_unparseable(self, tmp_path):
+    def test_heuristic_fallback_when_judge_unparseable(self, tmp_path, monkeypatch):
         _make_job(tmp_path, "jh", ["real output FLAG{x}"], "FLAG{x}")
         bad = _FakeJudgeLLM("ANSWER: FLAG{x}")  # 非 JSON → JudgeUnavailable
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         v = _run(evaluate_job("jh", jobs_dir=tmp_path, llm=bad))
         assert v.method == "heuristic"
         assert v.complete is True  # 有自报答案且无作弊信号
         assert v.confidence == 0.3  # 低置信，需真实 judge 复核
+        # P1-7：heuristic 兜底已登记 intercept pending 人工复核队列
+        from secpt.governance.intercept import Interceptor
 
-    def test_heuristic_incomplete_without_answer(self, tmp_path):
+        pendings = Interceptor().pending_list()
+        assert len(pendings) == 1
+        assert pendings[0]["job_id"] == "jh"
+        assert pendings[0]["rule_name"] == "评判复核-heuristic"
+
+    def test_heuristic_review_idempotent_per_job(self, tmp_path, monkeypatch):
+        _make_job(tmp_path, "jh2", ["out FLAG{y}"], "FLAG{y}")
+        bad = _FakeJudgeLLM("garbage")
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        _run(evaluate_job("jh2", jobs_dir=tmp_path, llm=bad))
+        _run(evaluate_job("jh2", jobs_dir=tmp_path, llm=bad))
+        from secpt.governance.intercept import Interceptor
+
+        assert len(Interceptor().pending_list()) == 1  # 重复评判不重复登记
+
+    def test_heuristic_incomplete_without_answer(self, tmp_path, monkeypatch):
         _make_job(tmp_path, "ji", ["nothing useful"], None)
         bad = _FakeJudgeLLM("garbage")
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         v = _run(evaluate_job("ji", jobs_dir=tmp_path, llm=bad))
         assert v.method == "heuristic"
         assert v.complete is False
