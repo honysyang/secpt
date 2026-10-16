@@ -103,6 +103,57 @@ def _release_task_lock(handle) -> None:
         handle.close()
 
 
+def settle_digest_key(title: str) -> str:
+    """settle 摘要台账的指纹：sha1(title + BENCHMARK_TASK_ID)。
+
+    带上跑分任务 id（设置了才拼）以按任务隔离——同题编码在平台新任务里复用时，
+    旧任务的失败摘要不会串进来。写入方（frontier）与读取方（benchmark 重试注入）
+    共用本函数，保证口径一致。
+    """
+    import hashlib
+
+    raw = f"{title or ''}|{os.environ.get('BENCHMARK_TASK_ID', '')}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _write_settle_digest(
+    base: str, title: str, status: str, steps: int, fail_reason: str, messages: list | None
+) -> None:
+    """结算摘要台账（重试注入失败上下文的真相源）：按 title 指纹落盘。
+
+    内容 = 状态/步数/失败原因 + 最后一条 assistant 正文尾部（卡点/已试路线）。
+    重跑同类任务（如跑分下一轮）时由调用方按同一指纹取回注入 goal——让重试
+    "带记忆换路线"，而不是从零重打（实测 19 道 exhausted 全因路线问题而非预算，
+    带上下文的重试才有效）。best-effort：任何失败静默。
+    """
+    try:
+        import json as _json
+
+        tail = ""
+        for m in reversed(messages or []):
+            c = str(m.get("content") or "")
+            if m.get("role") == "assistant" and c.strip():
+                tail = c.strip()[:1200]
+                break
+        d = Path(os.environ.get("SECPT_VAR", "var")) / "knowledge" / "settle_digests"
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "title": title,
+            "status": status,
+            "steps": int(steps or 0),
+            "fail_reason": (fail_reason or "")[:300],
+            "tail": tail,
+            "base": base,
+            "ts": time.time(),
+        }
+        path = d / f"{settle_digest_key(title)}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
 def _ingest_recon_assets(path, *, job_id: str = "") -> int:
     """把 recon 的 ws/assets.json 确定性灌入 intel 资产图（加强⑤）。
 
@@ -1127,7 +1178,8 @@ async def run_frontier(
     profile: str = "hunter",
     base_job_id: str | None = None,
     max_rounds: int = 20,
-    max_intents: int = 60,
+    max_intents: int = 60,  # 清单型调用方（benchmark）传预置数 → 关闭 planner；
+    # 探索型入口（hunt）保持缺省让 planner 多轮产意图
     llm=None,
     model: str | None = None,  # 缺省 SECPT_MODEL_PRIMARY > deepseek-chat
     planner_llm=None,  # 缺省与 worker 同模型；可分开（强模型规划+便宜模型执行）
@@ -1467,6 +1519,10 @@ async def run_frontier(
                 _aggregate_sub_events(
                     base, sub_jobs, chains, flags, aggregated=aggregated, final=False
                 )
+            # ⑤ settle 摘要台账：重跑任务按 title 指纹取回"上次卡点"注入 goal（best-effort）
+            _write_settle_digest(
+                base, intent.title, status, result.steps, why, getattr(result, "messages", None)
+            )
         # 事件唤醒主循环（无条件：结算变化必须立刻可见，防 60s 心跳饿死）
         with contextlib.suppress(Exception):
             wake_q.put_nowait(intent.id)
