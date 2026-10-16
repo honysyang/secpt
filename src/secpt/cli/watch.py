@@ -199,6 +199,7 @@ def watch(job_id: str, *, tail: int = 0, raw: bool = False, poll_s: float = 1.0)
                         "budget_exceeded",
                         "step_exceeded",
                         "wallclock_exceeded",
+                        "stalled",  # 三档止损终态
                         "cancelled",
                     )
                 ):

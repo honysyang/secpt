@@ -2,11 +2,12 @@
 
 status 状态机：
     queued -> running -> (succeeded | failed | budget_exceeded | step_exceeded
-                          | wallclock_exceeded | cancelled | stuck)
+                          | wallclock_exceeded | stalled | cancelled | stuck)
     running -> paused -> running
 
 budget_exceeded / step_exceeded / wallclock_exceeded 为三种不同的资源耗尽态，
 分别对应：成本超预算 / 步数用尽 / 墙钟到点（7×24 任务可配置为不限）。
+stalled 为三档止损终态（设计 §2：wrapping 收尾后仍无 ANSWER，由编排层 RESET 重建）。
 """
 
 from __future__ import annotations

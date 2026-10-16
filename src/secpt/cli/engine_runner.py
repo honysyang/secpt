@@ -500,10 +500,15 @@ def resume_engine(
 
 
 def _apply_terminal_status(rec: JobRecord, result: _engine.RunResult) -> None:
-    """RunResult.status → JobRecord.status（精确语义，超步数≠超预算）。"""
+    """RunResult.status → JobRecord.status（精确语义，超步数≠超预算≠止损停滞）。"""
     if result.status == "error":
         rec.set_status("failed", error="engine error")
-    elif result.status in ("budget_exceeded", "step_exceeded", "wallclock_exceeded"):
+    elif result.status in (
+        "budget_exceeded",
+        "step_exceeded",
+        "wallclock_exceeded",
+        "stalled",  # 三档止损终态：保真落库，RESET 依赖它识别重建对象
+    ):
         rec.set_status(result.status)
     else:
         rec.set_status("failed")

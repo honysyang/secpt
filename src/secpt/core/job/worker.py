@@ -260,8 +260,13 @@ def run_worker(job_id: str, *, max_parallel_rps: float = 10.0) -> int:
     elif result.status == "error":
         rec.set_status("failed", error="engine error")
         exit_code = 3
-    elif result.status in ("budget_exceeded", "step_exceeded", "wallclock_exceeded"):
-        # 精确语义：超步数≠超预算≠墙钟到点（RunResult.status 已区分）
+    elif result.status in (
+        "budget_exceeded",
+        "step_exceeded",
+        "wallclock_exceeded",
+        "stalled",  # 三档止损终态：与资源耗尽同类处置（可重试/RESET 重建）
+    ):
+        # 精确语义：超步数≠超预算≠墙钟到点≠止损停滞（RunResult.status 已区分）
         rec.set_status(result.status)
         exit_code = 2
     else:

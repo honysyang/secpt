@@ -174,6 +174,7 @@ async def run_single_chain(
         "budget_exceeded",
         "step_exceeded",
         "wallclock_exceeded",
+        "stalled",  # 止损停滞同属"未拿到 flag 的可重试终态"
         "failed",
     ):
         # 上一轮成果摘要：循环型长跑任务（benchmark/评测）里，"重试"是续跑——

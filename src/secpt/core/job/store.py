@@ -26,6 +26,7 @@ JOB_STATUSES = {
     "budget_exceeded",
     "step_exceeded",
     "wallclock_exceeded",
+    "stalled",  # 三档止损终态（设计 §2：wrapping 后仍无 ANSWER）
     "cancelled",
     "stuck",
 }
