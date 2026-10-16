@@ -75,6 +75,7 @@ def _margin_window() -> int:
 def _margin_cost_cny() -> float:
     return _env_float("SECPT_MARGIN_COST_CNY", 0.05)
 
+
 WRAP_MSG = (
     "【收尾阶段】本步起进入收尾：剩余预算有限/本策略收益已趋零。\n"
     "只做三件事（严禁开新战线）：\n"
@@ -104,6 +105,7 @@ def _emit_loop_phase(
     except Exception:
         pass
     log.info("engine.loop_phase", phase=phase, reason=reason)
+
 
 # 结构化日志：生命周期事件（start/progress/compact/rollover/nudge/fallback/fatal）
 # 统一走 structlog（SECPT_LOG_JSON=1 → JSON，按 job_id 检索链路；默认控制台友好）
@@ -449,7 +451,8 @@ class RunResult:
     steps: int
     wall_s: float
     status: str  # success | step_exceeded | wallclock_exceeded
-    # | budget_exceeded | failed | error
+    # | budget_exceeded | stalled | failed | error
+    # stalled = 三档止损状态机收口（wrapping 期未收敛，交编排层 RESET/终态）
     messages: list[dict] = field(default_factory=list)
     cost_cny: float = 0.0  # S3 累计成本（CNY，由 BudgetTracker 记）
     # 结构化轮：prefix cache 记账随结果返回（usage 无该字段的端点恒 0）
@@ -1569,6 +1572,87 @@ class Engine:
                     if self.hooks and hasattr(self.hooks, "on_user_message"):
                         self.hooks.on_user_message(nudge_msg, kind="nudge")
                     log.info("engine.nudge", trigger_count=detector.trigger_count)
+                    counter_inc("loop_nudged_total")
+                    _emit_loop_phase(self.hooks, cfg.audit, log, phase="nudged")
+                    if loop_enabled and loop_phase == "running":
+                        loop_phase = "nudged"  # NUDGED 档：开始计无改善步数
+                        steps_since_nudge = 0
+
+                # ---- 三档止损状态机：档位迁移（设计 §2）----
+                if loop_enabled:
+                    # 边际收益滚动窗口（2.2）：窗口满 且 成果=0 且 成本超阈值 → 收尾。
+                    if len(_margin_win) == _margin_win.maxlen:
+                        _of, _oc = _margin_win.popleft()
+                        _margin_findings -= _of
+                        _margin_cost -= _oc
+                    _margin_win.append((_step_findings, _step_cost))
+                    _margin_findings += _step_findings
+                    _margin_cost += _step_cost
+
+                    if loop_phase == "nudged":
+                        # nudge 后无结构性改善达阈值 → 进入收尾（注入 WRAP_MSG）
+                        steps_since_nudge += 1
+                        if steps_since_nudge >= _wrap_after_nudge():
+                            loop_phase = "wrapping"
+                            wrap_reason = "nudge_no_improve"
+                            wrap_steps = 0
+                            counter_inc("loop_wrapping_total")
+                            _emit_loop_phase(
+                                self.hooks, cfg.audit, log, phase="wrapping", reason=wrap_reason
+                            )
+                            messages.append({"role": "user", "content": WRAP_MSG})
+                            if self.hooks and hasattr(self.hooks, "on_user_message"):
+                                self.hooks.on_user_message(WRAP_MSG, kind="wrap")
+                    elif loop_phase == "wrapping":
+                        # STALLED 收口：收尾期 N 步仍未产 ANSWER → 优雅退出（不抛异常），
+                        # 交编排层决定 RESET 或终态（设计 2.1）
+                        wrap_steps += 1
+                        if wrap_steps >= _stall_after_wrap():
+                            status = "stalled"
+                            counter_inc("loop_stalled_total")
+                            _emit_loop_phase(
+                                self.hooks, cfg.audit, log, phase="stalled", reason=wrap_reason
+                            )
+                            print(
+                                f"[engine] wrapping {wrap_steps} 步未收敛，判 stalled"
+                                "（交编排层 RESET/终态）",
+                                file=sys.stderr,
+                            )
+                            break
+                    # 预算接近耗尽（wrap_at_pct）也触发收尾（单次，不重复注入）
+                    if (
+                        loop_phase == "running"
+                        and budget is not None
+                        and budget.cost_limit_cny > 0
+                        and budget.cost_cny >= budget.cost_limit_cny * _wrap_at_pct() / 100.0
+                    ):
+                        loop_phase = "wrapping"
+                        wrap_reason = "budget_pct"
+                        wrap_steps = 0
+                        counter_inc("loop_wrapping_total")
+                        _emit_loop_phase(
+                            self.hooks, cfg.audit, log, phase="wrapping", reason=wrap_reason
+                        )
+                        messages.append({"role": "user", "content": WRAP_MSG})
+                        if self.hooks and hasattr(self.hooks, "on_user_message"):
+                            self.hooks.on_user_message(WRAP_MSG, kind="wrap")
+                    # 零产出高成本（no_yield）：窗口满 且 finding=0 且 成本超阈值
+                    if (
+                        loop_phase == "running"
+                        and len(_margin_win) == _margin_win.maxlen
+                        and _margin_findings == 0
+                        and _margin_cost >= _margin_cost_cny()
+                    ):
+                        loop_phase = "wrapping"
+                        wrap_reason = "no_yield"
+                        wrap_steps = 0
+                        counter_inc("loop_wrapping_total")
+                        _emit_loop_phase(
+                            self.hooks, cfg.audit, log, phase="wrapping", reason=wrap_reason
+                        )
+                        messages.append({"role": "user", "content": WRAP_MSG})
+                        if self.hooks and hasattr(self.hooks, "on_user_message"):
+                            self.hooks.on_user_message(WRAP_MSG, kind="wrap")
 
                 # S1：本轮结束，落盘 round 快照（会话轮次号，resume 接续用）
                 if self.hooks and hasattr(self.hooks, "on_round_end"):
@@ -1704,6 +1788,8 @@ class Engine:
                 f"completion={budget.completion_tokens})"
             )
         print(f"会话轮次: {session_round}  压缩摘要数: {summary_k}")
+        if loop_enabled and loop_phase != "running":
+            print(f"止损档位: {loop_phase}（{wrap_reason or 'nudge'}）")
 
         transcript_path = cfg.work_dir / "transcript.json"
         with open(transcript_path, "w", encoding="utf-8") as f:

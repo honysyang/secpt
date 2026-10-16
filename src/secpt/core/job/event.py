@@ -38,11 +38,12 @@ EVENT_TYPES = {
     "compaction",
     "routed",
     "step",  # 步进心跳（watch 实时视图的分界）
-    "user_msg",  # 注入的 user 消息（人工操舵/换层提醒/预算警告）
+    "user_msg",  # 注入的 user 消息（人工操舵/换层提醒/预算警告/收尾指令）
     "verdict",  # evaluation 层终裁结果（AI 评判，见 secpt/evaluation/）
     "tokens",  # 每步 LLM token 记账（checkpoint 恢复预算的数据源）
     "compaction_requested",  # 主循环已删组+插占位（非阻塞 compaction 的请求入队）
     "compaction_completed",  # 后台摘要完成、<k>.summary.md 已落盘
+    "loop_phase",  # 三档止损状态机档位迁移（nudged/wrapping/stalled，见 runtime/engine.py）
 }
 
 # 事件 payload 结构目录（结构化加固轮）：类型 → 必备 payload 键。
@@ -69,6 +70,8 @@ EVENT_CATALOG: dict[str, frozenset[str]] = {
     "tokens": frozenset({"prompt", "completion", "cost_cny"}),
     # verdict 由 evaluation 层直接 append（不经 write()），目录条目为存量文档
     "verdict": frozenset({"complete"}),
+    # 三档止损状态机（docs/设计-工作循环形态.md §2）：phase ∈ nudged/wrapping/stalled
+    "loop_phase": frozenset({"phase"}),
 }
 
 
