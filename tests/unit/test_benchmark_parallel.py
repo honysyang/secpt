@@ -85,6 +85,9 @@ class TestParallelRun:
         summary = _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "f.db")))
 
         assert captured["max_workers"] == 2  # 平台上限 3 → 并发 2 留 1 槽余量（防结构性 409）
+        # 清单型任务关 planner（复评修复）：max_intents 钉死为预置数——防队列排空后
+        # 规划层给已完成题产"幽灵意图"（容器全关任务还在跑的直接原因）
+        assert captured.get("max_intents") == 4
         assert captured["profile"] == "benchmark"
         # ②/③ 接线：settle 回收容器回调 + 账本广播载体已传入 frontier
         assert callable(captured.get("on_settled"))
@@ -234,3 +237,155 @@ class TestResumeCarry:
     def test_carry_missing_ws(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         assert _carry_ws_artifacts("nope", "nope-r2") == "（无）"
+
+
+class TestPlatformErrors:
+    """平台级失败：快速失败的清晰报错（此前 HTTPError 裸抛 traceback 崩溃）。"""
+
+    def test_task_finished_409_actionable(self, monkeypatch):
+        import json as _json
+        import urllib.error
+
+        from secpt.core.orchestrator import benchmark as B
+
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "https://tsec.invalid")
+        monkeypatch.setenv("BENCHMARK_TOKEN", "tk")
+
+        class _FP:
+            def read(self):
+                return _json.dumps(
+                    {"code": "invalid_state", "message": "task task_x already finished"}
+                ).encode()
+
+        def _raise(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, _FP())
+
+        monkeypatch.setattr("urllib.request.urlopen", _raise)
+        try:
+            B.fetch_challenges()
+            raise AssertionError("必须抛 BenchmarkUnavailable")
+        except B.BenchmarkUnavailable as e:
+            msg = str(e)
+            assert "任务已结束" in msg and "新任务" in msg and "BENCHMARK_TASK_ID" in msg
+
+    def test_network_error_hint_vpn(self, monkeypatch):
+        import urllib.error
+
+        from secpt.core.orchestrator import benchmark as B
+
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "https://tsec.invalid")
+        monkeypatch.setenv("BENCHMARK_TOKEN", "tk")
+
+        def _raise(req, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr("urllib.request.urlopen", _raise)
+        try:
+            B.fetch_challenges()
+            raise AssertionError("必须抛 BenchmarkUnavailable")
+        except B.BenchmarkUnavailable as e:
+            assert "VPN" in str(e)
+
+    def test_ledger_task_scoped_by_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        from secpt.core.orchestrator.ledger import ChallengeLedger
+
+        monkeypatch.setenv("BENCHMARK_TASK_ID", "task_new123")
+        led = ChallengeLedger()
+        assert led.db_path.name == "benchmark_ledger_task_new123.sqlite"
+        monkeypatch.delenv("BENCHMARK_TASK_ID")
+        led2 = ChallengeLedger()
+        assert led2.db_path.name == "benchmark_ledger.sqlite"  # 缺省不破坏旧行为
+
+
+class TestRetryIntelligence:
+    """复评修复：预算×旗数 与 重试失败上下文注入。"""
+
+    @staticmethod
+    def _fake_frontier():
+        async def fake_frontier(objective, **kw):
+            return {
+                "job_id": "x",
+                "mode": "frontier",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 1.0,
+            }
+
+        return fake_frontier
+
+    def test_budget_scales_with_flag_count(self, tmp_path, monkeypatch):
+        """多旗大题按旗数放大预算（b-02 六旗题 40×2 步全灭的实证修正）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr(
+            bm,
+            "fetch_challenges",
+            lambda: [
+                _challenge("s-1", difficulty="medium", total=1),
+                _challenge("m-4", difficulty="medium", total=4),
+                _challenge("h-6", difficulty="hard", total=6),
+            ],
+        )
+        monkeypatch.setattr(bm, "run_frontier", self._fake_frontier())
+        spec = TaskSpec(job_id="bs", task_type="benchmark", objective="o", budget=TaskBudget())
+        _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "fs.db")))
+        steps = {
+            i["title"].split("（")[0]: i["max_steps"]
+            for i in Frontier(tmp_path / "fs.db").list_all(status="open")
+        }
+        assert steps["通关 s-1"] == 25  # 单旗不变
+        assert steps["通关 m-4"] == 25 * 2  # 4 旗 → ×2
+        assert steps["通关 h-6"] == 40 * 3  # 6 旗 → ×3
+
+    def test_retry_digest_injected_into_goal(self, tmp_path, monkeypatch):
+        """上一轮失败摘要（settle 台账）注入本轮 goal——重试带记忆换路线。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("BENCHMARK_TASK_ID", "task_x")
+        from secpt.core.orchestrator.frontier import settle_digest_key
+
+        title = "通关 r-1（easy L1）"
+        d = tmp_path / "knowledge" / "settle_digests"
+        d.mkdir(parents=True)
+        (d / f"{settle_digest_key(title)}.json").write_text(
+            json.dumps(
+                {
+                    "title": title,
+                    "status": "exhausted",
+                    "steps": 30,
+                    "fail_reason": "超意图步数预算（15 步硬止损）",
+                    "tail": "尝试 union 注入被 WAF 拦截，未试编码变形",
+                    "ts": 1.0,
+                    "base": "old-run",
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: [_challenge("r-1", level=1)])
+        monkeypatch.setattr(bm, "run_frontier", self._fake_frontier())
+        spec = TaskSpec(job_id="bg", task_type="benchmark", objective="o", budget=TaskBudget())
+        _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "fg.db")))
+        goals = [i["goal"] for i in Frontier(tmp_path / "fg.db").list_all(status="open")]
+        assert any("上一轮尝试记录" in g and "WAF 拦截" in g for g in goals)
+
+    def test_settle_digest_roundtrip_and_task_isolation(self, tmp_path, monkeypatch):
+        """台账写入/读回口径一致；指纹按 BENCHMARK_TASK_ID 隔离（防跨任务串摘要）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("BENCHMARK_TASK_ID", "tk1")
+        from secpt.core.orchestrator.frontier import _write_settle_digest, settle_digest_key
+
+        title = "通关 x-1（easy L1）"
+        key1 = settle_digest_key(title)
+        _write_settle_digest(
+            "b1",
+            title,
+            "exhausted",
+            30,
+            "预算打满",
+            [{"role": "assistant", "content": "最后卡点A"}],
+        )
+        pth = tmp_path / "knowledge" / "settle_digests" / f"{key1}.json"
+        dd = json.loads(pth.read_text(encoding="utf-8"))
+        assert dd["status"] == "exhausted" and dd["tail"].startswith("最后卡点")
+        monkeypatch.setenv("BENCHMARK_TASK_ID", "tk2")
+        assert settle_digest_key(title) != key1  # 跨任务指纹隔离

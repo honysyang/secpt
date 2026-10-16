@@ -1247,6 +1247,7 @@ class Engine:
         _margin_cost = 0.0  # 窗口内成本滚动和（CNY；无 budget tracker 时恒 0）
         _step_findings = 0  # 本步新 finding 数（工具记账循环里累加，步首清零）
         _step_cost = 0.0  # 本步成本（budget.add 后算增量，步首清零）
+        _prev_cost = 0.0  # 上一步累计成本（算本步增量用）
 
         # ---------- S3 运行时四件套状态 ----------
         from secpt.core.context.estimator import effective_window, est_messages_tokens, est_tokens
@@ -1403,6 +1404,8 @@ class Engine:
                     completion_tokens = est_tokens((msg.content or "") + extra)
                 if budget is not None:
                     budget.add(prompt_tokens, completion_tokens)
+                    _step_cost = budget.cost_cny - _prev_cost  # 三档止损：本步成本增量
+                    _prev_cost = budget.cost_cny
                 if self.hooks and hasattr(self.hooks, "on_tokens"):
                     self.hooks.on_tokens(prompt_tokens, completion_tokens)
                 if budget is not None:
@@ -1536,6 +1539,11 @@ class Engine:
                         # 卡死切换器：更新计数器（含⑥完全重复调用判定，按调用指纹）
                         has_new = detector.update(result, call_key=_call_key(fn_name, fn_args))
                         last_tool_has_new_info = has_new
+                        if has_new and loop_phase == "nudged":
+                            # NUDGED → RUNNING 回退：提醒有效（出现结构性改向），
+                            # 不升级收尾（设计 2.1）；wrapping 档不回退（收口由计数做）
+                            loop_phase = "running"
+                            steps_since_nudge = 0
 
                         if self.hooks and hasattr(self.hooks, "on_result"):
                             self.hooks.on_result(tc.id, result)
@@ -1548,6 +1556,7 @@ class Engine:
                             if key in self._finding_seen:
                                 continue
                             self._finding_seen.add(key)
+                            _step_findings += 1  # 三档止损：成果计数（边际收益窗口用）
                             if self.hooks and hasattr(self.hooks, "on_finding"):
                                 self.hooks.on_finding(kind, val, f"step {steps}: {fn_name}")
 
