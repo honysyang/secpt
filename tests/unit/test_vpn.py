@@ -79,7 +79,12 @@ class TestUpDown:
         monkeypatch.setattr(subprocess, "run", fake_run)
         ok, msg = vpn.up(timeout_s=5)
         assert ok and "openvpn" in msg
-        assert calls and "openvpn" in calls[0]
+        # 拉新前先清残留（pkill），随后才是 openvpn 启动；writepid/日志走绝对路径
+        start = next(c for c in calls if "--daemon" in c)
+        assert start[0] == "openvpn"
+        writepid = start[start.index("--writepid") + 1]
+        log_append = start[start.index("--log-append") + 1]
+        assert writepid.startswith("/") and log_append.startswith("/")
 
     def test_up_missing_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VPN_TYPE", "openvpn")
@@ -109,3 +114,51 @@ class TestUpDown:
         ok, _msg = vpn.down()
         assert ok and killed and "12345" in killed[0]
         assert not pid.exists()
+
+
+class TestStaleCleanup:
+    """故障复盘修复：拉新前清残留（半死隧道/旧任务隧道）+ 可诊断的失败报错。"""
+
+    def test_kill_stale_pid_and_orphans(self, tmp_path, monkeypatch):
+        pid = tmp_path / "run" / "vpn.pid"
+        pid.parent.mkdir(parents=True)
+        pid.write_text("4242", encoding="utf-8")
+        cfg = tmp_path / "task_x.ovpn"
+        cfg.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(vpn, "PID_FILE", pid)
+        monkeypatch.setenv("SECPT_VPN_CONFIG", str(cfg))
+        monkeypatch.setenv("SECPT_VPN_SUDO", "0")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(vpn.time, "sleep", lambda s: None)  # 免等 tun 拆除
+        n = vpn._kill_stale()
+        assert n == 2  # kill pid + pkill 孤儿
+        assert any("4242" in c for c in calls)
+        assert any(c[:2] == ["pkill", "-f"] and "task_x.ovpn" in c[2] for c in calls)
+        assert not pid.exists()
+
+    def test_up_timeout_reports_log_tail_and_route_hint(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "c.ovpn"
+        cfg.write_text("x", encoding="utf-8")
+        monkeypatch.setenv("SECPT_VPN_TYPE", "openvpn")
+        monkeypatch.setenv("SECPT_VPN_CONFIG", str(cfg))
+        monkeypatch.setenv("SECPT_VPN_SUDO", "0")
+        monkeypatch.setattr(vpn, "PID_FILE", tmp_path / "run" / "vpn.pid")
+        monkeypatch.setattr(vpn, "_interface_up", lambda: True)  # 接口在但探针永不通
+        monkeypatch.setattr(vpn, "probe", lambda: False)
+        monkeypatch.setattr(vpn.time, "sleep", lambda s: None)
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")
+        )
+        log = tmp_path / "run" / "vpn.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("AUTH_FAILED\nTLS Error: handshake failed\n", encoding="utf-8")
+
+        ok, msg = vpn.up(timeout_s=0.01)
+        assert not ok
+        assert "AUTH_FAILED" in msg and "dev eth0" in msg  # 日志尾部 + 路由诊断提示内联

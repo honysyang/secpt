@@ -76,6 +76,52 @@ def status() -> bool:
     return True
 
 
+def _kill_stale() -> int:
+    """清理残留 openvpn 实例。返回清理动作数。
+
+    故障复盘（tsec 跑分实测）：半死隧道（tun0 有 IP 但路由仍走 eth0、探针不通）状态下
+    直接再拉新实例 → 同配置双进程打架；换任务（新 ovpn）时旧隧道也不会被替换。
+    双路清理：① 托管 pid 文件；② 按配置文件名匹配的孤儿进程（pkill -f，不误杀其它 VPN）。
+    """
+    killed = 0
+    if PID_FILE.is_file():
+        try:
+            pid = PID_FILE.read_text().strip()
+            if pid:
+                subprocess.run([*_sudo(), "kill", pid], capture_output=True, timeout=10)
+                killed += 1
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        PID_FILE.unlink(missing_ok=True)
+    cfg_name = Path(_cfg("SECPT_VPN_CONFIG")).name
+    if cfg_name:
+        try:
+            r = subprocess.run(
+                [*_sudo(), "pkill", "-f", f"openvpn.*{cfg_name}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if getattr(r, "returncode", 1) == 0:
+                killed += 1
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if killed:
+        time.sleep(1.5)  # 等 tun 拆除 / 路由回收
+    return killed
+
+
+def _log_tail(log: Path, n: int = 15) -> str:
+    """openvpn 日志尾部（供失败报错内联；无权限时给 sudo 指引——日志 0600 root）。"""
+    try:
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+        return "\n".join(f"  {ln}" for ln in lines) if lines else "  （日志为空）"
+    except PermissionError:
+        return f"  （无权限读取，请 sudo tail -50 {log}）"
+    except OSError as e:
+        return f"  （读取失败: {e}）"
+
+
 def up(timeout_s: float = 60.0) -> tuple[bool, str]:
     """拉起 VPN 并验证。返回 (ok, msg)。"""
     if not vpn_configured():
@@ -87,16 +133,18 @@ def up(timeout_s: float = 60.0) -> tuple[bool, str]:
         return False, f"VPN 配置文件不存在: {cfg}"
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    # 拉新前清残留（半死隧道/旧任务隧道）：双实例同配置必打架；换任务在此自动切隧道
+    _kill_stale()
+    log = (PID_FILE.parent / "vpn.log").resolve()  # 绝对路径：daemon 化 chdir 不漂移
     if vpn_type() == "openvpn":
-        log = PID_FILE.with_suffix(".log")
         cmd = [
             *_sudo(),
             "openvpn",
             "--config",
-            str(cfg),
+            str(cfg.resolve()),
             "--daemon",
             "--writepid",
-            str(PID_FILE),
+            str(PID_FILE.resolve()),
             "--log-append",
             str(log),
         ]
@@ -111,7 +159,13 @@ def up(timeout_s: float = 60.0) -> tuple[bool, str]:
         if status():
             return True, f"VPN 已连通（{vpn_type()}，{cfg.name}）"
         time.sleep(2.0)
-    return False, f"VPN 接口已拉起但探针 {timeout_s}s 内未通过——请检查配置/凭证"
+    return False, (
+        f"VPN 接口已拉起但探针 {timeout_s}s 内未通过。\n"
+        f"  日志尾部（{log}）：\n{_log_tail(log)}\n"
+        "  诊断：`ip route get <探针IP>` 若显示 dev eth0（而非 tun0）说明握手未完成——\n"
+        "  常见原因：AUTH_FAILED（凭证失效或被顶号）、TLS 握手失败（配置/网络）、\n"
+        "  同任务多客户端被服务器拒绝（确保只有本机一个连接）"
+    )
 
 
 def down() -> tuple[bool, str]:
@@ -124,11 +178,5 @@ def down() -> tuple[bool, str]:
             timeout=30,
         )
         return r.returncode == 0, (r.stderr or "wireguard 已关闭")[:200]
-    if PID_FILE.is_file():
-        try:
-            pid = PID_FILE.read_text().strip()
-            subprocess.run([*_sudo(), "kill", pid], capture_output=True, timeout=10)
-        finally:
-            PID_FILE.unlink(missing_ok=True)
-        return True, "openvpn 已关闭"
-    return True, "无托管的 VPN 进程"
+    n = _kill_stale()
+    return True, ("openvpn 已关闭" if n else "无托管的 VPN 进程")
