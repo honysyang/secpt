@@ -41,6 +41,18 @@ def run_checks() -> list[tuple[str, bool, str]]:
     ok = sys.version_info >= (3, 12)
     out.append(("python>=3.12", ok, sys.version.split()[0]))
 
+    # 1.5 .env 文件（baseurl / api key 等 .env 导入是否生效的第一可见性）
+    from secpt.config.envfile import parse_env_file, project_env_file
+
+    env_path = project_env_file()
+    if env_path.is_file():
+        n_items = len(parse_env_file(env_path))
+        out.append((".env 文件", True, f"{env_path}（{n_items} 个配置项）"))
+    else:
+        out.append(
+            (".env 文件", False, f"{env_path} 不存在——cp .env.example .env 填入 API key 即可")
+        )
+
     # 2. 模型 key（含 provider 路由）
     try:
         from secpt.cli.engine_runner import resolve_models

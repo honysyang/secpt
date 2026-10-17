@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from secpt.config.envfile import _LOADED, load_env_file
+from secpt.config.envfile import _LOADED, load_env_file, parse_env_file
 
 
 class TestLoadEnvFile:
@@ -47,6 +47,50 @@ SECPT_TEST_D='single'
     def test_missing_file_noop(self, tmp_path):
         assert load_env_file(tmp_path / "nope.env") == []
 
+    def test_export_prefix(self, tmp_path, monkeypatch):
+        """``export KEY=VALUE`` 前缀（从 shell 片段/其他项目复制的常见写法）。"""
+        for k in ("SECPT_TEST_EXPORT",):
+            monkeypatch.delenv(k, raising=False)
+            _LOADED.discard(k)
+        p = self._mk(tmp_path, "export SECPT_TEST_EXPORT=hello\n")
+        assert load_env_file(p) == ["SECPT_TEST_EXPORT"]
+        assert os.environ["SECPT_TEST_EXPORT"] == "hello"
+
+    def test_inline_comment_stripped(self, tmp_path, monkeypatch):
+        """行内注释剥离：``#`` 前有空白才起注释（base URL 后随手写注释不再污染值）。"""
+        for k in ("SECPT_TEST_URL", "SECPT_TEST_FRAG"):
+            monkeypatch.delenv(k, raising=False)
+            _LOADED.discard(k)
+        p = self._mk(
+            tmp_path,
+            "SECPT_TEST_URL=https://gw.internal/v1  # 主网关\n"
+            "SECPT_TEST_FRAG=https://x/page#anchor\n",
+        )
+        load_env_file(p)
+        assert os.environ["SECPT_TEST_URL"] == "https://gw.internal/v1"
+        # ``#`` 前无空白 → 是值的一部分（URL fragment / 颜色码等），不剥离
+        assert os.environ["SECPT_TEST_FRAG"] == "https://x/page#anchor"
+
+    def test_quoted_value_keeps_hash(self, tmp_path, monkeypatch):
+        """引号内的 ``#`` 是值的一部分；引号后的内容视为注释丢弃。"""
+        for k in ("SECPT_TEST_Q", "SECPT_TEST_Q2"):
+            monkeypatch.delenv(k, raising=False)
+            _LOADED.discard(k)
+        p = self._mk(
+            tmp_path,
+            "SECPT_TEST_Q=\"a # b\"\nSECPT_TEST_Q2='single'  # trailing comment\n",
+        )
+        load_env_file(p)
+        assert os.environ["SECPT_TEST_Q"] == "a # b"
+        assert os.environ["SECPT_TEST_Q2"] == "single"
+
+    def test_parse_env_file_readonly(self, tmp_path, monkeypatch):
+        """parse_env_file 只解析不注入（doctor 等只读场景）。"""
+        monkeypatch.delenv("SECPT_TEST_RO", raising=False)
+        p = self._mk(tmp_path, "# c\nexport SECPT_TEST_RO=1  # note\n")
+        assert parse_env_file(p) == {"SECPT_TEST_RO": "1"}
+        assert "SECPT_TEST_RO" not in os.environ
+
     def test_no_double_inject(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SECPT_TEST_E", raising=False)
         _LOADED.discard("SECPT_TEST_E")
@@ -67,6 +111,27 @@ SECPT_TEST_D='single'
 
         _base, key, _mid = resolve_model("deepseek-chat")
         assert key == "sk-test-from-dotenv"
+
+    def test_resolve_model_base_url_from_dotenv(self, tmp_path, monkeypatch):
+        """端到端：.env 里的 DEEPSEEK_BASE_URL 被模型路由读到（base URL 可从 .env 导入）。"""
+        for k in (
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_BASE_URL",
+            "SECPT_MODEL_BASE_URL",
+            "SECPT_MODEL_BASE_DEEPSEEK",
+        ):
+            monkeypatch.delenv(k, raising=False)
+            _LOADED.discard(k)
+        p = self._mk(
+            tmp_path,
+            "DEEPSEEK_API_KEY=sk-test-from-dotenv\n"
+            "DEEPSEEK_BASE_URL=https://gw.from-dotenv/v1  # 网关\n",
+        )
+        load_env_file(p)
+        from secpt.runtime.llm.client import resolve_model
+
+        base, _key, _mid = resolve_model("deepseek-chat")
+        assert base == "https://gw.from-dotenv/v1"
 
 
 class TestModelEnvConfig:

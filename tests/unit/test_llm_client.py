@@ -18,7 +18,14 @@ from secpt.runtime.llm.client import call_llm, resolve_model
 class TestResolveModel:
     @pytest.fixture(autouse=True)
     def _clear_custom_endpoint(self, monkeypatch):
-        for k in ("SECPT_MODEL_BASE_URL", "SECPT_MODEL_NAME", "SECPT_MODEL_API_KEY"):
+        for k in (
+            "SECPT_MODEL_BASE_URL",
+            "SECPT_MODEL_NAME",
+            "SECPT_MODEL_API_KEY",
+            "DEEPSEEK_BASE_URL",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_BASE",
+        ):
             monkeypatch.delenv(k, raising=False)
 
     def test_bare_name_defaults_deepseek(self, monkeypatch):
@@ -80,6 +87,50 @@ class TestResolveModel:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with pytest.raises(RuntimeError, match="SECPT_MODEL_API_KEY"):
             resolve_model("deepseek-chat")
+
+    def test_conventional_base_url_deepseek(self, monkeypatch):
+        """惯例变量兜底：.env 里最常见写法 DEEPSEEK_BASE_URL 直接生效。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-test")
+        for k in ("SECPT_MODEL_BASE_URL", "SECPT_MODEL_BASE_DEEPSEEK"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.internal/v1")
+        base, key, mid = resolve_model("deepseek-chat")
+        assert base == "https://gw.internal/v1"
+        assert key == "dk-test"
+        assert mid == "deepseek-chat"
+
+    def test_conventional_base_url_openai(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-test")
+        monkeypatch.delenv("SECPT_MODEL_BASE_OPENAI", raising=False)
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.local/v1")
+        base, _key, _mid = resolve_model("openai/gpt-4o")
+        assert base == "https://proxy.local/v1"
+
+    def test_conventional_base_url_openai_legacy(self, monkeypatch):
+        """旧版惯例 OPENAI_API_BASE 亦兜底（优先级低于 OPENAI_BASE_URL）。"""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-test")
+        monkeypatch.delenv("SECPT_MODEL_BASE_OPENAI", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.setenv("OPENAI_API_BASE", "https://legacy.local/v1")
+        base, _key, _mid = resolve_model("openai/gpt-4o")
+        assert base == "https://legacy.local/v1"
+
+    def test_secpt_var_beats_conventional(self, monkeypatch):
+        """优先级：secpt 专有变量 > 惯例变量 > 内置默认。"""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-test")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.local/v1")
+        monkeypatch.setenv("SECPT_MODEL_BASE_OPENAI", "https://gw.secpt/v1")
+        base, _key, _mid = resolve_model("openai/gpt-4o")
+        assert base == "https://gw.secpt/v1"
+
+    def test_unknown_provider_inherits_default_conventional(self, monkeypatch):
+        """未知 provider 沿用裸名默认（deepseek）的路由，惯例变量兜底随之生效。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-test")
+        monkeypatch.delenv("SECPT_MODEL_BASE_MYGW", raising=False)
+        monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.internal/v1")
+        base, _key, mid = resolve_model("mygw/qwen3-32b")
+        assert base == "https://gw.internal/v1"
+        assert mid == "qwen3-32b"
 
 
 class _FakeResponse:

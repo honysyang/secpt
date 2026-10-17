@@ -95,9 +95,11 @@ archive/         历史资料（v0.3 文档/旧格式数据），仅供考古
 ## 配置与环境变量
 
 - **环境变量是唯一配置源**（config.yaml 已移除）：项目根 `.env` 自动加载，
-  真实 export 优先于 .env；全部可调项见 `.env.example`
+  真实 export 优先于 .env；支持 `export ` 前缀与行内注释（`#` 前须有空白）；
+  全部可调项见 `.env.example`
 - 数据根统一 `var/`（SECPT_VAR 可覆盖）；模型路由 `SECPT_MODEL_BASE_<PREFIX>` /
-  `_KEY_<PREFIX>`；上下文窗口 `SECPT_CONTEXT_WINDOW`
+  `_KEY_<PREFIX>`；惯例变量 `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL` 作 provider
+  base URL 兜底（优先级低于 secpt 专有变量）；上下文窗口 `SECPT_CONTEXT_WINDOW`
 - API key 只从环境变量读取，**绝不写入仓库**（含 YAML/测试/fixture）
 
 ## 测试约定

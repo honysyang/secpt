@@ -10,7 +10,9 @@
 
 多模型路由（OpenAI 兼容端点）：
 - ``deepseek/<model>`` 或裸名（如 ``deepseek-chat``）→ api.deepseek.com + DEEPSEEK_API_KEY
-- ``openai/<model>`` → OPENAI_BASE_URL（默认官方）+ OPENAI_API_KEY
+- ``openai/<model>`` → api.openai.com/v1 + OPENAI_API_KEY
+- base_url 均可被 .env 里的惯例变量覆盖（DEEPSEEK_BASE_URL / OPENAI_BASE_URL /
+  OPENAI_API_BASE）或 secpt 专有变量（SECPT_MODEL_BASE_URL / SECPT_MODEL_BASE_<PREFIX>）
 - 通用自定义端点（任意 OpenAI 兼容网关）：
   ``SECPT_MODEL_BASE_URL`` + ``SECPT_MODEL_NAME`` + ``SECPT_MODEL_API_KEY``
   三者独立覆盖 base_url / model_id / api_key（未设置的项按 provider 规则解析）。
@@ -36,28 +38,49 @@ _MAX_RETRY_AFTER_S = 120.0  # Retry-After 采纳上限（防异常头部挂死�
 MAX_RETRIES = 4  # 可重试异常最多重试次数
 _BACKOFF_BASE_S = 1.0  # 1/2/4/8 秒
 
-# provider 前缀 → (默认 base_url, 默认 key 环境变量)
-_PROVIDERS: dict[str, tuple[str, str]] = {
-    "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
-    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+# provider 前缀 → (默认 base_url, 默认 key 环境变量, base_url 惯例环境变量兜底)
+# 惯例变量：.env 里最常见的业界写法（OpenAI SDK 官方约定等），无需 secpt 专有前缀
+_PROVIDERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY", ("DEEPSEEK_BASE_URL",)),
+    "openai": (
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+        ("OPENAI_BASE_URL", "OPENAI_API_BASE"),
+    ),
 }
 
 # 兼容旧调用：裸模型名默认归属的 provider
 _DEFAULT_PROVIDER = "deepseek"
 
 
+def _first_env(*names: str) -> str:
+    """返回第一个非空的环境变量值（已 strip），全空返回空串。"""
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return ""
+
+
 def resolve_model(model: str) -> tuple[str, str, str]:
     """把模型名解析为 (base_url, api_key, model_id)。
 
     解析顺序：env 注入（SECPT_MODEL_*_<PREFIX>）> provider 前缀 > 裸名默认 deepseek。
+    base_url 优先级：SECPT_MODEL_BASE_URL > SECPT_MODEL_BASE_<PREFIX> >
+    惯例变量（DEEPSEEK_BASE_URL / OPENAI_BASE_URL 等）> provider 内置默认。
     :raises RuntimeError: 找不到 API key
     """
     prefix, _, rest = model.partition("/")
     if not rest:
         prefix, rest = _DEFAULT_PROVIDER, prefix
     prefix = prefix.upper().replace("-", "_")
-    base_default, keyenv_default = _PROVIDERS.get(
-        prefix.lower(), (_PROVIDERS[_DEFAULT_PROVIDER][0], _PROVIDERS[_DEFAULT_PROVIDER][1])
+    base_default, keyenv_default, base_conventional = _PROVIDERS.get(
+        prefix.lower(),
+        (
+            _PROVIDERS[_DEFAULT_PROVIDER][0],
+            _PROVIDERS[_DEFAULT_PROVIDER][1],
+            _PROVIDERS[_DEFAULT_PROVIDER][2],
+        ),
     )
 
     # 通用自定义端点三件套：任意 OpenAI 兼容网关（vLLM/one-api/内网代理等）。
@@ -66,7 +89,12 @@ def resolve_model(model: str) -> tuple[str, str, str]:
     key_override = os.environ.get("SECPT_MODEL_API_KEY", "").strip()
     name_override = os.environ.get("SECPT_MODEL_NAME", "").strip()
 
-    base_url = base_override or os.environ.get(f"SECPT_MODEL_BASE_{prefix}", base_default)
+    base_url = (
+        base_override
+        or os.environ.get(f"SECPT_MODEL_BASE_{prefix}", "").strip()
+        or _first_env(*base_conventional)
+        or base_default
+    )
     key_env = os.environ.get(f"SECPT_MODEL_KEYENV_{prefix}", keyenv_default)
     api_key = (
         key_override or os.environ.get(f"SECPT_MODEL_KEY_{prefix}") or os.environ.get(key_env, "")
