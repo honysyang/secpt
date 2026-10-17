@@ -55,6 +55,29 @@ class TestSelection:
 
 
 class TestParallelRun:
+    def test_workers_env_override(self, tmp_path, monkeypatch):
+        """并发数 env 可配（赛前按时限/平台状态调 SECPT_BENCHMARK_WORKERS）。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_BENCHMARK_WORKERS", "2")
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: [_challenge("w-1")])
+        captured = {}
+
+        async def fake_frontier(objective, **kw):
+            captured.update(kw)
+            return {
+                "job_id": "x",
+                "mode": "frontier",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 1.0,
+            }
+
+        monkeypatch.setattr(bm, "run_frontier", fake_frontier)
+        spec = TaskSpec(job_id="bw", task_type="benchmark", objective="o", budget=TaskBudget())
+        _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "fw.db")))
+        assert captured["max_workers"] == 2
+
     def test_intents_seeded_with_budget(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         monkeypatch.setattr(
@@ -84,7 +107,8 @@ class TestParallelRun:
         spec = TaskSpec(job_id="b1", task_type="benchmark", objective="跑分", budget=TaskBudget())
         summary = _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "f.db")))
 
-        assert captured["max_workers"] == 2  # 平台上限 3 → 并发 2 留 1 槽余量（防结构性 409）
+        assert captured["max_workers"] == 3  # 默认打满平台容器上限（c-06 型死锁由
+        # worker 纪律"不自 close"条款治理，不用降并发换；留槽跑 SECPT_BENCHMARK_WORKERS=2）
         # 清单型任务关 planner（复评修复）：max_intents 钉死为预置数——防队列排空后
         # 规划层给已完成题产"幽灵意图"（容器全关任务还在跑的直接原因）
         assert captured.get("max_intents") == 4
@@ -97,7 +121,8 @@ class TestParallelRun:
         fr = Frontier(tmp_path / "f.db")
         intents = fr.list_all(status="open")
         assert len(intents) == 4
-        # P1 难度感知预算：easy=15 / medium=25 / hard=40
+        # P1 难度感知预算：easy=40 / medium=60 / hard=80（tsec1-run-1213 复盘上调，
+        # 15 步连脚手架+冷启动都不够）
         assert all(i["max_steps"] == bm.DIFF_STEP_BUDGET["easy"] for i in intents)
         assert all("a-" in i["title"] for i in intents)
         assert summary["challenges_total"] == 4
@@ -209,6 +234,77 @@ class TestStateEnvExport:
         denied = _run_api("close", "g-inflight")
         assert denied["error"] == "close_denied"
 
+    def test_api_py_health_probe(self, tmp_path, monkeypatch):
+        """A3：health 子命令返回三重探针（VPN/平台）且不抛异常。"""
+        api = tmp_path / "api.py"
+        api.write_text(bm.API_PY_TEMPLATE, encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "BENCHMARK_BASE_URL": "http://127.0.0.1:1",  # 平台不可达
+                "BENCHMARK_TOKEN": "dummy",
+                "SECPT_VPN_PROBE_URL": "http://127.0.0.1:1",  # VPN 探针不可达
+            }
+        )
+        p = subprocess.run(
+            [sys.executable, str(api), "health"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert p.returncode == 0, p.stderr
+        out = json.loads(p.stdout)
+        assert out == {"vpn": False, "platform": False, "ended": False}
+
+    def test_api_py_wait_adaptive(self, tmp_path):
+        """api.py wait：端口未就绪立即放弃（不盲等整 40s）、就绪即刻返回。
+
+        时间对冲契约：1323 实测 120 次 `sleep 20` 盲等 = 整场 40+ 分钟纯墙钟，
+        wait 用 2s TCP 轮询替代——就绪探测必须秒级返回。
+        """
+        import socket as _socket
+        import time as _time
+
+        api = tmp_path / "api.py"
+        api.write_text(bm.API_PY_TEMPLATE, encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "BENCHMARK_BASE_URL": "http://127.0.0.1:1",
+                "BENCHMARK_TOKEN": "dummy",
+                "SECPT_WAIT_S": "4",  # 测试压缩超时窗
+            }
+        )
+
+        def _wait(addr):
+            t0 = _time.time()
+            p = subprocess.run(
+                [sys.executable, str(api), "wait", addr],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert p.returncode == 0, p.stderr
+            return json.loads(p.stdout), _time.time() - t0
+
+        # ① 无人监听：到超时窗后返回 ready=false（4s 量级，不是 40s/无限）
+        out, took = _wait("127.0.0.1:1")
+        assert out["ready"] is False and took < 15
+
+        # ② 监听就绪：秒级返回 ready=true
+        srv = _socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(5)
+        port = srv.getsockname()[1]
+        try:
+            out, took = _wait(f"127.0.0.1:{port}")
+        finally:
+            srv.close()
+        assert out["ready"] is True
+        assert out["waited_s"] < 5 and took < 10
+
 
 class TestResumeCarry:
     """P1-1 契约：进展感知续步必须承接旧工作区产物（否则"勿推倒重来"是空话）。"""
@@ -316,7 +412,7 @@ class TestRetryIntelligence:
         return fake_frontier
 
     def test_budget_scales_with_flag_count(self, tmp_path, monkeypatch):
-        """多旗大题按旗数放大预算（b-02 六旗题 40×2 步全灭的实证修正）。"""
+        """A1：多旗题按 2 旗/段拆意图；每段预算=难度基线，总预算与旧倍率口径一致。"""
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         monkeypatch.setattr(
             bm,
@@ -330,13 +426,13 @@ class TestRetryIntelligence:
         monkeypatch.setattr(bm, "run_frontier", self._fake_frontier())
         spec = TaskSpec(job_id="bs", task_type="benchmark", objective="o", budget=TaskBudget())
         _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "fs.db")))
-        steps = {
-            i["title"].split("（")[0]: i["max_steps"]
-            for i in Frontier(tmp_path / "fs.db").list_all(status="open")
-        }
-        assert steps["通关 s-1"] == 25  # 单旗不变
-        assert steps["通关 m-4"] == 25 * 2  # 4 旗 → ×2
-        assert steps["通关 h-6"] == 40 * 3  # 6 旗 → ×3
+        segs: dict[str, list[int]] = {}
+        for i in Frontier(tmp_path / "fs.db").list_all(status="open"):
+            key = i["title"].split("（")[0].replace("通关 ", "")
+            segs.setdefault(key, []).append(i["max_steps"])
+        assert segs["s-1"] == [bm.DIFF_STEP_BUDGET["medium"]]  # 单旗单段
+        assert segs["m-4"] == [bm.DIFF_STEP_BUDGET["medium"]] * 2  # 4 旗 → 2 段
+        assert segs["h-6"] == [bm.DIFF_STEP_BUDGET["hard"]] * 3  # 6 旗 → 3 段
 
     def test_retry_digest_injected_into_goal(self, tmp_path, monkeypatch):
         """上一轮失败摘要（settle 台账）注入本轮 goal——重试带记忆换路线。"""
@@ -389,3 +485,179 @@ class TestRetryIntelligence:
         assert dd["status"] == "exhausted" and dd["tail"].startswith("最后卡点")
         monkeypatch.setenv("BENCHMARK_TASK_ID", "tk2")
         assert settle_digest_key(title) != key1  # 跨任务指纹隔离
+
+
+class TestSettlementVerification:
+    """tsec1-run-1213 假 solved 修复：done 只代表链收尾，solved 必须凭平台实况核实。"""
+
+    def _run_bm(self, tmp_path, monkeypatch, live, chains, job_id="sv1"):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: live)
+
+        async def fake_frontier(objective, **kw):
+            return {
+                "job_id": "x",
+                "mode": "frontier",
+                "flags": [],
+                "chains": chains,
+                "open_remaining": 0,
+                "wall_s": 1.0,
+            }
+
+        monkeypatch.setattr(bm, "run_frontier", fake_frontier)
+        spec = TaskSpec(job_id=job_id, task_type="benchmark", objective="跑分", budget=TaskBudget())
+        return _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / f"{job_id}.db")))
+
+    def test_done_without_flags_not_solved(self, tmp_path, monkeypatch):
+        """链收尾但平台 0 分 → 绝不允许标 solved（a-05 事故回归）。"""
+        self._run_bm(
+            tmp_path,
+            monkeypatch,
+            live=[_challenge("a-1", level=1, done=0)],
+            chains=[{"intent": "通关 a-1（easy L1）", "status": "done"}],
+        )
+        led = ChallengeLedger()
+        assert led.status("a-1") != "solved"
+        assert led.status("a-1") == "exhausted"  # 可重试
+
+    def test_done_with_live_flags_marked_solved(self, tmp_path, monkeypatch):
+        self._run_bm(
+            tmp_path,
+            monkeypatch,
+            live=[_challenge("a-2", level=1, done=1, total=1)],
+            chains=[{"intent": "通关 a-2（easy L1）", "status": "done"}],
+        )
+        led = ChallengeLedger()
+        assert led.status("a-2") == "solved"
+
+    def test_partial_flags_recorded_retryable(self, tmp_path, monkeypatch):
+        """部分旗：不标 solved，flags_found 回填供下轮续打。"""
+        self._run_bm(
+            tmp_path,
+            monkeypatch,
+            live=[_challenge("b-2", level=1, done=1, total=2)],
+            chains=[{"intent": "通关 b-2（easy L1）", "status": "done"}],
+        )
+        led = ChallengeLedger()
+        assert led.status("b-2") == "exhausted"
+        row = next(e for e in led.iter_entries() if e["unique_code"] == "b-2")
+        assert row["flags_found"] == 1
+
+    def test_fetch_failure_fail_closed(self, tmp_path, monkeypatch):
+        """结算时平台核实失败 → 全部不标 solved（宁可重打不丢题）。"""
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:  # 选题阶段的 fetch 正常
+                return [_challenge("a-3", level=1)]
+            raise RuntimeError("platform down")  # 结算阶段的 fetch 挂
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr(bm, "fetch_challenges", flaky)
+
+        async def fake_frontier(objective, **kw):
+            return {
+                "job_id": "x",
+                "mode": "frontier",
+                "flags": [],
+                "chains": [{"intent": "通关 a-3（easy L1）", "status": "done"}],
+                "open_remaining": 0,
+                "wall_s": 1.0,
+            }
+
+        monkeypatch.setattr(bm, "run_frontier", fake_frontier)
+        spec = TaskSpec(job_id="sv4", task_type="benchmark", objective="跑分", budget=TaskBudget())
+        _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "sv4.db")))
+        assert ChallengeLedger().status("a-3") != "solved"
+
+
+class TestReconcileLedger:
+    """对账：平台实况为准清理假 solved / 同步部分旗。"""
+
+    def test_downgrade_false_solved_and_sync(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        led = ChallengeLedger()
+        led.ensure("f-1", flags_total=1)
+        led.ensure("t-1", flags_total=2)
+        led.ensure("p-1", flags_total=2)
+        led.ensure("n-1", flags_total=1)
+        led.mark_solved("f-1", flags_found=0, flags_total=1)  # 假 solved
+        led.mark_solved("t-1", flags_found=2, flags_total=2)  # 真 solved（保持）
+        led.mark_failed("p-1")  #  exhausted，平台已有 1/2 旗
+        led.mark_failed("n-1")  #  exhausted，平台已完成（结算漏标）
+        monkeypatch.setattr(
+            bm,
+            "fetch_challenges",
+            lambda: [
+                _challenge("f-1", done=0, total=1),
+                _challenge("t-1", done=2, total=2),
+                _challenge("p-1", done=1, total=2),
+                _challenge("n-1", done=1, total=1),
+                _challenge("ghost-9", done=0),  # 旧代际，账本没有 → 忽略
+            ],
+        )
+        rep = bm.reconcile_ledger(led)
+        assert rep["downgraded"] == ["f-1"]
+        assert rep["ok"] == 1  # t-1 保持 solved
+        assert rep["synced"] == ["p-1"]
+        assert rep["solved_now"] == ["n-1"]
+        assert led.status("f-1") == "exhausted"
+        assert led.status("t-1") == "solved"
+        assert led.status("n-1") == "solved"
+        row = next(e for e in led.iter_entries() if e["unique_code"] == "p-1")
+        assert row["flags_found"] == 1
+
+
+class TestApiPredeploy:
+    """tsec1-run-1213 P2：on_started 把 api.py 预落盘 worker 工作区（省 1-2 步）。"""
+
+    def test_on_started_writes_api_py(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: [_challenge("a-1", level=1)])
+        captured = {}
+
+        async def fake_frontier(objective, **kw):
+            captured.update(kw)
+            return {
+                "job_id": "x",
+                "mode": "frontier",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 1.0,
+            }
+
+        monkeypatch.setattr(bm, "run_frontier", fake_frontier)
+        spec = TaskSpec(job_id="pd1", task_type="benchmark", objective="跑分", budget=TaskBudget())
+        _run(bm.run_benchmark(spec, frontier=Frontier(tmp_path / "pd1.db")))
+        on_started = captured["on_started"]
+        intent = SimpleNamespace(id="i1234567ab", title="通关 a-1（easy L1）")
+        on_started(intent)
+        from secpt.core.job.resume import jobs_dir
+
+        api = jobs_dir() / "pd1-i67ab" / "ws" / "api.py"
+        assert api.is_file()
+        assert "BENCHMARK_TOKEN" in api.read_text(encoding="utf-8")
+
+    def test_release_claims_flag(self, tmp_path, monkeypatch):
+        """--release-claims：强制释放 claimed/running 回可重试；solved 不触碰。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        led = ChallengeLedger()
+        led.ensure("c-1", flags_total=1)
+        led.ensure("c-2", flags_total=1)
+        led.claim("c-1")
+        led.mark_running("c-1")
+        led.claim("c-2")
+        led.mark_solved("c-2", flags_found=1, flags_total=1)
+        monkeypatch.setattr(
+            bm,
+            "fetch_challenges",
+            lambda: [_challenge("c-1"), _challenge("c-2", done=1, total=1)],
+        )
+        rep = bm.reconcile_ledger(led, release_claims=True)
+        assert rep["released"] == 1  # 只有 c-1（claimed/running）；c-2 solved 不动
+        assert led.status("c-1") == "exhausted"
+        assert led.status("c-2") == "solved"

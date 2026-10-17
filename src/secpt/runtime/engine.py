@@ -61,7 +61,96 @@ def _wrap_after_nudge() -> int:
 
 
 def _wrap_at_pct() -> float:
-    return _env_float("SECPT_WRAP_AT_PCT", 90.0)
+    return _env_float("SECPT_WRAP_AT_PCT", 95.0)
+
+
+PROGRESS_ANCHOR_MARK = "【压缩锚点：结构化进度】"
+
+
+def _progress_path(cfg: RunConfig):
+    from pathlib import Path
+
+    # 隐藏文件：progress.md 若以普通文件出现在 ws，会污染模型的 `ls` 观测
+    # （内容每 5 步变化 → 卡死检测误判"出现新信息"，1323 修复中实测会打乱 nudge 节奏）
+    return Path(cfg.work_dir) / ".progress.md"
+
+
+def _redact_secrets(text: str) -> str:
+    """进度锚点脱敏：环境里的真实凭证值与常见 token 键值一律打码。"""
+    import re
+
+    out = text
+    for key in ("BENCHMARK_TOKEN", "DEEPSEEK_API_KEY", "JEV_API_KEY"):
+        val = os.environ.get(key, "")
+        if len(val) >= 8:
+            out = out.replace(val, "***")
+    out = re.sub(
+        r"(?i)((?:BENCHMARK_TOKEN|API_KEY|TOKEN|SECRET)[\"']?\s*[:=]\s*[\"']?)"
+        r"([A-Za-z0-9._\-]{8,})",
+        r"\1***",
+        out,
+    )
+    return out
+
+
+def write_progress_anchor(
+    cfg: RunConfig,
+    *,
+    steps: int,
+    session_round: int,
+    actions: list[tuple[int, str, str, str]],
+    findings: int,
+) -> None:
+    """C1：把结构化进度落盘 ws/progress.md（确定性，不调 LLM）。
+
+    长任务里压缩会删除旧消息；progress.md 是"外部记忆"——压缩/rollover 后把
+    它的摘要作为锚点消息重新注入，模型不会丢失"做到哪、试过什么、什么被否定"。
+    """
+    obj = " ".join((cfg.objective or "").split())[:300]
+    lines = [
+        f"# 进度锚点（自动生成 · step {steps} · round {session_round}）",
+        f"- 目标: {obj}",
+        f"- 已记录发现: {findings}",
+        "- 最近工具动作（旧→新）:",
+    ]
+    for st, name, args, res in actions:
+        lines.append(f"  - step {st} `{name}` {args} → {res}")
+    try:
+        p = _progress_path(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # 凭证脱敏：objective/工具参数可能含平台 token（消息里本来就有，但落盘
+        # 文件不得留明文——沿用"绝不打印/落盘凭证"红线）
+        p.write_text(_redact_secrets("\n".join(lines) + "\n"), encoding="utf-8")
+    except Exception:
+        pass  # 观测层 best-effort，绝不阻断主链路
+
+
+def progress_anchor_text(cfg: RunConfig, limit: int = 2500) -> str:
+    """读取 progress.md 生成锚点消息（无内容返回空串）。"""
+    try:
+        text = _progress_path(cfg).read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    return (
+        f"{PROGRESS_ANCHOR_MARK}\n{text[:limit]}\n"
+        "（更早的消息已被压缩；以上是确定性进度记录。继续推进未完成目标，"
+        "不要重复已否定的路线。）"
+    )
+
+
+def _wrap_min_steps(cfg: RunConfig) -> int:
+    """nudge→wrap 升级的最低步数地板（1323 实证：a-05 第 15 步被"卡死检测→nudge
+    →8 步无改善→wrap"级联截断，fuzz 期重复命令是正常行为，两条高概率路线未测）。
+    低于地板不得进入收尾——宁可在 nudged 档继续跑（预算墙是最终兜底），也不让
+    早期误伤把送分题掐死在探索期。有 max_steps 时取 35%，否则绝对地板 20。"""
+    env = os.environ.get("SECPT_WRAP_MIN_STEPS", "")
+    if env.strip():
+        return _env_int("SECPT_WRAP_MIN_STEPS", 20)
+    if cfg.max_steps > 0:
+        return max(20, int(cfg.max_steps * 0.35))
+    return 20
 
 
 def _stall_after_wrap() -> int:
@@ -434,6 +523,7 @@ class RunConfig:
     budget_warn_pct: float = 0.8  # S3 预算警告阈值
     round_max_steps: int = 60  # S3 回合最大步数（触发 rollover）
     round_max_wall_s: int = 1500  # S3 回合最大墙钟（秒，25min）
+    roe_throttle_ms: int = 0  # ROE 节速：每个 step 完成后 sleep 毫秒数（0=关闭）
 
     @property
     def work_dir(self) -> Path:
@@ -816,9 +906,15 @@ def make_tool_fns(cfg: RunConfig) -> dict:
         odir.mkdir(parents=True, exist_ok=True)
         fname = f"bash-{_out_seq[0]}.log"
         (odir / fname).write_text(text, encoding="utf-8", errors="replace")
-        return text[:BASH_MAX_OUT] + (
-            f"\n...(输出 {len(text)} 字符过长已截断，"
-            f"完整内容已存 outputs/{fname}，可 read_file 查看)"
+        # B3：头 + 尾 + 路径——只给头部会丢掉扫描结果末尾的关键命中（真实故障：
+        # nmap/目录扫描的"最后几行"往往正是 flag 或 200 响应），尾部 2KB 兜住收尾信息
+        _tail_n = 2000
+        head = text[: BASH_MAX_OUT - _tail_n]
+        tail = text[-_tail_n:]
+        return (
+            f"{head}\n...（中间省略 {len(text) - (_tail_n + len(head))} 字符；"
+            f"完整输出已存 outputs/{fname}，用 read_file(offset/limit) 或 grep 取细节）...\n"
+            f"{tail}"
         )
 
     def _ratelimit_check(command: str) -> str | None:
@@ -1251,6 +1347,8 @@ class Engine:
         _step_findings = 0  # 本步新 finding 数（工具记账循环里累加，步首清零）
         _step_cost = 0.0  # 本步成本（budget.add 后算增量，步首清零）
         _prev_cost = 0.0  # 上一步累计成本（算本步增量用）
+        _progress_actions: deque = deque(maxlen=10)  # C1：最近工具动作（进度锚点）
+        _last_progress_step = -99
 
         # ---------- S3 运行时四件套状态 ----------
         from secpt.core.context.estimator import effective_window, est_messages_tokens, est_tokens
@@ -1302,6 +1400,10 @@ class Engine:
             log.info("engine.extra_tools", tools=sorted(self.extra_tools))
 
         _v = self.verbose
+        # 工具执行上下文：插件工具据此定位 ws/（ContextVar 隔离多 worker）
+        from secpt.runtime.workspace_ctx import set_work_dir
+
+        _ws_token = set_work_dir(cfg.work_dir)
         try:
             # max_steps/max_wall_s <= 0 表示不限（7×24 长任务）
             while (cfg.max_steps <= 0 or steps < cfg.max_steps) and (
@@ -1309,6 +1411,9 @@ class Engine:
             ):
                 steps += 1
                 session_steps += 1
+                # ROE 节速（authorized 实战模式）：step 之间 sleep，避免对目标造成突发压力
+                if cfg.roe_throttle_ms > 0 and steps > 1:
+                    await asyncio.sleep(cfg.roe_throttle_ms / 1000.0)
                 elapsed = time.time() - t0
                 _step_findings = 0  # 三档止损：本步成果/成本计数（步首清零）
                 _step_cost = 0.0
@@ -1564,6 +1669,24 @@ class Engine:
                                 self.hooks.on_finding(kind, val, f"step {steps}: {fn_name}")
 
                         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                        # C1：进度锚点记账（5 步一落盘；压缩/轮转后据此重建"做到哪"）
+                        _progress_actions.append(
+                            (
+                                steps,
+                                fn_name,
+                                " ".join(str(fn_args).split())[:100],
+                                " ".join(result.splitlines()[0].split())[:140] if result else "",
+                            )
+                        )
+                        if steps - _last_progress_step >= 5:
+                            write_progress_anchor(
+                                cfg,
+                                steps=steps,
+                                session_round=session_round,
+                                actions=list(_progress_actions),
+                                findings=len(self._finding_seen),
+                            )
+                            _last_progress_step = steps
 
                 # 卡死切换器：必要时注入提醒（user 角色）
                 if detector.should_nudge():
@@ -1590,9 +1713,13 @@ class Engine:
                     _margin_cost += _step_cost
 
                     if loop_phase == "nudged":
-                        # nudge 后无结构性改善达阈值 → 进入收尾（注入 WRAP_MSG）
+                        # nudge 后无结构性改善达阈值 → 进入收尾（注入 WRAP_MSG）。
+                        # 步数地板：低于 max_steps 35%（绝对地板 20 步）不升级——
+                        # fuzz 探索期的重复命令不构成"卡死"，早期 wrap 会掐死送分题
                         steps_since_nudge += 1
-                        if steps_since_nudge >= _wrap_after_nudge():
+                        if steps_since_nudge >= _wrap_after_nudge() and steps >= _wrap_min_steps(
+                            cfg
+                        ):
                             loop_phase = "wrapping"
                             wrap_reason = "nudge_no_improve"
                             wrap_steps = 0
@@ -1618,6 +1745,16 @@ class Engine:
                                 "（交编排层 RESET/终态）",
                                 file=sys.stderr,
                             )
+                            with contextlib.suppress(Exception):
+                                from secpt.runtime.notify import notify
+
+                                notify(
+                                    "job_stalled",
+                                    f"secpt 任务 {cfg.job_id} 止损停滞（stalled）",
+                                    f"收尾 {wrap_steps} 步未产出 ANSWER"
+                                    f"（触发：{wrap_reason or 'nudge'}）；"
+                                    "编排层将决定 RESET 重建或终态",
+                                )
                             break
                     # 预算/步数接近耗尽（wrap_at_pct，设计 2.1 ②：步数或预算达
                     # 该百分比直接收尾）也触发收尾（单次，不重复注入）
@@ -1705,6 +1842,14 @@ class Engine:
                             min(first_idx, len(remaining)),
                             {"role": "user", "content": placeholder_content(k)},
                         )
+                        # C1：压缩后追加结构化进度锚点（append-only；锚点防"失忆"——
+                        # 旧消息删除后，模型仍知道做到哪、试过什么、什么被否定）
+                        _anchor = progress_anchor_text(cfg)
+                        if _anchor and not any(
+                            PROGRESS_ANCHOR_MARK in str(m.get("content") or "")
+                            for m in remaining[-6:]
+                        ):
+                            remaining.append({"role": "user", "content": _anchor})
                         messages = remaining
                         self._pending_summary_ks.add(k)
                         counter_inc("compaction_count")
@@ -1740,6 +1885,11 @@ class Engine:
                         hint = self.hooks.on_rollover(session_round, new_messages, handoff) or ""
                     if hint:
                         new_messages[1]["content"] += "\n\n" + hint
+                    # C1：轮转（同会话换链）同样注入结构化锚点——handoff 是 LLM 摘要，
+                    # 锚点是确定性事实，二者互补
+                    _anchor = progress_anchor_text(cfg)
+                    if _anchor:
+                        new_messages.append({"role": "user", "content": _anchor})
                     messages = new_messages
                     session_steps = 0
                     session_start_t = time.time()
@@ -1748,6 +1898,10 @@ class Engine:
             log.error("engine.fatal", error=str(e))
             status = "error"
         finally:
+            with contextlib.suppress(Exception):
+                from secpt.runtime.workspace_ctx import reset_work_dir
+
+                reset_work_dir(_ws_token)
             # 收尾：停掉后台摘要 worker（残留 pending 请求由 resume 或
             # `secpt worker summarize` 兜底，摘要文件才是完成真相源）
             if self._bg_task is not None:

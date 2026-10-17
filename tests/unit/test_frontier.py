@@ -501,6 +501,61 @@ class TestTaskLock:
         _release_task_lock(h2)
 
 
+class TestProgressAwareResumeBudget:
+    """⑦ 续命段预算递减（1323 复盘修正）：r2 原预算、r3 减半——多旗链式题
+    的瓶颈是依赖链深度而非会话长度，整额续第二段是时间黑洞。空转不续不变。"""
+
+    def test_continuation_budget_decay(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.delenv("SECPT_FRONTIER_DB", raising=False)
+        seen: list[tuple[str, int]] = []  # (job_id, max_steps)
+
+        def fake_run_engine(**kw):
+            seen.append((str(kw.get("job_id")), int(kw.get("max_steps") or 0)))
+            jid = str(kw.get("job_id"))
+            # 每段都在 ws 放产出文件（满足 _has_ws_output → 持续续命），且每段都 step_exceeded
+            ws = tmp_path / "jobs" / jid / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "exploit.py").write_text("stage artifact", encoding="utf-8")
+            return SimpleNamespace(
+                job_id=jid,
+                flag=None,
+                steps=int(kw.get("max_steps") or 0),
+                wall_s=0.01,
+                status="step_exceeded",
+                messages=[],
+            )
+
+        monkeypatch.setattr("secpt.cli.engine_runner.run_engine", fake_run_engine)
+        fr = Frontier(frontier_db_path("cb1"))
+        fr.add("多旗大题", done_criteria="submit 全部 flag", depth=0, max_steps=100)
+        _run(
+            run_frontier(
+                "目标",
+                profile="ctf",
+                base_job_id="cb1",
+                frontier=fr,
+                llm=object(),
+                planner_llm=_PlannerLLM(["[]"]),
+                max_rounds=3,
+                max_intents=1,
+            )
+        )
+        by_jid = dict(seen)
+        base = [j for j in by_jid if "-r" not in j]
+        assert len(base) == 1
+        assert by_jid[base[0]] == 100  # 首段原预算
+        r2 = f"{base[0]}-r2"
+        r3 = f"{base[0]}-r3"
+        assert by_jid[r2] == 100  # r2 原预算
+        assert by_jid[r3] == 50  # r3 减半
+        assert not any("-r4" in j for j in by_jid)  # 最多 2 段续命
+        rows = fr.list_all(status="exhausted")
+        assert rows  # 步数跨段累计进 digest（steps 由 settle 流程记录，此处只验终态）
+
+
 class TestRecheckOnce:
     """加强②：复核纪律运行时强制（首轮失败自动回队一次）。"""
 

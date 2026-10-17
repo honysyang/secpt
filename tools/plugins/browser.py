@@ -50,6 +50,7 @@ def _bad_args(args: dict, allowed: set[str]) -> str | None:
         return f"Error: 未知参数 {sorted(unknown)}，可用：{sorted(allowed)}"
     return None
 
+
 NAVIGATE_SCHEMA = {
     "type": "object",
     "properties": {"url": {"type": "string", "description": "目标 URL（含 http(s)://）"}},

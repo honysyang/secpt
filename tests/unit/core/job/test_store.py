@@ -50,6 +50,26 @@ def test_invalid_status_rejected(tmp_path):
         store.upsert_job(rec)
 
 
+def test_stalled_status_accepted(tmp_path):
+    """三档止损终态：stalled 合法落库（engine_runner/worker 精确映射的前提）。"""
+    store = JobStore(tmp_path / "t.sqlite")
+    rec = _make_record(store, "j-st")
+    rec.set_status("stalled")
+    store.upsert_job(rec)
+    assert store.get_job("j-st").status == "stalled"
+
+
+def test_apply_terminal_status_stalled_preserved(tmp_path):
+    """RunResult.stalled 不得被吞成 failed——RESET 依赖 stalled 识别重建对象。"""
+    from secpt.cli.engine_runner import _apply_terminal_status
+    from secpt.runtime import engine as _engine
+
+    rec = _make_record(JobStore(tmp_path / "t2.sqlite"), "j-st2")
+    result = _engine.RunResult(flag=None, steps=50, wall_s=10.0, status="stalled", messages=[])
+    _apply_terminal_status(rec, result)
+    assert rec.status == "stalled"
+
+
 def test_list_and_delete(tmp_path):
     store = JobStore(tmp_path / "t.sqlite")
     for i in range(3):

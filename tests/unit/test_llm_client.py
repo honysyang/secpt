@@ -16,6 +16,11 @@ from secpt.runtime.llm.client import call_llm, resolve_model
 
 
 class TestResolveModel:
+    @pytest.fixture(autouse=True)
+    def _clear_custom_endpoint(self, monkeypatch):
+        for k in ("SECPT_MODEL_BASE_URL", "SECPT_MODEL_NAME", "SECPT_MODEL_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
+
     def test_bare_name_defaults_deepseek(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-test")
         monkeypatch.delenv("SECPT_MODEL_BASE_DEEPSEEK", raising=False)
@@ -43,6 +48,37 @@ class TestResolveModel:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("SECPT_MODEL_KEY_DEEPSEEK", raising=False)
         with pytest.raises(RuntimeError, match="API key"):
+            resolve_model("deepseek-chat")
+
+    def test_custom_endpoint_trio(self, monkeypatch):
+        """通用自定义端点：base_url + model 名 + key 三者独立覆盖。"""
+        monkeypatch.setenv("SECPT_MODEL_BASE_URL", "https://gw.internal/v1")
+        monkeypatch.setenv("SECPT_MODEL_NAME", "qwen3-32b")
+        monkeypatch.setenv("SECPT_MODEL_API_KEY", "gw-key")
+        base, key, mid = resolve_model("deepseek-chat")
+        assert base == "https://gw.internal/v1"
+        assert key == "gw-key"
+        assert mid == "qwen3-32b"
+
+    def test_custom_name_only_keeps_provider(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "dk-test")
+        monkeypatch.setenv("SECPT_MODEL_NAME", "deepseek-v4-flash")
+        base, key, mid = resolve_model("deepseek-chat")
+        assert base == "https://api.deepseek.com"
+        assert key == "dk-test"
+        assert mid == "deepseek-v4-flash"
+
+    def test_custom_key_only_keeps_provider_and_name(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setenv("SECPT_MODEL_API_KEY", "generic-key")
+        base, key, mid = resolve_model("deepseek-chat")
+        assert base == "https://api.deepseek.com"
+        assert key == "generic-key"
+        assert mid == "deepseek-chat"
+
+    def test_missing_key_message_mentions_custom_var(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="SECPT_MODEL_API_KEY"):
             resolve_model("deepseek-chat")
 
 
@@ -91,6 +127,76 @@ def _no_backoff(monkeypatch):
     """退避间隔清零（asyncio.sleep(0) 只让出一次，不碰全局 asyncio 模块）。"""
     monkeypatch.setattr(client_mod, "_BACKOFF_BASE_S", 0.0)
     monkeypatch.setattr(client_mod.random, "random", lambda: 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _clean_custom_endpoint(monkeypatch):
+    for k in (
+        "SECPT_MODEL_BASE_URL",
+        "SECPT_MODEL_NAME",
+        "SECPT_MODEL_API_KEY",
+        "SECPT_MODEL_AUTH_HEADER",
+        "SECPT_MODEL_AUTH_SCHEME",
+        "SECPT_MODEL_EXTRA_HEADERS",
+        "SECPT_MODEL_CHAT_PATH",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+
+class TestCustomEndpointRequest:
+    def test_custom_headers_and_chat_path(self, monkeypatch):
+        import secpt.runtime.llm.client as m
+
+        monkeypatch.setenv("SECPT_MODEL_BASE_URL", "https://gw.internal/v1")
+        monkeypatch.setenv("SECPT_MODEL_NAME", "qwen3-32b")
+        monkeypatch.setenv("SECPT_MODEL_API_KEY", "gw-key")
+        monkeypatch.setenv("SECPT_MODEL_AUTH_HEADER", "api-key")
+        monkeypatch.setenv("SECPT_MODEL_AUTH_SCHEME", "")
+        monkeypatch.setenv("SECPT_MODEL_EXTRA_HEADERS", '{"X-Tenant": "t1"}')
+        monkeypatch.setenv("SECPT_MODEL_CHAT_PATH", "/custom/chat")
+        captured: dict = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        class _Client:
+            async def post(self, url, json=None, headers=None):
+                captured.update({"url": url, "json": json, "headers": headers})
+                return _Resp()
+
+        monkeypatch.setattr(m, "_get_client", lambda: _Client())
+        _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat"))
+        assert captured["url"] == "https://gw.internal/v1/custom/chat"
+        assert captured["headers"]["api-key"] == "gw-key"  # 空 scheme = 原始 key
+        assert captured["headers"]["X-Tenant"] == "t1"
+        assert captured["json"]["model"] == "qwen3-32b"
+
+    def test_base_already_has_chat_completions(self, monkeypatch):
+        import secpt.runtime.llm.client as m
+
+        monkeypatch.setenv("SECPT_MODEL_BASE_URL", "https://gw.internal/v1/chat/completions")
+        monkeypatch.setenv("SECPT_MODEL_API_KEY", "k")
+        captured: dict = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        class _Client:
+            async def post(self, url, json=None, headers=None):
+                captured["url"] = url
+                return _Resp()
+
+        monkeypatch.setattr(m, "_get_client", lambda: _Client())
+        _run(call_llm([{"role": "user", "content": "hi"}], [], "deepseek-chat"))
+        assert captured["url"] == "https://gw.internal/v1/chat/completions"  # 不重复拼接
 
 
 def test_retry_on_connect_error(monkeypatch):

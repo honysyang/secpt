@@ -30,6 +30,10 @@ from pathlib import Path
 import yaml
 
 PLUGINS_DIR = Path(__file__).resolve().parents[3] / "tools" / "plugins"
+# 安装态回退：wheel 通过 pyproject force-include 把 tools/plugins 打进
+# secpt/tools/plugins，现场（仓库/editable）用仓库根目录。两处都扫，后者覆盖同名。
+_PACKAGE_PLUGINS_DIR = Path(__file__).resolve().parent / "plugins"
+PLUGINS_DIRS = [d for d in (PLUGINS_DIR, _PACKAGE_PLUGINS_DIR) if d.is_dir()]
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 _FIELD_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
@@ -124,7 +128,7 @@ def discover_plugins(
     dirs: list[Path] | None = None,
 ) -> tuple[dict[str, ToolPlugin], dict[str, tuple[dict, object]]]:
     """扫描插件目录，返回 (yaml_plugins, python_tools)。非法插件跳过并告警。"""
-    dirs = dirs or [PLUGINS_DIR]
+    dirs = dirs or PLUGINS_DIRS
     yaml_plugins: dict[str, ToolPlugin] = {}
     python_tools: dict[str, tuple[dict, object]] = {}
     for d in dirs:

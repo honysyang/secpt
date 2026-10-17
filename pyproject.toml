@@ -58,6 +58,10 @@ secpt = "secpt.cli.app:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/secpt"]
 
+# 插件工具随包安装：安装态 plugin_loader 扫 secpt/tools/plugins（M4）
+[tool.hatch.build.targets.wheel.force-include]
+"tools/plugins" = "secpt/tools/plugins"
+
 # ───────────────────────── 测试 ─────────────────────────
 [tool.pytest.ini_options]
 minversion = "8.0"

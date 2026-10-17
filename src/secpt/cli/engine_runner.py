@@ -30,11 +30,15 @@ from secpt.core.profile.render import DEFAULT_CONSTRAINTS, load_prior, render_sy
 from secpt.runtime import engine as _engine
 
 
-def _api_key() -> str:
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not key:
-        raise RuntimeError("DEEPSEEK_API_KEY not set")
-    return key
+def _ensure_model_ready(model: str | None = None) -> None:
+    """真实 LLM 路径的前置校验：按当前配置解析出 base/model/key。
+
+    不再硬编码 DEEPSEEK_API_KEY——支持 SECPT_MODEL_BASE_URL/NAME/API_KEY、
+    OPENAI_API_KEY、SECPT_MODEL_KEY_<PREFIX> 等任意 OpenAI 兼容端点。
+    """
+    from secpt.runtime.llm.client import resolve_model
+
+    resolve_model(model or os.environ.get("SECPT_MODEL_PRIMARY") or "deepseek-chat")
 
 
 def resolve_models(primary: str | None, fallback: str | None) -> tuple[str, str]:
@@ -125,6 +129,7 @@ def run_engine(
     sandbox: str = "none",
     hook_factory=None,  # 外部包装层工厂：inner_hooks -> hooks（团队模式完成广播让出用）
     scope_entries: list[str] | None = None,  # G1 目标授权白名单来源（题面入口/意图资产）
+    tools_extra: list[str] | None = None,  # C2：意图级工具补充（插件名，按题族动态启用）
 ) -> _engine.RunResult:
     """新建任务跑一次 Engine，全程落盘。profile 决定 tools/terminator/budget/先验。
 
@@ -143,7 +148,7 @@ def run_engine(
 
             llm = FakeLLM(n_steps=max(1, (max_steps or 100) - 1), job_id=job_id)
         else:
-            _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
+            _ensure_model_ready(model_primary)  # 真实 LLM 路径才需要 key
             llm = _prod_llm()
 
     jdir = jobs_dir() / job_id
@@ -159,6 +164,9 @@ def run_engine(
     # 阶段覆盖（多阶段编排）：role/tools/prior/stop_condition
     stage_role = getattr(stage, "role", "") or prof.role
     stage_tools = list(getattr(stage, "tools", None) or prof.tools)
+    for _t in tools_extra or []:
+        if _t and _t not in stage_tools:
+            stage_tools.append(_t)
     stage_prior = getattr(stage, "prior", "") or ""
     stage_stop = getattr(stage, "stop_condition", "") or ""
 
@@ -214,6 +222,14 @@ def run_engine(
         cfg.bash_timeout_s = prof.bash_timeout_s
     if getattr(prof, "stuck_wait_cap", 0) > 0:
         cfg.stuck_wait_cap = prof.stuck_wait_cap
+    # ROE 交战规则：profile.roe.throttle_ms 节速（authorized 实战模式），env 可覆盖
+    _roe_ms = getattr(getattr(prof, "roe", None), "throttle_ms", 0) or 0
+    _roe_env = os.environ.get("SECPT_ROE_THROTTLE_MS")
+    if _roe_env:
+        with contextlib.suppress(ValueError):
+            _roe_ms = max(0, int(_roe_env))
+    if _roe_ms > 0:
+        cfg.roe_throttle_ms = _roe_ms
     _wait_env = os.environ.get("SECPT_STUCK_WAIT_CAP")
     if _wait_env:
         with contextlib.suppress(ValueError):
@@ -414,7 +430,7 @@ def resume_engine(
             max_steps = run_cfg.get("max_steps", spec.budget.steps)
             llm = FakeLLM(n_steps=max(1, max_steps - 1), job_id=job_id)
         else:
-            _api_key()  # 真实 LLM 路径才需要 key；fake 路径无 key 可跑
+            _ensure_model_ready(None)  # 按当前 env 配置校验（支持自定义端点）
             llm = _prod_llm()
 
     store = job_store or JobStore()

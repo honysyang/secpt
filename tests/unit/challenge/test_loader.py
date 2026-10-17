@@ -106,46 +106,44 @@ runner = CliRunner()
 
 
 def test_cli_run_file_and_task_mutex(tmp_path: Path) -> None:
-    """secpt run --file 与 --task 互斥。"""
+    """run shim：--file 与 --task 同时给出时使用题面文件并提示（转发 solve）。"""
+    from unittest.mock import patch
+
     from secpt.cli.app import app
 
     f = tmp_path / "task.txt"
     f.write_text("do something", encoding="utf-8")
 
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "10.0.0.1",
-            "--mode",
-            "tree",
-            "--file",
-            str(f),
-            "--task",
-            "other task",
-        ],
-    )
-    assert result.exit_code == 1
-    assert "互斥" in result.output
+    with patch("secpt.cli.solve.solve", return_value=0) as mock_solve:
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                "10.0.0.1",
+                "--mode",
+                "tree",
+                "--file",
+                str(f),
+                "--task",
+                "other task",
+            ],
+        )
+    assert result.exit_code == 0
+    assert "已忽略" in result.output
+    mock_solve.assert_called_once()
+    assert mock_solve.call_args.args[0] == str(f)
 
 
-def test_cli_run_tree_deprecated_redirects_to_direct(tmp_path: Path) -> None:
-    """secpt run --mode tree 已废弃：提示并自动转 direct，--file 作为题面。"""
-    from unittest.mock import MagicMock, patch
+def test_cli_run_tree_deprecated_redirects_to_solve(tmp_path: Path) -> None:
+    """secpt run --mode tree 已废弃：提示并自动转发 solve 单链（--file 作为题面）。"""
+    from unittest.mock import patch
 
     from secpt.cli.app import app
 
     f = tmp_path / "task.txt"
     f.write_text("scan the target", encoding="utf-8")
 
-    mock_result = MagicMock()
-    mock_result.job_id = "job-tree-x"
-    mock_result.steps = 1
-    mock_result.wall_s = 1.0
-    mock_result.status = "success"
-    mock_result.flag = "FLAG{tree_redirected}"
-
-    with patch("secpt.cli.engine_runner.run_engine", return_value=mock_result) as mock_run:
+    with patch("secpt.cli.solve.solve", return_value=0) as mock_solve:
         result = runner.invoke(
             app,
             [
@@ -159,9 +157,9 @@ def test_cli_run_tree_deprecated_redirects_to_direct(tmp_path: Path) -> None:
         )
     assert result.exit_code == 0
     assert "已废弃" in result.output
-    mock_run.assert_called_once()
-    _, kwargs = mock_run.call_args
-    assert "scan the target" in kwargs["objective"]
+    mock_solve.assert_called_once()
+    assert mock_solve.call_args.args[0] == str(f)
+    assert mock_solve.call_args.kwargs["mode"] == "single"
 
 
 def test_cli_engage_file_and_objective_mutex(tmp_path: Path) -> None:

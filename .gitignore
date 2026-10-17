@@ -43,3 +43,17 @@ var/
 
 # 运行归档产物
 archive/runs/
+
+# --- 运行日志（不入库） ---
+tsec*-run-*.log
+*.run.log
+
+# --- 构建产物 ---
+*.tar.gz
+
+# --- 敏感凭证（永不入库） ---
+vpn/
+*.ovpn
+
+# --- 临时解压目录（zip 解包产物不入库，.zip 原始包保留） ---
+challenges/**/attachments/*.zip/

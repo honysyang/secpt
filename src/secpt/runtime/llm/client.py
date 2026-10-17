@@ -11,6 +11,9 @@
 多模型路由（OpenAI 兼容端点）：
 - ``deepseek/<model>`` 或裸名（如 ``deepseek-chat``）→ api.deepseek.com + DEEPSEEK_API_KEY
 - ``openai/<model>`` → OPENAI_BASE_URL（默认官方）+ OPENAI_API_KEY
+- 通用自定义端点（任意 OpenAI 兼容网关）：
+  ``SECPT_MODEL_BASE_URL`` + ``SECPT_MODEL_NAME`` + ``SECPT_MODEL_API_KEY``
+  三者独立覆盖 base_url / model_id / api_key（未设置的项按 provider 规则解析）。
 - 自建网关/内网：``SECPT_MODEL_BASE_<PREFIX>`` / ``SECPT_MODEL_KEY_<PREFIX>`` /
   ``SECPT_MODEL_KEYENV_<PREFIX>`` 环境变量注入任意 provider
 - 非 OpenAI 兼容协议（如原生 anthropic）需先接入其 OpenAI 兼容端点再用本客户端
@@ -19,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import time
@@ -56,15 +60,25 @@ def resolve_model(model: str) -> tuple[str, str, str]:
         prefix.lower(), (_PROVIDERS[_DEFAULT_PROVIDER][0], _PROVIDERS[_DEFAULT_PROVIDER][1])
     )
 
-    base_url = os.environ.get(f"SECPT_MODEL_BASE_{prefix}", base_default)
+    # 通用自定义端点三件套：任意 OpenAI 兼容网关（vLLM/one-api/内网代理等）。
+    # 三者独立覆盖，未设置的项继续走 provider 规则；name 覆盖所有意图/角色模型名。
+    base_override = os.environ.get("SECPT_MODEL_BASE_URL", "").strip()
+    key_override = os.environ.get("SECPT_MODEL_API_KEY", "").strip()
+    name_override = os.environ.get("SECPT_MODEL_NAME", "").strip()
+
+    base_url = base_override or os.environ.get(f"SECPT_MODEL_BASE_{prefix}", base_default)
     key_env = os.environ.get(f"SECPT_MODEL_KEYENV_{prefix}", keyenv_default)
-    api_key = os.environ.get(f"SECPT_MODEL_KEY_{prefix}") or os.environ.get(key_env, "")
+    api_key = (
+        key_override or os.environ.get(f"SECPT_MODEL_KEY_{prefix}") or os.environ.get(key_env, "")
+    )
+    model_id = name_override or rest
     if not api_key:
         raise RuntimeError(
-            f"模型 {model!r}（provider {prefix.lower()}）缺少 API key："
-            f"请 export {key_env}=<key>，或设置 SECPT_MODEL_KEY_{prefix}"
+            f"模型 {model!r}（provider {prefix.lower()}）缺少 API key：请设置 "
+            f"SECPT_MODEL_API_KEY（通用自定义端点）、{key_env}、"
+            f"SECPT_MODEL_KEY_{prefix}，或通过 SECPT_MODEL_KEYENV_{prefix} 指定 key 环境变量"
         )
-    return base_url.rstrip("/"), api_key, rest
+    return base_url.rstrip("/"), api_key, model_id
 
 
 def _llm_param(env_name: str, attr: str, default):
@@ -198,11 +212,33 @@ async def call_llm(
 
     base_url, resolved_key, model_id = resolve_model(model)
     is_reasoner = model_id == (fallback_model or "")
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {resolved_key if api_key is None else (api_key or resolved_key)}",
-        "Content-Type": "application/json",
-    }
+    # 端点路径：默认 /chat/completions；base 已含该路径时不重复拼接；
+    # 自建网关/Azure 可用 SECPT_MODEL_CHAT_PATH 覆盖（如 /openai/deployments/x/chat/completions）
+    chat_path = (
+        os.environ.get("SECPT_MODEL_CHAT_PATH", "/chat/completions").strip() or "/chat/completions"
+    )
+    if not chat_path.startswith("/"):
+        chat_path = "/" + chat_path
+    url = base_url if base_url.endswith(chat_path) else f"{base_url}{chat_path}"
+
+    key = resolved_key if api_key is None else (api_key or resolved_key)
+    # 鉴权头可配：默认 Authorization: Bearer <key>；Azure 可用 api-key + 空 scheme
+    auth_header = (
+        os.environ.get("SECPT_MODEL_AUTH_HEADER", "Authorization").strip() or "Authorization"
+    )
+    auth_scheme = os.environ.get("SECPT_MODEL_AUTH_SCHEME", "Bearer").strip()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers[auth_header] = f"{auth_scheme} {key}".strip() if auth_scheme else key
+    # 额外请求头（JSON 对象；如网关要求 X-Tenant）
+    extra_raw = os.environ.get("SECPT_MODEL_EXTRA_HEADERS", "").strip()
+    if extra_raw:
+        try:
+            extra = json.loads(extra_raw)
+            if not isinstance(extra, dict):
+                raise ValueError("必须是 JSON 对象")
+            headers.update({str(k): str(v) for k, v in extra.items()})
+        except Exception as e:
+            raise RuntimeError(f"SECPT_MODEL_EXTRA_HEADERS 解析失败: {e}") from e
     payload: dict = {
         "model": model_id,
         "messages": sanitize_messages(messages),

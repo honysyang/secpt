@@ -37,6 +37,18 @@ class Budget(BaseModel):
     cost_cny: float = 0.0
 
 
+class RoeSpec(BaseModel):
+    """交战规则（Rules of Engagement）：双模治理。
+
+    - mode "ctf"（默认）：竞技/实验场景，无额外限速，行为边界靠 profile.constraints
+    - mode "authorized"：授权实战场景——引擎每个 step 之间节速 throttle_ms，
+      solve 打印 ROE 横幅（操作留痕提示），constraints 追加进系统提示
+    """
+
+    mode: Literal["ctf", "authorized"] = "ctf"
+    throttle_ms: int = 0  # 每个引擎 step 后的节速 sleep（毫秒），authorized 实战建议 >0
+
+
 class Stage(BaseModel):
     """多阶段渗透的一个阶段（profile.stages；空则走单链）"""
 
@@ -64,6 +76,7 @@ class Profile(BaseModel):
     bash_timeout_s: int = 0  # 非 0 → 覆盖引擎 bash 工具超时（如 pwn 的 QEMU 长交互）
     stuck_wait_cap: int = 0  # 非 0 → 覆盖卡死检测 waiting 上限（pwn 长时交互调大）
     constraints: list[str] = Field(default_factory=list)
+    roe: RoeSpec = Field(default_factory=RoeSpec)  # 交战规则（双模治理）
     note: str = ""
     sandbox: str = ""  # 非空 → 覆盖全局 sandbox 默认（none）；需容器时写 docker/auto
 

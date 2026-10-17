@@ -1,11 +1,13 @@
 """角色体系：团队拓扑的角色定义与角色化阶段提示（frontier 角色意图的语义定义）。
 
 参考 ARTEX 团队拓扑：目标拆解（goals）→ 角色意图（role）→ 认领互斥（claim）→ 事件回馈。
-四角色闭环（角色语义与已退役的固定 DAG 编排一一对应，现改为意图表达、可并行认领）：
-- recon   侦察：枚举资产/指纹/端口 → observe_asset 入图谱（无依赖，先行）
-- exploit 利用：针对单个资产做定向利用（depends_on 对应 recon；每资产一条，可多 worker 并行）
-- verify  复验：对 exploit 声称的 finding/flag 做独立 PoC 复现（depends_on 对应 exploit）
-- report  聚合：verify 全部完成后产结构化渗透报告（depends_on 全部 verify）
+五角色闭环（角色语义与已退役的固定 DAG 编排一一对应，现改为意图表达、可并行认领）：
+- recon    侦察：枚举资产/指纹/端口 → observe_asset 入图谱（无依赖，先行）
+- exploit  利用：针对单个资产做定向利用（depends_on 对应 recon；每资产一条，可多 worker 并行）
+- lateral  横向：凭据复用/横向移动/数据定位（depends_on fact:credential——intel 图出现
+           凭据事实即解锁；fact 依赖由 deps_satisfied 确定性判定，不靠模型自觉）
+- verify   复验：对 exploit 声称的 finding/flag 做独立 PoC 复现（depends_on 对应 exploit）
+- report   聚合：verify 全部完成后产结构化渗透报告（depends_on 全部 verify）
 
 实现原则：不新增渲染机制——角色化通过给 worker objective 追加
 「【当前阶段：<role>】」片段实现（objective_extra 语义），
@@ -36,6 +38,14 @@ ROLE_MAP: dict[str, RoleSpec] = {
         role_prompt="定向利用者：针对单个资产深挖并利用，深度优先",
         stop_condition="拿到 flag 或确认漏洞后输出 ANSWER: <结论>",
     ),
+    "lateral": RoleSpec(
+        name="lateral",
+        role_prompt=(
+            "横向移动者：基于已获得的凭据/访问权做复用与扩散（内网服务、相邻主机、"
+            "数据定位），不做无凭据的新突破"
+        ),
+        stop_condition="横向验证结论输出 ANSWER: <可达范围/数据结论>",
+    ),
     "verify": RoleSpec(
         name="verify",
         role_prompt="复验员：对声称的 finding/flag 用独立 PoC 重新复现，成功才确认",
@@ -60,13 +70,30 @@ def role_stage(role: str, asset_scope: str = "") -> str:
             "先对目标做资产枚举：端口 / 服务 / 目录 / 技术栈。\n"
             "侦察结束前，把结构化资产清单写入文件 ws/assets.json（JSON 数组，"
             "每项含 host/port/service/tech 四个字段，没有的字段给空字符串或 null）。\n"
+            "发现疑似默认口令/弱配置时，用 record_fact 以 credential:<服务> 前缀记录，"
+            "供 lateral 意图复用。\n"
             "没有侦察到资产时也写一个空数组 []。"
         )
     if role == "exploit":
         target = asset_scope or "目标入口"
         return (
             f"【当前阶段：定向利用（exploit）】\n针对资产 {target} 做定向利用。\n"
-            "利用成功（拿到 flag 或确认漏洞）后输出 ANSWER: <结论>。"
+            "利用成功（拿到 flag 或确认漏洞）后输出 ANSWER: <结论>。\n"
+            "【硬约束】每获得一个凭据或访问权，必须立即 record_fact 记录，"
+            "前缀规则：凭据用 credential:<服务>（含 username/password/token 字段）、"
+            "已取得的访问路径用 access:<主机或服务>（如 access:ssh-10.0.0.5）、"
+            "已确认漏洞用 vuln:<资产>:<漏洞>（含 evidence）。"
+            "没有 record_fact 的凭据等于不存在——后续 lateral 意图不会被解锁。"
+        )
+    if role == "lateral":
+        return (
+            "【当前阶段：横向移动（lateral）】\n基于已记录的凭据/访问事实（先 recall "
+            "fact:credential / fact:access 拉全量）做复用与扩散：同一凭据尝试其他主机/服务、"
+            "已控主机上翻取配置与数据、内网可达性探测。\n"
+            "不做无凭据的新突破（那是 recon/exploit 的活）；"
+            "每发现一条新访问路径或敏感数据，立即 record_fact（access: / data: 前缀），"
+            "让后续意图与报告可消费。\n"
+            "横向验证结论输出 ANSWER: <可达范围/数据结论>。"
         )
     if role == "verify":
         return (

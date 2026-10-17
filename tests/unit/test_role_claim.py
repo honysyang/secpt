@@ -162,8 +162,8 @@ class TestRoleClaim:
 
 class TestRoleStage:
     def test_role_map_complete(self):
-        """四角色闭环齐备：recon/exploit/verify/report。"""
-        assert set(ROLE_MAP) == {"recon", "exploit", "verify", "report"}
+        """五角色闭环齐备：recon/exploit/lateral/verify/report。"""
+        assert set(ROLE_MAP) == {"recon", "exploit", "lateral", "verify", "report"}
 
     def test_build_intent_objective_injects_role_stage(self, tmp_path):
         """角色意图的 objective 追加角色化阶段提示；普通意图不追加。"""

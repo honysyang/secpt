@@ -2,7 +2,7 @@
 
 # 你的运行环境与凭证
 请记得以下两个变量，在后续的所有API请求中都需要使用：
-- BENCHMARK_TOKEN: 91c6a7f7-c940-4055-8bc6-d8fc18b505a4
+- BENCHMARK_TOKEN: abc2c690-896e-4527-a368-0facdb764824
 - BENCHMARK_BASE_URL: https://tsecbench.zc.tencent.com
 
 

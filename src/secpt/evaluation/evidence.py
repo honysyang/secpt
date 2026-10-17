@@ -25,6 +25,7 @@ class ToolCall:
     args: str
     status: str = ""  # ok | empty | error（tool_result 分类）
     preview: str = ""  # 工具输出预览（events 里截断 500 字符）
+    sub: str = ""  # 子 job 来源（frontier 聚合流 payload.subjob；单链恒 ""）
 
 
 @dataclass
@@ -33,6 +34,7 @@ class Evidence:
     tool_calls: list[ToolCall] = field(default_factory=list)
     findings: list[dict] = field(default_factory=list)
     answer: str | None = None  # agent 自报的 ANSWER（无则 None）
+    answer_sub: str = ""  # 产出 ANSWER 的子 job（聚合流防跨会话串味；单链 ""）
     answer_in_outputs: bool = False  # ANSWER 值是否出现在任一工具输出中
     n_assistant_msgs: int = 0
 
@@ -89,27 +91,32 @@ def _find_transcript(job_dir: Path) -> Path | None:
     return None
 
 
-def _extract_answer(events: list[dict], transcript: Path | None) -> str | None:
-    """agent 自报 ANSWER：优先完整 transcript，其次 events 里的 assistant 内容。"""
-    contents: list[str] = []
+def _extract_answer(events: list[dict], transcript: Path | None) -> tuple[str | None, str]:
+    """agent 自报 ANSWER：优先完整 transcript，其次 events 里的 assistant 内容。
+
+    返回 (answer, subjob)：subjob 为产出 ANSWER 的子 job（frontier 聚合流的
+    payload.subjob 标记；transcript 路径与单链恒 ""）。
+    """
+    contents: list[tuple[str, str]] = []
     if transcript is not None:
         try:
             messages = json.loads(transcript.read_text(encoding="utf-8"))
             for m in messages:
                 if m.get("role") == "assistant" and m.get("content"):
-                    contents.append(str(m["content"]))
+                    contents.append((str(m["content"]), ""))
         except Exception:
             pass
     for ev in events:
         if ev.get("type") == "assistant":
-            content = (ev.get("payload") or {}).get("content") or ""
+            payload = ev.get("payload") or {}
+            content = payload.get("content") or ""
             if content:
-                contents.append(content)
-    for content in reversed(contents):
+                contents.append((str(content), str(payload.get("subjob") or "")))
+    for content, sub in reversed(contents):
         m = ANSWER_RE.search(content)
         if m:
-            return m.group(1).strip()
-    return None
+            return m.group(1).strip(), sub
+    return None, ""
 
 
 def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
@@ -126,7 +133,12 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
         etype = ev.get("type")
         payload = ev.get("payload") or {}
         if etype == "tool_call":
-            tc = ToolCall(call_id="", name=payload.get("tool", ""), args=payload.get("args", ""))
+            tc = ToolCall(
+                call_id="",
+                name=payload.get("tool", ""),
+                args=payload.get("args", ""),
+                sub=str(payload.get("subjob") or ""),
+            )
             # 与后续 tool_result 配对：engine 的 on_result 顺序与 on_tool 一致，
             # 按出现顺序 FIFO 回填
             key = f"pending-{pending_seq}"
@@ -140,10 +152,12 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
                 tc.call_id = payload.get("call_id", "")
                 tc.status = payload.get("status", "")
                 tc.preview = payload.get("preview", "")
+                if not tc.sub:
+                    tc.sub = str(payload.get("subjob") or "")
         elif etype == "finding":
             findings.append(payload)
 
-    answer = _extract_answer(events, transcript)
+    answer, answer_sub = _extract_answer(events, transcript)
 
     # answer_in_outputs：优先完整 transcript 的 tool 消息，退化为 events 预览
     answer_in_outputs = False
@@ -181,6 +195,7 @@ def collect_evidence(job_id: str, jobs_dir: Path) -> Evidence:
         tool_calls=list(by_id.values()),
         findings=findings,
         answer=answer,
+        answer_sub=answer_sub,
         answer_in_outputs=answer_in_outputs,
         n_assistant_msgs=sum(1 for ev in events if ev.get("type") == "assistant"),
     )

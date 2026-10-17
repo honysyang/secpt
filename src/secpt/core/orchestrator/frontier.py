@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS intents (
     source TEXT DEFAULT 'planner',     -- planner | direct（人工直投：规划者见 direct 即暂停）
     depends_on TEXT DEFAULT '',        -- 逗号分隔 intent_id 或 fact:谓词（D2 依赖解锁）
     max_steps INTEGER DEFAULT 0,       -- 意图级步数预算（0=不限；>0 硬止损，收益递减机械化）
+    max_wall_s INTEGER DEFAULT 0,      -- 意图级墙钟预算（0=不限；长任务/0day 单面时间盒）
     subgoal TEXT DEFAULT '',            -- Goals 层：本意图服务的子目标（跨轮方向一致性的锚点）
     role TEXT DEFAULT '',               -- 角色体系：recon/exploit/verify/report（空=普通意图）
     asset_scope TEXT DEFAULT '',        -- 角色意图挂靠的资产（去重键 + claim 过滤键）
@@ -219,6 +220,13 @@ CREATE TABLE IF NOT EXISTS asset_leases (
     asset_scope TEXT PRIMARY KEY,      -- 资产维度在途互斥（加强①）：同资产意图不并发
     intent_id TEXT NOT NULL,
     acquired_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS asset_state (
+    asset_scope TEXT PRIMARY KEY,      -- 同资产跨意图交接（M1，通用：recon→exploit→verify）
+    last_job_id TEXT DEFAULT '',       -- 上一个产出工作区（新意图启动时搬运产物）
+    last_status TEXT DEFAULT '',       -- done/exhausted/blocked
+    summary TEXT DEFAULT '',           -- 确定性结论摘要（供下一意图 objective）
+    updated_at REAL NOT NULL
 );
 """
 
@@ -236,8 +244,10 @@ class Intent:
     source: str = "planner"
     depends_on: str = ""
     max_steps: int = 0
+    max_wall_s: int = 0  # 意图级墙钟预算（秒；0=不限）
     role: str = ""
     asset_scope: str = ""
+    tools: str = ""  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
 
 
 _SCOPE_LEDGERS: dict[str, object] = {}  # ③ 跨进程广播载体：按库路径缓存（见 _get_scope_ledger）
@@ -280,7 +290,11 @@ def _has_ws_output(job_id: str) -> bool:
         if not ws.is_dir():
             return False
         for p in ws.rglob("*"):
-            if p.is_file() and p.name not in ("api.py", "transcript.json") and p.stat().st_size > 0:
+            if (
+                p.is_file()
+                and p.name not in ("api.py", "transcript.json", ".progress.md")
+                and p.stat().st_size > 0
+            ):
                 return True
     except Exception:
         return False
@@ -597,17 +611,21 @@ def _queue_verify_if_needed(fr: Frontier, base: str) -> bool:
 _RECURSE_MARKER = "已递归展开"
 
 
-def _pick_intent_model(role: str, default: str | None) -> str | None:
-    """§4.3 验证异构：verify 意图可用 SECPT_VERIFY_MODEL 指定异构模型（缺省=主模型）。
+def _pick_intent_model(role: str, default: str | None, attempts: int = 1) -> str | None:
+    """意图级模型路由（通用，非跑分专属）：
 
-    独立子 job（会话独立 ✓）+ 容器独立已有；异构模型把"同模型同盲区"概率打掉
-    （MAPTA/XBOW 对照：validation 独立成角色）。只影响 verify 角色，其余角色
-    恒用主模型。
+    - verify 角色 → SECPT_VERIFY_MODEL（异构验证模型，防同模型同盲区）；
+    - attempts>1（首轮失败重试）→ SECPT_ESCALATE_MODEL（0day/硬目标升级强模型）；
+    - 其余 → 主模型。
     """
     if role == "verify":
         v = os.environ.get("SECPT_VERIFY_MODEL", "").strip()
         if v:
             return v
+    if attempts > 1:
+        esc = os.environ.get("SECPT_ESCALATE_MODEL", "").strip()
+        if esc:
+            return esc
     return default
 
 
@@ -902,6 +920,9 @@ class Frontier:
         if "max_steps" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN max_steps INTEGER DEFAULT 0")
+        if "max_wall_s" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN max_wall_s INTEGER DEFAULT 0")
         if "subgoal" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN subgoal TEXT DEFAULT ''")
@@ -911,6 +932,9 @@ class Frontier:
         if "asset_scope" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN asset_scope TEXT DEFAULT ''")
+        if "tools" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN tools TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -929,21 +953,23 @@ class Frontier:
         depends_on: str = "",
         subgoal: str = "",
         max_steps: int = 0,  # 意图级步数预算（0=不限；>0 硬止损）
+        max_wall_s: int = 0,  # 意图级墙钟预算（秒；0=不限，长任务单面时间盒）
         role: str = "",  # 角色体系：recon/exploit/verify/report（空=普通意图）
         asset_scope: str = "",  # 挂靠资产（去重键 + claim 过滤键）
+        tools: str = "",  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
         with self._conn() as c:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
-                                        source,depends_on,subgoal,max_steps,role,asset_scope,
-                                        created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?)""",
+                                        source,depends_on,subgoal,max_steps,max_wall_s,
+                                        role,asset_scope,tools,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
-                    goal[:1000],
+                    goal[:2000],
                     done_criteria[:500],
                     int(priority),
                     int(depth),
@@ -951,8 +977,10 @@ class Frontier:
                     depends_on[:300],
                     subgoal[:300],
                     int(max_steps),
+                    int(max_wall_s),
                     role[:20],
                     asset_scope[:300],
+                    tools[:300],
                     now,
                     now,
                 ),
@@ -1000,6 +1028,58 @@ class Frontier:
         args.append(limit)
         with self._conn() as c:
             return [dict(r) for r in c.execute(sql, args).fetchall()]
+
+    def count_active_by_asset(self, asset_scope: str) -> int:
+        """同一资产上仍处 open/running 的意图数（A1 分段结算：全段结束才关容器）。"""
+        if not asset_scope:
+            return 0
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) n FROM intents WHERE asset_scope=?"
+                " AND status IN ('open','running')",
+                (asset_scope,),
+            ).fetchone()
+        return int(row["n"] or 0)
+
+    def finish_open_by_asset(self, asset_scope: str, *, result: str = "") -> int:
+        """平台已通关：把同资产未开始的段直接落 done（跳过剩余段，省步数）。"""
+        if not asset_scope:
+            return 0
+        now = time.time()
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE intents SET status='done', result=?, updated_at=?"
+                " WHERE asset_scope=? AND status IN ('open','blocked')",
+                (result[:500], now, asset_scope),
+            )
+            return int(cur.rowcount or 0)
+
+    def record_asset_state(
+        self, asset_scope: str, *, job_id: str, status: str, summary: str
+    ) -> None:
+        """M1：记录同资产最近一次执行的工作区与结论（跨意图交接的持久锚点）。"""
+        if not asset_scope:
+            return
+        with contextlib.suppress(sqlite3.Error), self._conn() as c:
+            c.execute(
+                "INSERT INTO asset_state (asset_scope,last_job_id,last_status,summary,updated_at)"
+                " VALUES (?,?,?,?,?) ON CONFLICT(asset_scope) DO UPDATE SET"
+                " last_job_id=excluded.last_job_id, last_status=excluded.last_status,"
+                " summary=excluded.summary, updated_at=excluded.updated_at",
+                (asset_scope[:300], (job_id or "")[:120], status[:20], summary[:800], time.time()),
+            )
+
+    def asset_state(self, asset_scope: str) -> dict | None:
+        """M1：取同资产上一意图的状态（无则 None）。"""
+        if not asset_scope:
+            return None
+        with contextlib.suppress(sqlite3.Error), self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM asset_state WHERE asset_scope=?", (asset_scope[:300],)
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+        return None
 
     def deps_satisfied(self, intent: Intent) -> bool:
         """依赖解锁：depends_on 为空 → 满足；否则逐项检查 intent done / fact 谓词。"""
@@ -1082,8 +1162,10 @@ class Frontier:
             source=d.get("source", "planner"),
             depends_on=d.get("depends_on", "") or "",
             max_steps=int(d.get("max_steps", 0) or 0),
+            max_wall_s=int(d.get("max_wall_s", 0) or 0),
             role=d.get("role", "") or "",
             asset_scope=d.get("asset_scope", "") or "",
+            tools=d.get("tools", "") or "",
         )
 
     def find_duplicate(self, role: str, asset_scope: str) -> bool:
@@ -1322,9 +1404,13 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 4. 最多产 {max_new} 条；没有值得做的就产空列表（任务自然收敛）
 5. 子目标记账：每条意图可用可选字段 "subgoal" 归属到某个子目标；优先派发
    【子目标覆盖度】里 pending=0 且 done=0 的未测方向；某子目标已全部 done 就别再派
-6. 角色挂靠（必须）：每条意图带 "role"（recon/exploit/verify/report）与 "asset_scope"——
-   asset_scope 必须取自【已有资产实体】；不在实体集内的意图作废（不派发）
+6. 角色挂靠（必须）：每条意图带 "role"（recon/exploit/lateral/verify/report）与
+   "asset_scope"——asset_scope 必须取自【已有资产实体】；不在实体集内的意图作废（不派发）
 7. 去重：同 asset_scope+role 的意图已存在（见【当前待办】）就不要再派
+8. 依赖声明：需要前置成果才能启动的意图带 "depends_on"——两种取值：
+   - intent_id（【当前待办】里的 id）：前置意图 done 后才解锁；
+   - fact:谓词（如 fact:credential、fact:access）：图记忆出现匹配事实即解锁
+     （凭据/访问权类横向意图一律用 fact:credential 声明，等 exploit record_fact 后自动解锁）
 
 【总目标】
 {objective}
@@ -1349,7 +1435,8 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 
 只输出 JSON：[{{"title": "...", "goal": "...", "done_criteria": "...",
 "priority": 1-10, "depth": {next_depth}, "subgoal": "...",
-"role": "recon|exploit|verify|report", "asset_scope": "已有资产实体中的一项"}}]"""
+"role": "recon|exploit|lateral|verify|report", "asset_scope": "已有资产实体中的一项",
+"depends_on": "intent_id 或 fact:谓词，可省略"}}]"""
 
 
 async def plan_round(
@@ -1417,6 +1504,7 @@ async def plan_round(
             subgoal=subgoal,
             role=role,
             asset_scope=asset_scope,
+            depends_on=str(item.get("depends_on") or ""),
         )
         if subgoal:
             # Goals 层：子目标落探索图（幂等；best-effort，失败不阻断派发）
@@ -1431,7 +1519,12 @@ async def plan_round(
 
 
 def build_intent_objective(
-    global_objective: str, intent: Intent, recent: list[dict], *, base: str = ""
+    global_objective: str,
+    intent: Intent,
+    recent: list[dict],
+    *,
+    base: str = "",
+    handoff: str = "",
 ) -> str:
     recent_txt = "\n".join(
         f"- [{r['status']}] {r['title']}: {r['result'][:200]}" for r in recent[:4]
@@ -1443,6 +1536,18 @@ def build_intent_objective(
         from secpt.core.orchestrator.roles import role_stage as _rs
 
         role_stage = "\n\n" + _rs(intent.role, getattr(intent, "asset_scope", "") or "")
+    # M4-c：通用打法模板（数据驱动、按信号命中；只注入线索，不做执行）
+    techniques = ""
+    try:
+        from secpt.learning.techniques import match_techniques
+
+        _tech_text = match_techniques(
+            " ".join([intent.title, intent.goal, getattr(intent, "asset_scope", "") or ""])
+        )
+        if _tech_text:
+            techniques = "\n\n" + _tech_text
+    except Exception:
+        techniques = ""
     # 跨资产情报：exploit/verify 注入本任务已确认漏洞（P2 情报共享）——同目标不同
     # 资产的漏洞模式/凭据路径通常可复用，避免各资产 worker 重复挖同一类洞
     shared = ""
@@ -1474,6 +1579,7 @@ def build_intent_objective(
 【当前意图】{intent.title}
 目标：{intent.goal}
 完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}
+{handoff}{techniques}
 
 【近期相关结果（避免重复踩坑）】
 {recent_txt or "（无）"}{shared}
@@ -1502,6 +1608,9 @@ async def run_frontier(
     on_started: object | None = None,  # P0-2：意图「真正开跑」回调 intent->None（如置 running）
     on_settled: object | None = None,  # ② 结算回调 intent->None：编排层确定性收尾（如 close 容器）
     scope_ledger: object | None = None,  # ③ 跨进程广播载体（ChallengeLedger，缺省懒建同库实例）
+    should_drain: object | None = None,  # A3：优雅排空回调 ()->bool；True 时停止认领新意图
+    deadline_ts: float | None = None,  # 通用全局截止（epoch 秒）；缺省读 SECPT_DEADLINE_TS
+    reserve_s: float = 300.0,  # 截止前预留秒数（留给收尾/报告，不再开新意图）
 ) -> dict:
     """意图驱动主循环。返回汇总（chains/flags/wall）。
 
@@ -1551,7 +1660,9 @@ async def run_frontier(
     fr = frontier or Frontier(frontier_db_path(base))
 
     # 团队模式（role_plan）：折叠 Specialist 固定 DAG 为角色意图骨架——
-    # recon 1 条（role=recon）+ 每资产 1 条 exploit（role=exploit, depends_on=recon）。
+    # recon 1 条（role=recon）+ 每资产 1 条 exploit（role=exploit, depends_on=recon）
+    # + lateral 1 条（role=lateral, depends_on=fact:credential——exploit/recon
+    # record_fact 出凭据事实即解锁，deps_satisfied 确定性判定）。
     # 多 worker 按角色并行认领；verify/report 由 planner 按依赖补产
     if role_plan:
         team_assets = list(goal.asset_scope) if goal is not None else []
@@ -1584,6 +1695,17 @@ async def run_frontier(
                     depends_on=recon_id,
                     role="exploit",
                     asset_scope=a,
+                )
+            if not fr.find_duplicate("lateral", ",".join(team_assets)[:300]):
+                fr.add(
+                    "横向移动（lateral）",
+                    goal="复用已获凭据/访问权做横向扩散（内网服务、相邻主机、数据定位）",
+                    done_criteria="凭据复用验证完成，产出可达范围结论",
+                    priority=6,
+                    depth=2,
+                    depends_on="fact:credential",  # intel 图出现 credential:* 事实即解锁
+                    role="lateral",
+                    asset_scope=",".join(team_assets)[:300],
                 )
             max_workers = max(max_workers, min(len(team_assets), 4))  # exploit 并行认领
             stop_on_first_flag = False  # 团队模式：持续推进所有资产，不因单资产收敛
@@ -1689,8 +1811,13 @@ async def run_frontier(
         if on_started is not None:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(on_started, intent)
-        # 意图级步数预算：硬止损（收益递减机械化）——意图预算优先于全局 profile
+        # 意图级步数/墙钟预算：硬止损（收益递减机械化）——意图预算优先于全局 profile；
+        # 未设 max_wall_s 时读全局 SECPT_INTENT_WALL_S（长任务/0day 单面时间盒）
         _budget = getattr(intent, "max_steps", 0)
+        _wall_budget = getattr(intent, "max_wall_s", 0)
+        if not _wall_budget:
+            with contextlib.suppress(ValueError):
+                _wall_budget = int(os.environ.get("SECPT_INTENT_WALL_S", "0") or 0)
         # 团队模式 exploit/verify：挂 per-asset 完成广播让出钩子——
         # 同资产已被其他 worker 完成时，engine 注入协作广播引导收尾（治"通关后仍乱猜"）
         hook_factory = None
@@ -1700,44 +1827,85 @@ async def run_frontier(
                 return _YieldHook(inner, _s, _a, _i)
 
             hook_factory = _make_yield_hook
-        _obj = build_intent_objective(objective, intent, fr.recent_results(4), base=base)
         _job = f"{base}-i{intent.id[-4:]}"
+        # M1：同资产跨意图交接（通用：recon→exploit→verify、benchmark 多段、多轮重试）——
+        # 上一意图的产出工作区产物复制到本工作区，并注入确定性 handoff（工作区清单 +
+        # 上一轮结论）。没有这一步，每个新意图都是冷启动（1323 b 族每段重搭脚手架）。
+        _asset_handoff = ""
+        _asset = getattr(intent, "asset_scope", "") or ""
+        if _asset:
+            _prev = fr.asset_state(_asset)
+            _prev_job = str((_prev or {}).get("last_job_id") or "")
+            if _prev and _prev_job and _prev_job != _job:
+                _manifest = _carry_ws_artifacts(_prev_job, _job)
+                _asset_handoff = (
+                    "【同资产前序工作交接（编排层确定性注入）】\n"
+                    f"上一意图 job={_prev_job} status={_prev.get('last_status', '')}；"
+                    f"产物已复制到本工作区：\n{_manifest}\n"
+                    f"上一轮结论摘要：{str(_prev.get('summary') or '')[:600]}\n"
+                    "优先复用已验证的入口/脚本/凭据，不要从零重探；旧结论只作线索，需自行验证。"
+                )
+        _obj = build_intent_objective(
+            objective, intent, fr.recent_results(4), base=base, handoff=_asset_handoff
+        )
 
-        def _exec(obj: str = _obj, job: str = _job, budget: int = _budget) -> object:
+        def _exec(
+            obj: str = _obj, job: str = _job, budget: int = _budget, wall: int = _wall_budget
+        ) -> object:
             kw = {"max_steps": budget} if budget > 0 else {}
+            if wall > 0:
+                kw["max_wall_s"] = wall
+            _tools_extra = [t for t in (intent.tools or "").split(",") if t.strip()]
             return run_engine(
                 objective=obj,
                 profile=profile,
                 job_id=job,
                 llm=llm,
-                model_primary=_pick_intent_model(getattr(intent, "role", ""), model),
+                model_primary=_pick_intent_model(
+                    getattr(intent, "role", ""), model, attempts=intent.attempts
+                ),
                 hook_factory=hook_factory,
                 # G1 目标授权：意图资产即该子任务授权目标（无资产意图不启用 scope）
                 scope_entries=[intent.asset_scope] if intent.asset_scope else None,
+                # C2：意图级工具覆盖（按题族动态启用，如 web 族的 http_request/session）
+                tools_extra=_tools_extra or None,
                 **kw,
             )
 
         result = await asyncio.to_thread(_exec)
+        _last_job = result.job_id or _job
         # 子任务登记（P0-2）：父 job 无 events.jsonl（frontier 各意图跑在独立
         # 子 job 里），导出/评判全失效——settle 时增量聚合 + 收尾补漏
         if result.job_id:
             async with chains_lock:
                 sub_jobs.append(result.job_id)
         # ⑦ 进展感知续步：预算打满但 ws 已有实质产出（攻击路径成型、只差收尾）→
-        #    再续一段同预算（新 job_id -r2 独立事件流，不覆盖首段）。只续一次防无限续命；
+        #    续新段（新 job_id -r2/-r3 独立事件流、不覆盖首段，产物由 P1-1 承接）。
+        #    段预算递减（1323 复盘修正）：r2 = 原预算，r3 = 减半——多旗链式题的瓶颈
+        #    是依赖链深度而非会话长度（b-01/b-02 续段步数收益率低），整额续第二段
+        #    是时间黑洞（hard 6 旗 330×3=990 步烧穿整场 1/4 时限）。
         #    空转（无产出）不续，硬止损语义不变
-        if result.status == "step_exceeded" and _budget > 0 and _has_ws_output(result.job_id or ""):
-            _job2 = f"{_job}-r2"
+        for _cont_i in range(2):
+            if not (
+                result.status == "step_exceeded"
+                and _budget > 0
+                and _has_ws_output(result.job_id or "")
+            ):
+                break
+            _cont_budget = _budget if _cont_i == 0 else max(20, _budget // 2)
+            _job2 = f"{_job}-r{_cont_i + 2}"
             # P1-1：续步必须承接产物——新 job_id 是独立工作区，若只换 id 不搬文件，
             # "继续原路径打穿"就是空话（1053 实跑：r2 ws 全空，模型只能重建 api.py 重探测）。
             # 复制旧 ws 产出（排除 transcript/outputs）到 r2 ws，并把真实清单注入 objective。
             _manifest = _carry_ws_artifacts(result.job_id or "", _job2)
             _obj2 = (
-                _obj + f"\n\n【进展感知续步（编排层注入）】上一段 {_budget} 步已产出中间成果，"
-                f"已复制到本工作区（清单如下），本轮继续原攻击路径打穿，不要推倒重来：\n{_manifest}"
+                _obj + f"\n\n【进展感知续步（编排层注入）】前 {_cont_i + 1} 段共 {result.steps} 步"
+                f"已产出中间成果，已复制到本工作区（清单如下），"
+                f"本轮 {_cont_budget} 步预算继续原攻击路径打穿，不要推倒重来：\n{_manifest}"
             )
-            result2 = await asyncio.to_thread(_exec, _obj2, _job2, _budget)
+            result2 = await asyncio.to_thread(_exec, _obj2, _job2, _cont_budget)
             if result2.job_id:
+                _last_job = result2.job_id
                 async with chains_lock:
                     sub_jobs.append(result2.job_id)
             if getattr(result2, "flag", ""):
@@ -1745,10 +1913,12 @@ async def run_frontier(
                 _jid_keep = result.job_id
                 result = result2
                 result.job_id = _jid_keep
-            else:
-                # 续跑也未收尾：累计步数（仍走 exhausted 止损）
-                with contextlib.suppress(Exception):
-                    result.steps = int(result.steps) + int(result2.steps)
+                break
+            # 续跑也未收尾：累计步数、状态接管（仍 step_exceeded 才会续下一段；
+            # ANSWER 收尾/stall 等终态则停止续命， exhausted 止损语义不变）
+            with contextlib.suppress(Exception):
+                result.steps = int(result.steps) + int(result2.steps)
+            result.status = result2.status
         # ---- RESET（设计 §3）：stalled → 换会话重建（restart beats patching）----
         # 触发：三档止损判 stalled（策略级卡死，区别于预算墙）+ ws 有实质产出。
         # 与 r2 续步（同会话链延续）不同，与 rollover（同会话换链、保 prefix
@@ -1777,6 +1947,7 @@ async def run_frontier(
             )
             result_rs = await asyncio.to_thread(_exec, _obj_rs, _job_rs, _budget)
             if result_rs.job_id:
+                _last_job = result_rs.job_id
                 async with chains_lock:
                     sub_jobs.append(result_rs.job_id)
             try:
@@ -1787,6 +1958,14 @@ async def run_frontier(
                 )
             except Exception:
                 pass
+            with contextlib.suppress(Exception):
+                from secpt.runtime.notify import notify
+
+                notify(
+                    "job_reset",
+                    f"secpt RESET 重建 {_job_rs}（意图：{getattr(intent, 'title', '')[:40]}）",
+                    f"上轮 stalled 换会话重建，结果：{'拿到成果' if result_rs.flag else '未收尾'}",
+                )
             if getattr(result_rs, "flag", ""):
                 # RESET 拿到成果：采用其结果（资产检查保留首段 job_id）
                 _jid_keep = result.job_id
@@ -1833,8 +2012,17 @@ async def run_frontier(
                         why = f"侦察完成（资产入图 {_n_ing} 条）"
             except Exception:
                 pass
-        elif getattr(intent, "max_steps", 0) > 0 and result.status == "step_exceeded":
-            status, why = "exhausted", f"超意图步数预算（{intent.max_steps} 步硬止损）"
+        elif (getattr(intent, "max_steps", 0) > 0 or getattr(intent, "max_wall_s", 0) > 0) and (
+            result.status in ("step_exceeded", "wallclock_exceeded")
+        ):
+            # 意图级预算（步数/墙钟）是硬止损：不进自动复核，一次即终态——
+            # 否则墙钟超限会换新预算再跑一遍，时间盒形同虚设
+            _why_budget = (
+                f"超意图步数预算（{intent.max_steps} 步硬止损）"
+                if result.status == "step_exceeded"
+                else f"超意图墙钟预算（{intent.max_wall_s}s 硬止损）"
+            )
+            status, why = "exhausted", _why_budget
         elif result.status == "error":
             status, why = "blocked", "engine error"
         elif (
@@ -1848,6 +2036,14 @@ async def run_frontier(
             status, why = "open", f"{result.status}（首轮失败，自动复核一次）"
         else:
             status, why = "exhausted", f"{result.status}（尝试 {intent.attempts} 次）"
+        # M1：记录同资产最近工作区/结论（下一意图/下一轮据此交接）
+        if _asset:
+            fr.record_asset_state(
+                _asset,
+                job_id=_last_job,
+                status=status,
+                summary=(answer or why or f"steps={result.steps}"),
+            )
         fr.settle(
             intent.id, status=status, result=answer or f"steps={result.steps}", fail_reason=why
         )
@@ -1859,7 +2055,15 @@ async def run_frontier(
         if status == "done" and getattr(intent, "role", "") in ("exploit", "verify"):
             stopper.mark_done(intent.asset_scope, intent.id)
         scope_key = getattr(intent, "asset_scope", "") or ""
-        if status == "done" and scope_key:
+        # A1 语义修正：benchmark 的分段意图（role=""）完成只代表"一段旗拿到"，
+        # 不代表整个资产完成——若照常广播 scope_done，同题的后续段/verify 会被
+        # 误判"资产已完成"而让出/跳过。benchmark 下只让 exploit/verify 角色广播。
+        _broadcast_scope = (
+            status == "done"
+            and scope_key
+            and (profile != "benchmark" or getattr(intent, "role", "") in ("exploit", "verify"))
+        )
+        if _broadcast_scope:
             try:
                 _sl = scope_ledger or _get_scope_ledger()
                 _sl.mark_scope_done(scope_key)
@@ -1984,9 +2188,26 @@ async def run_frontier(
     stop = False
     stop_ev = asyncio.Event()
 
+    # 通用截止排空：显式 deadline 或 env SECPT_DEADLINE_TS（epoch 秒）
+    _deadline = deadline_ts
+    if _deadline is None:
+        with contextlib.suppress(Exception):
+            _deadline = float(os.environ.get("SECPT_DEADLINE_TS", "0") or 0) or None
+
+    def _drain_now() -> bool:
+        if should_drain is not None:
+            with contextlib.suppress(Exception):
+                if should_drain():
+                    return True
+        return bool(_deadline and time.time() >= _deadline - max(0.0, reserve_s))
+
     async def _worker_loop() -> None:
         nonlocal stop
         while not stop_ev.is_set():
+            # A3：优雅排空——平台任务已结束/期限到 → 停止认领新意图，
+            # 在途链自然收尾（不再开新题，避免无意义烧步）
+            if _drain_now():
+                break
             intent = fr.claim_next()
             if intent is None:
                 fr.reopen_ready()  # 无 open 可领 → 解锁依赖已满足的 blocked 意图
@@ -2018,6 +2239,9 @@ async def run_frontier(
     idle_rounds = 0
     rounds = 0
     while rounds < max_rounds and not stop:
+        if _drain_now():
+            stop_ev.set()
+            break
         if fr.has_open_direct():
             # 模式②：只执行 direct；队列清空且无 running → 结束
             if fr.count_open() == 0:

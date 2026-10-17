@@ -47,10 +47,17 @@ def run_checks() -> list[tuple[str, bool, str]]:
         from secpt.runtime.llm.client import resolve_model
 
         primary, fallback = resolve_models(None, None)
-        base, _key, _mid = resolve_model(primary)
-        out.append(("模型凭证", True, f"{primary} @ {base}（fallback={fallback}）"))
+        base, _key, mid = resolve_model(primary)
+        out.append(("模型凭证", True, f"{mid} @ {base}（配置名={primary}，fallback={fallback}）"))
     except Exception as e:
-        out.append(("模型凭证", False, f"{e}；export DEEPSEEK_API_KEY=<key>（或 .env）"))
+        out.append(
+            (
+                "模型凭证",
+                False,
+                f"{e}；设置 SECPT_MODEL_API_KEY/DEEPSEEK_API_KEY/OPENAI_API_KEY，"
+                "或 SECPT_MODEL_KEY_<PREFIX>；自定义端点另配 SECPT_MODEL_BASE_URL/NAME",
+            )
+        )
 
     # 3. var 可写
     var = Path(os.environ.get("SECPT_VAR", "var"))

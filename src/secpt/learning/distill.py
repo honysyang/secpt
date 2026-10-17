@@ -91,6 +91,36 @@ def _load_job_text(job_dir: Path, max_chars: int = 6000) -> tuple[str, str]:
                     traj_parts.append(f"{role}: {content[:300]}")
         except Exception:
             pass
+    else:
+        # team/frontier 模式的父 job 只有聚合 events.jsonl（子 job 事件透传，无
+        # transcript）——从事件流重建轨迹，学习链不在团队模式静默空跑
+        events_path = job_dir / "events.jsonl"
+        if events_path.is_file():
+            try:
+                for line in events_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = ev.get("payload") or {}
+                    etype = ev.get("type")
+                    if etype == "tool_call":
+                        name = str(payload.get("tool") or "")
+                        args = str(payload.get("args") or "")
+                        traj_parts.append(f"> {name}({args[:100]})")
+                    elif etype == "tool_result":
+                        preview = str(payload.get("preview") or "")
+                        if preview.strip():
+                            traj_parts.append(f"< {preview[:200]}")
+                    elif etype == "assistant":
+                        content = str(payload.get("content") or "")
+                        if content.strip():
+                            traj_parts.append(f"assistant: {content[:300]}")
+            except Exception:
+                pass
     trajectory = "\n".join(traj_parts)[-max_chars:]
     return objective or job_dir.name, trajectory
 

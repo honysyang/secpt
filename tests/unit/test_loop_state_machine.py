@@ -75,6 +75,7 @@ class TestThreeTierStop:
         monkeypatch.setenv("SECPT_LOOP_STOP", "1")
         monkeypatch.setenv("SECPT_WRAP_AFTER_NUDGE", "2")
         monkeypatch.setenv("SECPT_STALL_AFTER_WRAP", "2")
+        monkeypatch.setenv("SECPT_WRAP_MIN_STEPS", "4")  # 本测验证三跳本身，关掉低步数地板
         engine = Engine(
             _cfg(tmp_path, "loop1", stuck_threshold=3, stuck_wait_cap=4),
             llm=FakeLLM(n_steps=99999, job_id="loop1", step_delay_s=0),
@@ -104,6 +105,7 @@ class TestThreeTierStop:
         monkeypatch.setenv("SECPT_LOOP_STOP", "1")
         monkeypatch.setenv("SECPT_WRAP_AFTER_NUDGE", "2")
         monkeypatch.setenv("SECPT_STALL_AFTER_WRAP", "2")
+        monkeypatch.setenv("SECPT_WRAP_MIN_STEPS", "4")  # 本测验证回退本身，关掉低步数地板
         monkeypatch.setenv("SECPT_WRAP_AT_PCT", "200")  # 本测只验证 nudge 回退，关掉步数收尾腿
         # 3 步静态空转触发 nudge（dup 触发器，cap=2），第 4 步起每步新信息 → 回退
         script = [{"command": "ls"}] * 3 + [{"command": f"echo uniq-{i}"} for i in range(30)]
@@ -138,6 +140,21 @@ class TestThreeTierStop:
         assert result.flag == "FLAG{rescued}"
         assert result.steps < 40  # 在收尾档拿到 ANSWER，没烧满预算
 
+    def test_wrap_floor_blocks_early_wrap(self, tmp_path, monkeypatch):
+        """低步数地板：nudge 后无改善也不许在探索期升级收尾（1323 a-05 教训——
+        第 15 步被 nudge 级联截断）。max_steps=12 时地板=20 永远达不到 → 无 wrap，
+        硬预算墙收口（旧行为下同样输入会在 ~6 步就 wrap→stalled）。"""
+        monkeypatch.setenv("SECPT_LOOP_STOP", "1")
+        monkeypatch.setenv("SECPT_WRAP_AFTER_NUDGE", "2")
+        monkeypatch.setenv("SECPT_STALL_AFTER_WRAP", "2")
+        engine = Engine(
+            _cfg(tmp_path, "loop6", max_steps=12, stuck_threshold=2, stuck_wait_cap=2),
+            llm=FakeLLM(n_steps=99999, job_id="loop6", step_delay_s=0),
+        )
+        result = _run(engine.run())
+        assert "收尾阶段" not in _user_text(result.messages)
+        assert result.status == "step_exceeded"  # 无 wrap，烧到硬预算墙
+
 
 class TestLoopPhaseEvent:
     def test_loop_phase_events_written(self, tmp_path, monkeypatch):
@@ -150,6 +167,7 @@ class TestLoopPhaseEvent:
         monkeypatch.setenv("SECPT_LOOP_STOP", "1")
         monkeypatch.setenv("SECPT_WRAP_AFTER_NUDGE", "2")
         monkeypatch.setenv("SECPT_STALL_AFTER_WRAP", "2")
+        monkeypatch.setenv("SECPT_WRAP_MIN_STEPS", "4")  # 本测验证事件流，关掉低步数地板
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))  # 隔离：事件流不进仓库 var/
         from secpt.core.job.event import EventSink
         from secpt.core.job.resume import jobs_dir

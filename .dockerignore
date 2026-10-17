@@ -1,0 +1,25 @@
+# 构建上下文瘦身 + 凭证红线：.env / 运行产物 / VPN 配置绝不进镜像
+.env
+.env.*
+!.env.example
+.git
+.venv
+venv
+var
+vpn
+challenges
+logs
+archive
+tests
+docs
+*.log
+tsec1-run-*.log
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+docker/*.tar
+docker/*.tar.gz
+agent.tar.gz
+agent.tar

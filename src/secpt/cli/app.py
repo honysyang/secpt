@@ -84,8 +84,14 @@ def _doctor_stores() -> None:
         "  一致性边界：跨库写已按幂等设计（sha1/内容寻址/原子认领），"
         "无跨库事务——doctor 只做可开/可写体检，业务一致性靠幂等兜底。"
     )
-    if not project_env_file().is_file() and not os.environ.get("DEEPSEEK_API_KEY"):
-        typer.echo("  ⚠️ 无 .env 且无 DEEPSEEK_API_KEY（export 或 cp .env.example .env）")
+    _has_llm_key = any(
+        os.environ.get(k) for k in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "SECPT_MODEL_API_KEY")
+    ) or any(k.startswith("SECPT_MODEL_KEY_") for k in os.environ)
+    if not project_env_file().is_file() and not _has_llm_key:
+        typer.echo(
+            "  ⚠️ 无 .env 且无 LLM key（DEEPSEEK_API_KEY / SECPT_MODEL_API_KEY / "
+            "SECPT_MODEL_KEY_<PREFIX>）"
+        )
     if not all_ok:
         raise typer.Exit(1)
 
@@ -94,56 +100,58 @@ def _doctor_stores() -> None:
 def doctor(
     stores: bool = typer.Option(False, "--stores", help="各 SQLite 存储健康/一致性检查"),
 ) -> None:
-    """检查环境与配置（--stores 追加存储面体检）。"""
-    if stores:
-        _doctor_stores()
+    """环境预检：模型凭证 / 沙箱 / 工具矩阵 / 可选依赖（--stores 追加存储面体检）。"""
     import secpt
-    from secpt.runtime.llm.client import resolve_model
 
     typer.echo(f"app.version       = {secpt.__version__}")
+    from secpt.cli.cmd_doctor import doctor_cmd
 
-    # 模型路由检查（多 provider / 故障转移池）
-    has_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    typer.echo(f"llm.api_key_env   = DEEPSEEK_API_KEY  {'✓ set' if has_key else '✗ NOT SET'}")
-    if os.environ.get("SECPT_MODEL_POOL"):
-        typer.echo(f"llm.pool          = {os.environ['SECPT_MODEL_POOL']}")
-    from secpt.cli.engine_runner import resolve_models
-
-    actual_primary, actual_fallback = resolve_models(None, None)
-    try:
-        base, _key, mid = resolve_model(actual_primary)
-        typer.echo(f"llm.route         = ✓ {actual_primary} -> {base} ({mid})")
-        typer.echo(f"llm.fallback      = {actual_fallback}")
-    except RuntimeError as exc:
-        typer.echo(f"llm.route         = ✗ {exc}")
-        raise typer.Exit(1) from exc
-
-    # 沙箱与插件
-    from secpt.runtime.sandbox import docker_available
-    from secpt.tools.plugin_loader import discover_plugins
-
-    if os.environ.get("SECPT_SANDBOX") == "0":
-        typer.echo("sandbox           = 关闭（SECPT_SANDBOX=0）")
-    else:
-        ok = docker_available()
-        typer.echo(f"sandbox           = {'✓ docker 可用' if ok else '✗ 不可用（回退宿主执行）'}")
-    yp, pt = discover_plugins()
-    typer.echo(
-        f"plugins           = YAML:{sorted(yp) or '无'} Python:{sorted(pt) or '无'}"
-        "（tools/plugins/ 声明即装配）"
-    )
-
-    if os.environ.get("SECPT_FAKE_LLM"):
-        typer.echo("llm.adapter       = FakeLLM (dry-run)")
-    elif not has_key:
-        typer.echo("llm.adapter       = ✗ missing API key")
-        raise typer.Exit(1)
-
-    typer.echo("doctor: OK")
+    doctor_cmd()
+    if stores:
+        _doctor_stores()
 
 
 app.command("run")(run_cmd)
 app.command("resume")(resume_cmd)
+
+
+@app.command("model-check")
+def model_check(
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="覆盖模型名（默认 SECPT_MODEL_NAME/SECPT_MODEL_PRIMARY）"
+    ),
+    ping: bool = typer.Option(False, "--ping", help="实际发一次最小请求验证连通性"),
+) -> None:
+    """校验模型端点配置：base URL / model / API key（脱敏），可选真实 ping。"""
+    from secpt.cli.engine_runner import resolve_models
+    from secpt.runtime.llm.client import call_llm, resolve_model
+
+    primary, fallback = resolve_models(model, None)
+    try:
+        base, key, mid = resolve_model(primary)
+        fb_base, _fb_key, fb_mid = resolve_model(fallback)
+    except Exception as e:
+        typer.echo(f"✗ 模型配置无效: {e}")
+        raise typer.Exit(2) from e
+    masked = f"{key[:4]}***{key[-2:]}" if len(key) >= 8 else "***"
+    typer.echo(f"base_url   = {base}")
+    typer.echo(f"model      = {mid}")
+    typer.echo(f"api_key    = {masked}")
+    typer.echo(f"fallback   = {fb_mid} @ {fb_base}")
+    if ping:
+        import asyncio
+
+        async def _ping() -> str:
+            r = await call_llm([{"role": "user", "content": "reply OK only"}], None, primary)
+            msg = r.choices[0].message
+            return str(getattr(msg, "content", "") or "")[:40]
+
+        try:
+            reply = asyncio.run(_ping())
+        except Exception as e:
+            typer.echo(f"✗ ping 失败: {e}")
+            raise typer.Exit(2) from e
+        typer.echo(f"✓ ping OK (reply={reply!r})")
 
 
 @app.command("vpn")
@@ -218,17 +226,38 @@ def metrics_entry(
     metrics_cmd(fmt, snapshot=snapshot, trend=trend)
 
 
+@app.command("benchmark-reconcile")
+def benchmark_reconcile_entry(
+    release_claims: bool = typer.Option(
+        False,
+        "--release-claims",
+        help="运维：强制释放全部 claimed/running 租约（仅确认跑分进程已死后用）",
+    ),
+) -> None:
+    """跑分账本对账：以平台实况清理假 solved / 同步部分旗进度（tsec1-run-1213 修复）。
+
+    只读平台 + 改本地账本：本地 solved 但平台无得分 → 降级可重试；
+    平台有分但本地未记 → 回填/标 solved。跑分中断/升级/平台重置后先对账再续跑。
+    """
+    from secpt.core.orchestrator.benchmark import reconcile_ledger
+
+    try:
+        rep = reconcile_ledger(release_claims=release_claims)
+    except Exception as e:
+        typer.echo(f"Error: 对账失败（平台不可达？）: {e}", err=True)
+        raise typer.Exit(2) from None
+    typer.echo(
+        f"对账完成：真 solved {rep['ok']}，假 solved 降级 {len(rep['downgraded'])}"
+        f"{(' → ' + '、'.join(rep['downgraded'])) if rep['downgraded'] else ''}，"
+        f"补标 solved {len(rep['solved_now'])}，同步部分旗 {len(rep['synced'])}，"
+        f"平台查不到 {len(rep['unknown'])}（旧代际残留，保留原状）"
+        + (f"，释放租约 {rep['released']}" if release_claims else "")
+    )
+
+
 app.add_typer(cmd_ops.intent_app, name="intent")
 app.add_typer(cmd_ops.intercept_app, name="intercept")
 app.add_typer(cmd_ops.worker_app, name="worker")
-
-
-@app.command("doctor")
-def doctor_entry() -> None:
-    """环境预检：模型凭证 / 沙箱 / 工具矩阵 / 可选依赖，逐项给修复提示。"""
-    from secpt.cli.cmd_doctor import doctor_cmd
-
-    doctor_cmd()
 
 
 @app.command("tui")
@@ -418,17 +447,24 @@ def judge_cmd(
     rubric_file: str | None = typer.Option(
         None, "--rubric", help="rubric 文件（YAML/JSON）；缺省由题面自动生成"
     ),
-    model: str = typer.Option("deepseek-chat", "--model", "-m", help="终裁 judge 用的模型"),
+    model: str | None = typer.Option(None, "--model", "-m", help="终裁 judge 用的模型"),
 ) -> None:
     """AI 评判一次运行（不依赖 flag 正则）：反作弊 → Jev 门控 → LLM 终裁。
 
     结果落盘 var/jobs/<job_id>/verdict.json 并追加 verdict 事件。
     SECPT_FAKE_LLM=1 时走 FakeLLM（heuristic 兜底路径，无需 key）。
+    模型优先级：--model > SECPT_JUDGE_MODEL > SECPT_MODEL_PRIMARY > deepseek-chat。
     """
     import asyncio
 
     from secpt.evaluation.verdict import evaluate_job, render
 
+    model = (
+        model
+        or os.environ.get("SECPT_JUDGE_MODEL")
+        or os.environ.get("SECPT_MODEL_PRIMARY")
+        or "deepseek-chat"
+    )
     try:
         verdict = asyncio.run(
             evaluate_job(

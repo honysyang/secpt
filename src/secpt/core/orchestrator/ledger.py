@@ -172,6 +172,29 @@ class ChallengeLedger:
                 (reason[:200], time.time(), unique_code),
             )
 
+    def set_flags_found(self, unique_code: str, flags_found: int) -> None:
+        """部分旗进度回填（不改变状态机状态）：下轮从缺口续打。"""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE challenges SET flags_found=?, updated_at=? WHERE unique_code=?",
+                (int(flags_found), time.time(), unique_code),
+            )
+
+    def iter_entries(self) -> list[dict]:
+        """全量账本行（对账用）。"""
+        with self._conn() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM challenges").fetchall()]
+
+    def solved_codes(self) -> list[str]:
+        """当前 solved 的题号列表（对账用）。"""
+        with self._conn() as c:
+            return [
+                str(r[0])
+                for r in c.execute(
+                    "SELECT unique_code FROM challenges WHERE status='solved'"
+                ).fetchall()
+            ]
+
     def release(self, unique_code: str) -> None:
         """释放租约（不结算）：回到 queued，其他 worker 可接棒。"""
         with self._conn() as c:
@@ -180,6 +203,38 @@ class ChallengeLedger:
                 " WHERE unique_code=? AND worker_id=?",
                 (time.time(), unique_code, self.worker_id),
             )
+
+    def release_own_claims(self, *, reason: str = "") -> int:
+        """A2 轮间释放：只释放本 worker 的 claimed/running → exhausted（可重领）。
+
+        与 release_all_claims 的区别：不触碰其他存活 worker 的租约——campaign
+        多轮重启当下进程的 claim，即便有并发实例也不会互相踩。solved 永不触碰。
+        """
+        now = time.time()
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE challenges SET status='exhausted', worker_id='', lease_until=0,"
+                " last_error=?, updated_at=?"
+                " WHERE worker_id=? AND status IN ('claimed','running')",
+                (reason[:200] or "轮间释放：campaign 下一轮重试", now, self.worker_id),
+            )
+            return int(cur.rowcount or 0)
+
+    def release_all_claims(self, *, reason: str = "") -> int:
+        """运维操作：强制释放全部 claimed/running 租约（回 exhausted 可重试）。
+
+        只用于"跑分进程已死/将重启"场景（调用方负责确认无存活 worker）——
+        正常路径租约由心跳续期、超时自动回 queued，不需要本方法。
+        返回释放条数。 solved 行永不触碰。
+        """
+        now = time.time()
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE challenges SET status='exhausted', worker_id='', lease_until=0,"
+                " last_error=?, updated_at=? WHERE status IN ('claimed','running')",
+                (reason[:200] or "运维释放：跑分重启", now),
+            )
+            return cur.rowcount
 
     def is_completed(self, unique_code: str) -> bool:
         """是否已 solved（跨进程预检：避免重复解题）。"""

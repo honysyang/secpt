@@ -468,16 +468,26 @@ def solve(
     from secpt.core.orchestrator.benchmark import BenchmarkUnavailable
 
     prof = _load_profile(profile)
+    if getattr(prof, "roe", None) is not None and prof.roe.mode == "authorized":
+        _throttle = f"，节速 {prof.roe.throttle_ms}ms/步" if prof.roe.throttle_ms > 0 else ""
+        print(
+            f"[ROE] 授权实战模式（authorized）{_throttle}——仅限授权目标，"
+            f"全部操作落审计日志，遵守 profile.constraints 边界"
+        )
     run_mode = route_mode(prof, mode)
 
     async def _run() -> dict:
         store = JobStore()
-        # benchmark 评测：并行跑分器（3 题并发 × 意图级止损）
+        # benchmark 评测：并行跑分器（3 题并发 × 意图级止损 × 自动多轮战役）
         if prof.name == "benchmark" and run_mode in ("auto", "single"):
-            from secpt.core.orchestrator.benchmark import BenchmarkUnavailable, run_benchmark
+            from secpt.core.orchestrator.benchmark import (
+                BenchmarkUnavailable,
+                run_benchmark_campaign,
+            )
 
             try:
-                return await run_benchmark(spec, llm=None, model=model)
+                # A2：战役多轮——平台实况驱动，未完成题带 digest 自动进入下一轮
+                return await run_benchmark_campaign(spec, llm=None, model=model)
             except BenchmarkUnavailable:
                 raise  # 平台级失败（任务结束/网络）：快速失败不降级，由 solve 顶层清晰提示
             except RuntimeError as e:
@@ -494,7 +504,8 @@ def solve(
             from secpt.core.orchestrator.frontier import run_frontier
 
             summary = await run_frontier(
-                objective,
+                # 与 dag 单链同口径拼【目标入口】【附件源码】（否则 team 模式丢附件路径）
+                _dag.augment_objective(objective, list(entries), artifacts),
                 profile=profile,
                 base_job_id=job_id,
                 llm=None,
@@ -562,18 +573,45 @@ def solve(
         f"\n[solve] 运行结束：mode={summary.get('mode', run_mode)} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
     )
 
-    # 失败自动升级：single 无成果 → frontier 意图驱动继续（懒升级阶梯）
+    # 失败自动升级：single 无成果 → frontier 意图驱动继续（懒升级阶梯）。
+    # 升级不是重跑：带首轮否定路线（RESET 思路）+ 预算累计口径 + 附件/入口块。
     if run_mode == "single" and not flag and mode == "auto":
+        _leg1_wall = float(summary.get("wall_s") or 0)
+        _negs = (
+            "\n".join(
+                f"- [{c.get('status')}] {c.get('role') or 'chain'} steps={c.get('steps', 0)}"
+                for c in (summary.get("chains") or [])
+            )
+            or "（首轮无链记录）"
+        )
+        _budget_note = ""
+        if wall > 0:
+            _remain = max(0.0, float(wall) - _leg1_wall)
+            _budget_note = (
+                f"\n总预算 {wall}s，首轮已用 {_leg1_wall:.0f}s，剩余约 {_remain:.0f}s"
+                "——优先验证高价值线索，控制探索广度。"
+            )
+            print(
+                f"[solve] 预算累计：--wall {wall}s，首轮已用 {_leg1_wall:.0f}s，"
+                f"剩余约 {_remain:.0f}s"
+            )
         print("[solve] 单链未拿到成果，自动升级到意图驱动（frontier）继续...")
         from secpt.core.orchestrator.frontier import run_frontier
 
         retry_note = (
-            f"\n\n【首轮单链尝试未成功】已用 {summary.get('wall_s')}s。"
+            f"\n\n【首轮单链尝试未成功】已用 {_leg1_wall:.0f}s，未拿到成果。"
+            f"\n【首轮已验证否定的路线（不要重复踩坑）】\n{_negs}"
+            f"{_budget_note}\n"
             "请换技术路线深入，不要原样重跑。"
         )
         summary2 = asyncio.run(
             run_frontier(
-                objective + retry_note, profile=profile, base_job_id=job_id, llm=None, model=model
+                _dag.augment_objective(objective, list(entries), artifacts) + retry_note,
+                profile=profile,
+                base_job_id=job_id,
+                llm=None,
+                model=model,
+                default_assets=list(entries),
             )
         )
         flags2 = summary2.get("flags") or []
@@ -703,24 +741,3 @@ def solve_cmd(
         vpn=vpn,
     )
     raise typer.Exit(code)
-
-
-def learn_cmd(
-    job_id: str | None = typer.Argument(None, help="job_id（缺省=最近一个）"),
-    model: str = typer.Option("deepseek-chat", "--model", "-m"),
-) -> None:
-    """手动触发经验蒸馏（learning 闭环补漏）。"""
-    from secpt.core.job.store import JobStore
-    from secpt.learning.distill import distill_job
-
-    if job_id is None:
-        rows = JobStore().list_jobs(limit=1)
-        if not rows:
-            print("Error: 无历史 job")
-            raise typer.Exit(2)
-        job_id = rows[0].job_id
-    exp = asyncio.run(distill_job(job_id, model=model))
-    if exp:
-        print(f"已沉淀经验：{exp.title}（technique={exp.technique}, outcome={exp.outcome}）")
-    else:
-        print("无经验可沉淀（无 transcript / LLM 输出不可解析 / 指纹重复）")

@@ -79,9 +79,10 @@ async def run_task(
 
     policy = route_policy(spec.task_type, entries_of(spec))
     if policy == "benchmark":
-        from .benchmark import run_benchmark
+        from .benchmark import run_benchmark_campaign
 
-        summary = await run_benchmark(spec, llm=llm, model=model_primary)
+        # A2：dag 入口同样走战役多轮（否则只有 solve 路径享受自动重试）
+        summary = await run_benchmark_campaign(spec, llm=llm, model=model_primary)
         summary["entries"] = list(entries_of(spec))  # 入口维度来自 TaskSpec（编排器不感知）
         return summary
 
@@ -100,6 +101,22 @@ async def run_task(
     summary["mode"] = "team"  # 契约 dict 可变：团队语义覆盖 frontier 默认 mode
     summary["entries"] = list(entries_of(spec))  # 入口维度来自 TaskSpec（frontier 不感知）
     return summary
+
+
+def augment_objective(objective: str, entries: list[str], artifacts: list[str]) -> str:
+    """objective 拼接【目标入口】【附件源码】块。
+
+    solve 各执行模式与 dag 单链共用：solve 直调 run_frontier 的路径（团队模式/
+    懒升级）不经 dag.run_single_chain，不拼这两块会丢附件绝对路径——engine 的
+    bash 工作目录在 var/jobs/<id>/ws/ 下，相对路径会漂移（author_plus 事故口径）。
+    """
+    if entries:
+        objective += "\n\n【目标入口】\n" + "\n".join(f"- {e}" for e in entries)
+    if artifacts:
+        objective += "\n\n【附件源码（已就位，用 read_file 读取）】\n" + "\n".join(
+            f"- {a}" for a in artifacts
+        )
+    return objective
 
 
 async def run_single_chain(
@@ -124,13 +141,7 @@ async def run_single_chain(
     flags: list[str] = []
     wall_s_total = 0.0
 
-    objective = spec.objective
-    if entries:
-        objective += "\n\n【目标入口】\n" + "\n".join(f"- {e}" for e in entries)
-    if spec.artifacts:
-        objective += "\n\n【附件源码（已就位，用 read_file 读取）】\n" + "\n".join(
-            f"- {a}" for a in spec.artifacts
-        )
+    objective = augment_objective(spec.objective, entries, list(spec.artifacts or []))
 
     # spec.budget 语义：0=未指定（用 profile）；>0=该值；<0=不限（7×24，--wall 0 显式不限）
     max_steps = (
@@ -169,7 +180,9 @@ async def run_single_chain(
     if result.flag:
         flags.append(result.flag)
 
-    # attempt-2：仅当第一轮未拿到 flag 且资源耗尽/失败时重试（新 job_id 防污染）
+    # attempt-2：仅当第一轮未拿到 flag 且资源耗尽/失败时重试（新 job_id 防污染）。
+    # stalled 走 RESET 重建（设计 §3：换会话从外部状态重建，而非同会话续步）；
+    # 其余终态走原 r2 续步（带上一轮成果摘要）。
     if not result.flag and result.status in (
         "budget_exceeded",
         "step_exceeded",
@@ -177,6 +190,84 @@ async def run_single_chain(
         "stalled",  # 止损停滞同属"未拿到 flag 的可重试终态"
         "failed",
     ):
+        import os as _os
+
+        _direct_reset_on = _os.environ.get("SECPT_DIRECT_RESET", "1") != "0"
+        if result.status == "stalled" and _direct_reset_on:
+            from secpt.core.orchestrator.frontier import (
+                _carry_ws_artifacts,
+                _has_ws_output,
+                _reset_handoff_summary,
+            )
+
+            if _has_ws_output(spec.job_id):
+                # RESET 门 = 首尝才重建（单链 attempt-2 即首次重试，天然满足）+
+                # ws 有实质产出（空转不重建，走下方 exhausted 语义）
+                reset_job_id = f"{spec.job_id}-rs"
+                manifest = _carry_ws_artifacts(spec.job_id, reset_job_id)
+                handoff = await _reset_handoff_summary(result, objective, llm)
+                reset_obj = (
+                    objective + "\n\n【RESET 重建（编排层注入）】上一会话已策略级卡死（stalled），"
+                    "本会话从外部状态重建上下文，严禁原样重跑旧路线：\n"
+                    f"1. 上轮 handoff 摘要：\n{handoff}\n"
+                    f"2. 已复制工作区产物（继续用，不要推倒重来）：\n{manifest}\n"
+                    "基于以上状态选一条与上轮不同的路线推进，尽快以 ANSWER: 收尾。"
+                )
+                result2 = await asyncio.to_thread(
+                    run_engine,
+                    objective=reset_obj,
+                    profile=spec.task_type,
+                    prior=spec.prior,
+                    job_id=reset_job_id,
+                    job_store=store,
+                    llm=llm,
+                    max_steps=max_steps,
+                    max_wall_s=max_wall_s,
+                    model_primary=model_primary,
+                    model_fallback=model_fallback,
+                )
+                try:
+                    from secpt.runtime.metrics import counter_inc
+
+                    counter_inc(
+                        "loop_reset_total",
+                        outcome=f"direct_{'recovered' if result2.flag else 'exhausted'}",
+                    )
+                except Exception:
+                    pass
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    from secpt.runtime.notify import notify
+
+                    notify(
+                        "job_reset",
+                        f"secpt 单链 RESET 重建 {reset_job_id}",
+                        f"上轮 stalled 换会话重建，结果：{'拿到成果' if result2.flag else '未收尾'}",
+                    )
+                chains.append(
+                    ChainResult(
+                        role="exploit",
+                        entry=-1,
+                        flag=result2.flag,
+                        steps=result2.steps,
+                        wall_s=round(result2.wall_s, 1),
+                        status=result2.status,
+                    )
+                )
+                wall_s_total += result2.wall_s
+                if result2.flag:
+                    flags.append(result2.flag)
+                return RunSummary(
+                    job_id=spec.job_id,
+                    mode="single(+retry)",
+                    entries=entries,
+                    flags=flags,
+                    chains=chains,
+                    wall_s=round(wall_s_total, 1),
+                    extras={"recon_assets": 0, "reset": True},  # RESET 重建标记（对照判据）
+                ).to_dict()
+
         # 上一轮成果摘要：循环型长跑任务（benchmark/评测）里，"重试"是续跑——
         # 已解出的答案必须带过去，否则 r2 会重打已通的题白烧步数
         prev_answers: list[str] = []

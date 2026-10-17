@@ -71,7 +71,11 @@ def _tavily(query: str, n: int, key: str) -> list[dict]:
     with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as r:
         data = json.loads(r.read().decode("utf-8", "replace"))
     return [
-        {"title": _clip(x.get("title"), 150), "url": x.get("url", ""), "snippet": _clip(x.get("content"))}
+        {
+            "title": _clip(x.get("title"), 150),
+            "url": x.get("url", ""),
+            "snippet": _clip(x.get("content")),
+        }
         for x in (data.get("results") or [])[:n]
     ]
 
@@ -87,7 +91,11 @@ def _brave(query: str, n: int, key: str) -> list[dict]:
         data = json.loads(r.read().decode("utf-8", "replace"))
     items = ((data.get("web") or {}).get("results")) or []
     return [
-        {"title": _clip(i.get("title"), 150), "url": i.get("url", ""), "snippet": _clip(i.get("description"))}
+        {
+            "title": _clip(i.get("title"), 150),
+            "url": i.get("url", ""),
+            "snippet": _clip(i.get("description")),
+        }
         for i in items[:n]
     ]
 
@@ -98,7 +106,11 @@ def _searxng(query: str, n: int, base: str) -> list[dict]:
     with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as r:
         data = json.loads(r.read().decode("utf-8", "replace"))
     return [
-        {"title": _clip(x.get("title"), 150), "url": x.get("url", ""), "snippet": _clip(x.get("content"))}
+        {
+            "title": _clip(x.get("title"), 150),
+            "url": x.get("url", ""),
+            "snippet": _clip(x.get("content")),
+        }
         for x in (data.get("results") or [])[:n]
     ]
 

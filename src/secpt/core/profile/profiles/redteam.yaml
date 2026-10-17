@@ -1,7 +1,7 @@
 name: redteam
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
 role: 红队操作员
-tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content, web_search]
+tools: [bash, read_file, list_dir, write_file, nmap, httpx, gobuster, nuclei, http_request, session, recon_parse, oob, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content, web_search]
 bash_whitelist_extra: [nmap, httpx, gobuster, nuclei, hydra, john, hashcat, sqlmap, wfuzz, ffuf, nc, tcpdump]
 prior: redteam.md
 terminator:
@@ -20,3 +20,6 @@ constraints:
   - 每完成一步记录 ATT&CK 技术编号
   - 在不影响生产可用性的前提下推进
   - 攻击链关键节点用自写脚本验证：write_file 写 PoC/利用脚本 + bash 执行，拿到证据才上报 finding
+roe:
+  mode: authorized          # 授权实战模式：solve 打印 ROE 横幅 + 引擎步间节速
+  throttle_ms: 1000         # 红队场景目标更接近生产，节速更保守；SECPT_ROE_THROTTLE_MS 可覆盖

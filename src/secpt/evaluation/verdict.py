@@ -78,7 +78,9 @@ async def evaluate_job(
 
     全链路兜底：评判自身任何未预期异常 → heuristic 降级 verdict，绝不向上抛
     （评判是观测层，不能反过来打断主流程）。
+    SECPT_JUDGE_MODEL 可覆盖终裁模型（自评自裁独立性：judge 默认跨厂商换模型）。
     """
+    model = os.environ.get("SECPT_JUDGE_MODEL") or model
     from secpt.core.job.resume import jobs_dir as _default_jobs_dir
 
     jd = Path(jobs_dir) if jobs_dir else _default_jobs_dir()

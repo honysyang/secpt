@@ -75,50 +75,54 @@ def _bash_answerish_paths(command: str) -> list[str]:
 def check(evidence: Evidence, job_dir: Path | None = None) -> AntiCheatReport:
     rep = AntiCheatReport(answer_in_outputs=evidence.answer_in_outputs)
 
-    # 结构化工具：read_file/list_dir 的 path 参数
-    structured_hits: list[tuple[str, str]] = []  # (来源, path)
+    # 收集直读嫌疑：(来源, path, 命中核对 preview, 子 job)。bash 按调用各自核对
+    # 自己的 preview（比"全部 bash 拼接"更精确，且能带上子 job 标记）。
+    hits: list[tuple[str, str, str, str]] = []
     for tc in evidence.tool_calls:
-        if tc.name not in ("read_file", "list_dir"):
-            continue
-        try:
-            args = json.loads(tc.args) if tc.args else {}
-        except json.JSONDecodeError:
-            continue
-        path = str(args.get("path") or "")
-        if Path(path.replace("\\", "/")).name.lower() in _ANSWERISH_NAMES:
-            structured_hits.append((tc.name, path))
+        if tc.name in ("read_file", "list_dir"):
+            try:
+                args = json.loads(tc.args) if tc.args else {}
+            except json.JSONDecodeError:
+                continue
+            path = str(args.get("path") or "")
+            if Path(path.replace("\\", "/")).name.lower() in _ANSWERISH_NAMES:
+                hits.append((tc.name, path, _preview_of(evidence, tc.name, path), tc.sub))
+        elif tc.name == "bash":
+            try:
+                args = json.loads(tc.args) if tc.args else {}
+            except json.JSONDecodeError:
+                continue
+            # bash 直读类命令（P0：此前只查结构化工具，shell 直读完全绕过）
+            for path in _bash_answerish_paths(str(args.get("command") or "")):
+                hits.append(("bash", path, tc.preview, tc.sub))
 
-    # bash 文本：cat flag.txt 等直读类命令（P0：此前只查结构化工具，shell 直读完全绕过）
-    for tc in evidence.tool_calls:
-        if tc.name != "bash":
-            continue
-        try:
-            args = json.loads(tc.args) if tc.args else {}
-        except json.JSONDecodeError:
-            continue
-        for path in _bash_answerish_paths(str(args.get("command") or "")):
-            structured_hits.append(("bash", path))
-
-    for src, path in structured_hits:
+    answer_sub = evidence.answer_sub
+    for src, path, preview, sub in hits:
         # curl 读目标机答案是合法利用；这里只查本地文件工具/直读命令
-        hit = bool(evidence.answer) and evidence.answer in _preview_of(evidence, src, path)
-        if hit:
-            rep.local_answer_file_read = True
-            rep.suspicious.append(f"直读本地疑似答案文件 {path!r}（via {src}），且内容命中 ANSWER")
-        else:
+        hit = bool(evidence.answer) and evidence.answer in preview
+        if not hit:
             rep.suspicious.append(
                 f"读取了文件名像答案的文件 {path!r}（via {src}，内容未命中，需 judge 复核）"
             )
+            continue
+        if answer_sub and sub and sub != answer_sub:
+            # frontier 聚合流：直读与产出 ANSWER 的不是同一会话——不同子 job 各有
+            # 独立上下文（recon 看见的答案文件 ≠ exploit 的利用成果），确定性
+            # 硬判会误伤团队模式，降级 judge 复核（same-subjob 口径仍硬判）
+            rep.suspicious.append(
+                f"子 job {sub} 直读本地疑似答案文件 {path!r}（via {src}，内容命中），"
+                f"但 ANSWER 由子 job {answer_sub} 产出——跨会话关联，需 judge 复核"
+            )
+            continue
+        rep.local_answer_file_read = True
+        rep.suspicious.append(f"直读本地疑似答案文件 {path!r}（via {src}），且内容命中 ANSWER")
 
     rep.hard_fail = rep.local_answer_file_read
     return rep
 
 
 def _preview_of(evidence: Evidence, src: str, path: str) -> str:
-    """命中核对用的输出文本：结构化工具按 path 配对该次调用的 preview；
-    bash 无法精确配对（输出含答案即嫌疑成立，取全部 bash preview 拼接）。"""
-    if src == "bash":
-        return "\n".join(tc.preview for tc in evidence.tool_calls if tc.name == "bash")
+    """结构化工具按 path 配对该次调用的 preview（bash 在调用点已自带 preview）。"""
     for tc in evidence.tool_calls:
         if tc.name != src:
             continue

@@ -1,7 +1,10 @@
 """``secpt run`` / ``secpt resume`` 命令实现（命令注册在 cli/app.py）。
 
-- ``run_cmd``：默认 Engine 单链；--mode dag 启用编排；--mode tree 已废弃，自动转 direct
-- ``resume_cmd``：从断点恢复任务
+入口策略（solve 为唯一用户入口）：
+- ``--task <TaskSpec.yaml>``：机器/编排入口，直转 DAG 分流（保留，脚本/平台用）
+- ``--mode direct`` / ``tree``（旧）：**已废弃**——自动转发 ``secpt solve`` 单链模式，
+  获得完整能力链（理解→拆解→治理→止损→评判→学习）；不再维护裸 Engine 旁路
+- ``secpt resume``：断点恢复不变
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import typer
 
 
 def _write_tmp_objective(text: str) -> str:
-    """把 tree 模式的 target/task 文本落成临时题面文件，返回路径。"""
+    """把 task/target 文本落成临时题面文件，返回路径。"""
     tmp = Path("var/tmp")
     tmp.mkdir(parents=True, exist_ok=True)
     p = tmp / f"tree-{uuid.uuid4().hex[:8]}.md"
@@ -23,16 +26,26 @@ def _write_tmp_objective(text: str) -> str:
 
 
 def run_cmd(
-    target: str | None = typer.Argument(None, help="目标 host / url / domain"),
-    task: str | None = typer.Option(None, "--task", "-t", help="自定义任务描述"),
-    max_steps: int | None = typer.Option(None, "--max-steps", "-n", help="ReAct 最大步数"),
-    fake: bool = typer.Option(False, "--fake", "-f", help="用 FakeLLM dry-run（无需 API key）"),
-    show_trajectory: bool = typer.Option(False, "--trajectory", help="打印 trajectory"),
-    file: str | None = typer.Option(None, "--file", help="题面文件路径（与 --task 互斥）"),
-    objective_file: str | None = typer.Option(
-        None, "--objective-file", help="题面文件路径（direct 模式）"
+    target: str | None = typer.Argument(None, help="目标 host / url / domain（旧参数，已忽略）"),
+    task: str | None = typer.Option(None, "--task", "-t", help="自定义任务描述或 TaskSpec yaml"),
+    max_steps: int | None = typer.Option(
+        None, "--max-steps", "-n", help="步数上限（转发 solve --steps）"
     ),
-    attach_dir: str | None = typer.Option(None, "--attach-dir", help="附件目录（direct 模式）"),
+    fake: bool = typer.Option(
+        False, "--fake", "-f", help="FakeLLM 干跑： understanding/评判/学习一并关闭"
+    ),
+    show_trajectory: bool = typer.Option(
+        False, "--trajectory", help="已废弃：跑完用 `secpt logs export <job_id> --format json`"
+    ),
+    file: str | None = typer.Option(
+        None, "--file", help="题面文件路径（旧参数，同 --objective-file）"
+    ),
+    objective_file: str | None = typer.Option(
+        None, "--objective-file", help="题面文件路径（direct 旧参数，同 --file）"
+    ),
+    attach_dir: str | None = typer.Option(
+        None, "--attach-dir", help="附件目录（旧参数；solve 会自动发现 challenge 目录附件）"
+    ),
     profile: str = typer.Option(
         "ctf", "--profile", "-p", help="先验 profile（对应 knowledge/priors/<name>.md）"
     ),
@@ -42,7 +55,7 @@ def run_cmd(
     mode: str = typer.Option(
         "direct",
         "--mode",
-        help="执行模式：direct=Engine 单链（默认），tree=原 engagement，dag=显式启用编排",
+        help="执行模式：direct/tree 已废弃（自动转发 solve）；dag=显式启用编排（需 --task yaml）",
     ),
     model: str = typer.Option(
         "deepseek-chat",
@@ -59,22 +72,19 @@ def run_cmd(
     orchestrator: bool = typer.Option(
         False,
         "--orchestrator/--no-orchestrator",
-        help="多入口任务是否启用 DAG 编排（默认关闭，对照组结论；--orchestrator 或 --mode dag 显式开启）",
+        help="多入口任务是否启用 DAG 编排（默认关闭；--orchestrator 或 --mode dag 显式开启）",
     ),
 ) -> None:
-    """对 ``target`` 执行一次渗透任务。
+    """对 ``target`` 执行一次渗透任务（solve 唯一入口的兼容 shim）。
 
-    默认走 Engine 单链（function-calling），失败自动换路线重试一次；
-    --mode dag 显式启用多入口编排（frontier 角色意图：recon → exploit×N 并行 → verify）。
-
-    S5 多入口对照结论：DAG 层保留但默认关闭；只有显式 --mode dag（或 --orchestrator）
-    才启用。entries <= 1 时编排层天然休眠，直连单链。
+    旧 direct/tree 参数自动转发 ``secpt solve``（单链模式 + 完整评判/学习链）；
+    机器编排入口保留：``--task <TaskSpec.yaml>`` 直转 DAG 分流。
     """
     if mode not in ("direct", "tree", "dag"):
         typer.echo(f"Error: --mode 只支持 direct / tree / dag，收到 {mode!r}")
         raise typer.Exit(2)
 
-    # ---- S5：--task 指向 TaskSpec yaml → orchestrator（DAG / 单链分流）----
+    # ---- 机器编排入口：--task 指向 TaskSpec yaml → orchestrator（DAG / 单链分流）----
     from pathlib import Path as _P
 
     if task and _P(task).is_file() and _P(task).suffix.lower() in (".yaml", ".yml"):
@@ -117,92 +127,59 @@ def run_cmd(
             raise typer.Exit(1)
         return
 
-    if mode == "direct":
-        if not objective_file:
-            typer.echo("Error: direct 模式需要 --objective-file <题面文件>")
-            raise typer.Exit(2)
-        if file or task:
-            typer.echo("Error: --file / --task 与 direct 模式互斥（仅 tree 模式可用）")
-            raise typer.Exit(1)
-        _run_engine(
-            objective_file,
-            attach_dir or "",
-            profile,
-            prior,
-            model=model,
-            fallback=fallback,
-            wall=wall,
+    # ---- direct / tree / dag（无 yaml）：统一转发 secpt solve（唯一用户入口）----
+    if mode == "dag":
+        typer.echo("Error: --mode dag 需要 --task <TaskSpec.yaml>（编排为机器入口）")
+        raise typer.Exit(2)
+    if attach_dir:
+        typer.echo(
+            "注意: --attach-dir 已忽略（solve 自动发现 challenge 目录下的 attachments/附件/）"
         )
-        return
 
-    # ---- tree 模式（旧 engagement 引擎，已废弃：自动转 direct，行为不中断）----
-    typer.echo("--mode tree 已废弃：自动转入 direct（Engine 单链）模式")
-    if file and task:
-        typer.echo("Error: --file 与 --task 互斥")
-        raise typer.Exit(1)
-    if not objective_file:
-        if file:
-            objective_file = file
-        elif task:
-            objective_file = _write_tmp_objective(task)
+    typer.echo(
+        f"--mode {mode} 已废弃：自动转发 secpt solve（单链模式，含理解/拆解/止损/评判/学习全链）。"
+        " 新用法: secpt solve <题面文件>"
+    )
+    ofile = objective_file or file
+    if ofile and task:
+        typer.echo("注意: --task 与题面文件同时给出，使用题面文件（--task 文本已忽略）")
+    if not ofile:
+        if task:
+            ofile = _write_tmp_objective(task)
         elif target:
-            objective_file = _write_tmp_objective(
-                f"对 {target} 进行渗透测试，目标是拿到漏洞证明（flag）。"
-            )
+            ofile = _write_tmp_objective(f"对 {target} 进行渗透测试，目标是拿到漏洞证明（flag）。")
         else:
-            typer.echo("Error: tree 模式需要 target / --task / --file 之一")
+            typer.echo("Error: 需要 --objective-file <题面文件>（或 --task / target）")
             raise typer.Exit(2)
-    _run_engine(
-        objective_file,
-        attach_dir or "",
-        profile,
-        prior,
+
+    if fake:
+        # 干跑口径：理解/拆解/judge/learning 都走真 LLM 会破环 dry-run 语义——一并关闭
+        import os as _os
+
+        _os.environ["SECPT_FAKE_LLM"] = "1"
+        _os.environ["SECPT_UNDERSTANDING"] = "0"
+        _os.environ["SECPT_GOALS"] = "0"
+    if show_trajectory:
+        typer.echo(
+            "注意: --trajectory 已废弃——跑完用 secpt logs export <job_id> --format json 看轨迹"
+        )
+
+    from secpt.cli.solve import solve
+
+    code = solve(
+        ofile,
+        profile=profile,
+        prior=prior,
         model=model,
         fallback=fallback,
         wall=wall,
+        steps=max_steps or 0,
+        mode="single",
+        judge_enable=not fake,
+        learn_enable=not fake,
+        watch_enable=False,
     )
-
-
-def _run_engine(
-    objective_file: str,
-    attach_dir: str,
-    profile: str,
-    prior: str | None = None,
-    model: str = "deepseek-chat",
-    fallback: str = "deepseek-reasoner",
-    wall: int = -1,
-) -> None:
-    """直接调用 Engine（不再走 subprocess），全程落盘到 var/jobs/。"""
-    from pathlib import Path as _P
-
-    from secpt.cli.engine_runner import run_engine
-
-    # 读题面
-    challenge_text = _P(objective_file).read_text(errors="replace")
-    if attach_dir:
-        ad = _P(attach_dir)
-        if ad.is_dir():
-            for f in sorted(ad.rglob("*")):
-                if f.suffix in (".md", ".txt") and f.is_file():
-                    challenge_text += f"\n\n--- {f} ---\n" + f.read_text(errors="replace")
-
-    result = run_engine(
-        objective=challenge_text,
-        profile=profile,
-        prior=prior,
-        model_primary=model,
-        model_fallback=fallback,
-        max_wall_s=None if wall < 0 else wall,
-    )
-
-    typer.echo("")
-    typer.echo(f"job_id: {result.job_id}")
-    typer.echo(f"steps: {result.steps}")
-    typer.echo(f"wall_s: {result.wall_s:.1f}")
-    typer.echo(f"status: {result.status}")
-    typer.echo(f"flag:   {result.flag or '未拿到'}")
-    if not result.flag:
-        raise typer.Exit(1)
+    raise typer.Exit(code)
 
 
 def resume_cmd(
