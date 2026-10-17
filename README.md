@@ -42,6 +42,65 @@ secpt solve <dir> -p multistage               # 多阶段：recon → getshell �
 - **运维体验**：`secpt doctor`（环境预检，多模型凭证支持 DEEPSEEK_API_KEY/SECPT_MODEL_API_KEY/SECPT_MODEL_KEY_<PREFIX>）/ `secpt tui`（意图板+事件流+审批面板，pip install 'secpt[tui]'）/ 通知通道（SECPT_NOTIFY_WEBHOOK 或 SECPT_NOTIFY_DESKTOP=1 → 审批待办/空转暂停/拿到 flag 实时推送）
 - **Docker Agent 镜像**：`scripts/build-agent-image.sh` 一键构建 Kali 基座自包含镜像（离线预装 50+ 安全工具 + Python 武器库 + 精选字典），`docker/entrypoint.sh` 启动即跑 benchmark；凭证全部来自运行时环境变量，镜像零密钥
 
+## 架构分层（代码驱动，读一遍就能跑）
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 路由层 solve.py / dag.py  —— 决定走哪条路径（懒升级阶梯）            │
+│   route_mode: profile.stages → stages / benchmark → campaign / 默认 single │
+└────────────┬──────────────────┬────────────────────┬───────────────┘
+             │                  │                    │
+             ▼                  ▼                    ▼
+  run_single_chain()     run_frontier()        run_benchmark_campaign()
+  (dag.py)               (frontier.py)        (benchmark.py)
+  ┌────────────────┐     ┌─────────────────┐  ┌──────────────────────┐
+  │ attempt-1:     │     │ _worker_loop ×N │  │ for round in 1..3:   │
+  │  to_thread(    │     │  claim → _run_one│  │   run_benchmark()    │
+  │   run_engine)  │     │  → settle        │  │     ├─ ChallengeLedger│
+  │ attempt-2:     │     │  (to_thread     │  │     ├─ chunk_ranges   │
+  │  -r2 / -rs     │     │   run_engine)   │  │     └─ run_frontier   │
+  │  RESET 重建    │     │ planner + retro │  │ 心跳线程 + 平台探针   │
+  └───────┬────────┘     └────────┬────────┘  └───────────┬──────────┘
+          │                       │                        │
+          └───────────────┬───────┴────────────────────────┘
+                          ▼
+          run_engine(cfg)  ← 同步包装，内部 asyncio.run()
+                          ▼
+             Engine.run()  ← 单链 ReAct 主循环
+  messages 整条 append（不 rebuild） ｜ tool_call 结果回填
+  三档止损（nudge→wrap→stalled）     ｜ StuckDetector 六判据卡死检测
+  非阻塞 compaction 压缩             ｜ checkpoint 断点续跑
+  进度锚点 .progress.md（5 步落盘）  ｜ delegate 子智能体（可选）
+```
+
+### 关键设计决策
+
+| 层 | 决策 | 为什么 |
+|----|------|--------|
+| **Engine 是同步包装** | `run_engine()` 是同步函数，内部 `asyncio.run(Engine(...).run())`；编排层用 `asyncio.to_thread(run_engine, ...)` 驱动 | 每个智能体执行有自己独立的 event loop，不污染编排层 event loop；线程池天然隔离 session 状态 |
+| **Engine 不知道"重试/协作"** | 重试（attempt-2）、RESET 重建、跨意图 handoff 全在编排层 | Engine 是可复用 ReAct 循环，所有复杂行为在上层组合 |
+| **没有 agent 直接对话** | 协作走 SQLite 意图队列 + SharedStopper 完成广播 + `_YieldHook` steer 消息 | 避免模型间相互误导；协作确定性由持久化存储保证 |
+| **frontier.sqlite 按任务隔离** | `var/jobs/<base>/frontier.sqlite` | 并发任务互不可见；resume 同 base 续接同一 todolist |
+| **run_single_chain 是默认** | `route_mode()` 默认返回 single | 懒升级阶梯——最小充分打法，短任务最优；无成果自动升级 frontier |
+
+### 三种驱动模式速查
+
+| 模式 | 触发 | 并发 | 协作 | 典型场景 |
+|------|------|------|------|----------|
+| single 单链（默认） | profile 无 stages / 非 benchmark | 1 个 Engine 实例 | 无；失败自动重试一次（`-r2` 续步 或 `-rs` RESET 换会话） | 单目标探索、7×24 长任务 |
+| frontier 团队协作 | `--mode frontier` 或 solve 自动升级 | N 个 worker_loop（asyncio task），每个 `to_thread(run_engine)` | 意图队列 + 原子 claim + 租约互斥 + 事实谓词解锁 + 完成广播 steer | 多资产渗透、复杂任务 |
+| benchmark campaign | profile=benchmark 自动走 | 3 worker 并行 + 外层多轮重试 | 同上 + ChallengeLedger 跨进程账本 | 多题跑分比赛 |
+
+### 团队协作五角色（role_plan=True 时预置骨架）
+
+| 角色 | 解锁条件 | 做什么 | 协作产物 |
+|------|----------|--------|----------|
+| **recon** | 无依赖，先行 | 枚举资产/端口/技术栈 → `ws/assets.json` + `record_fact("credential:xxx")` | 写入 intel 图 → 解锁 exploit / lateral |
+| **exploit** | `depends_on=recon_id` | 定向深挖单个资产 | 每资产一条，**多 worker 并行认领** + 租约互斥 |
+| **lateral** | `depends_on="fact:credential"`（intel 图有凭据） | 凭据复用/横向移动 | 不靠 LLM 自觉，`deps_satisfied()` 确定性判定 |
+| **verify** | planner 看到 exploit 有未确认 finding 时补产 | 独立 PoC 复现 | 执行完 finding 才进 confirmed |
+| **report** | verify 全部完成（确定性聚合，**不烧 LLM 步数**） | 聚合 confirmed finding 产报告 | — |
+
 ## 插件示例（集成 getshell 能力）
 
 ```yaml
@@ -65,7 +124,11 @@ export DEEPSEEK_API_KEY=<key>          # 或任意 OpenAI 兼容端点（见 doc
 secpt solve challenges/rois-saml-sso
 #    内部自动：统一理解智能体（多标签分类 + GoalSpec + 先验推荐，一次调用）
 #    → 白名单校验/种子入图 → 多标签合并（横向任务工具+先验并集）
-#    → 执行模式（懒升级阶梯：single → 无成果自动升级 frontier → stages 若 profile 编排）
+#    → 执行模式（路由决策，详见"架构分层"）：
+#      benchmark profile → run_benchmark_campaign（多 worker 并行 + 多轮重试）
+#      profile 带 stages → run_stages（recon→getshell→privesc 串行）
+#      --mode frontier → run_frontier(role_plan=True)（五角色团队协作）
+#      其余 → run_single_chain（最简路径，失败自动重试一次）
 #    → AI 评判 → 经验沉淀。高级用户可用 -p/--prior/--mode 覆盖任何一步。
 
 # 3. 无 key 干跑（FakeLLM 全链路）
@@ -104,8 +167,15 @@ secpt/
 │   │                          #   sandbox(Docker沙箱) / logsetup / metrics / workspace_ctx(ContextVar 隔离各任务)
 │   ├── core/
 │   │   ├── job/               # 作业层：TaskSpec/JobRecord/store/event(并发安全)/resume/summarize_worker/worker
-│   │   ├── orchestrator/      # benchmark(多轮 campaign + ChallengeLedger) / dag 分流 / stages 多阶段
-│   │   │                      #   frontier 意图调度（四角色）/ ledger 跨进程互斥 / roles 角色认领
+│   │   ├── orchestrator/      # ★编排层（驱动 Engine 的三种模式）
+│   │   │   ├── dag.py         # run_single_chain + run_task 分流 + goal 拆解层
+│   │   │   ├── frontier.py    # 意图调度（五角色骨架 + _worker_loop×N 并行 + SharedStopper + 跨意图 handoff）
+│   │   │   ├── benchmark.py   # 多轮 campaign（run_benchmark_campaign 外层重试 + run_benchmark 内层跑 frontier）
+│   │   │   ├── ledger.py      # ChallengeLedger 跨进程互斥账本（benchmark 场景防重复解题）
+│   │   │   ├── roles.py       # 角色定义 + role_stage 提示注入（recon/exploit/lateral/verify/report）
+│   │   │   ├── stages.py      # 多阶段串行（recon→getshell→privesc）
+│   │   │   ├── policy.py      # 路由 + prove_goal + DEPRECATED_MODULES 红线
+│   │   │   └── goals.py       # 目标拆解 + asset_scope 结构化（render_goal_system）
 │   │   ├── profile/           # profile YAML loader + system_extra 渲染（benchmark/hunter/pentest/redteam…）
 │   │   ├── context/           # S3 四件套：compaction(非阻塞) / rollover / budget / summarize
 │   │   ├── memory/            # warroom 四表（历史/可选组件；多意图协作走 intel 图 + findings + traces）
