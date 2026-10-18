@@ -173,6 +173,19 @@ WRAP_MSG = (
     "3. 以 ANSWER: <结论> 收尾（有 flag 给 flag；没有就给当前结论摘要）"
 )
 
+# ── PA4 终止与上限精细化 ──
+# tool-call arguments JSON 解析失败的哨兵：不执行工具，回填自救错误串（Reflector 思想）。
+# 用特殊 dict 而非 object()——下游 _call_key/_extract_refs 等对 args 调 .get/序列化，
+# 哨兵必须能安全通过；身份比较（is）靠同一对象保证。
+_UNPARSEABLE: dict = {"__secpt_unparseable__": True}
+
+_TC_PARSE_RESCUE_MSG = (
+    "【自救提示】已连续 {n} 次工具调用参数 JSON 解析失败（调用未执行）。修复方案：\n"
+    "1. arguments 必须是合法 JSON 字符串——注意引号转义与换行符（\\n）\n"
+    "2. 参数复杂/含大段文本时：改用 write_file 把内容写成文件，再用 bash 脚本读取处理\n"
+    "3. 该模式常见于单次输出过长被截断——把一次要做的事拆小"
+)
+
 
 def _emit_loop_phase(
     engine_hooks: object, audit: object, log: object, *, phase: str, reason: str = ""
@@ -524,6 +537,9 @@ class RunConfig:
     round_max_steps: int = 60  # S3 回合最大步数（触发 rollover）
     round_max_wall_s: int = 1500  # S3 回合最大墙钟（秒，25min）
     roe_throttle_ms: int = 0  # ROE 节速：每个 step 完成后 sleep 毫秒数（0=关闭）
+    # PA4.2：本轮工具调用硬上限（0=不限）。engine_runner 按角色分档注入
+    # （exploit/recon/lateral=100、verify/report=20）；超限强制进入 wrapping
+    max_tool_calls: int = 0
 
     @property
     def work_dir(self) -> Path:
@@ -1184,6 +1200,89 @@ def make_tool_fns(cfg: RunConfig) -> dict:
     }
 
 
+# ── 运行时工具升级（request_tools）：攻击面是滚动的，装配不能是一次性的 ──
+_REQUEST_TOOLS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "request_tools",
+        "description": (
+            "运行中按需启用备选工具（立即生效，无需重启）：发现题面未提的新攻击面时用——"
+            "如出现二进制（analyze_binary/pwn_checksec）、需要常驻会话驱动 gdb（session）、"
+            "需要带外验证（oob）、需要结构化扫描（recon_parse）。一次最多 4 个，附一句话理由。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要启用的工具名（必须是池内工具，schema 里有清单）",
+                },
+                "reason": {"type": "string", "description": "为什么需要（审计留痕）"},
+            },
+            "required": ["names"],
+        },
+    },
+}
+_POOL_PER_CALL_MAX = 4  # 单次 request_tools 启用上限（防一次全池挂载撑爆 schema）
+
+
+# ── bash 扫描输出自动结构化：agent 用裸 nmap/ffuf 时图记忆也不断粮 ──
+_SCANNER_CMD_RE = re.compile(
+    r"\b(nmap|masscan|ffuf|gobuster|dirsearch|whatweb|nikto|wpscan|nuclei|httpx)\b"
+)
+_AUTO_PARSER: object | None = None
+
+
+def _get_auto_parser():
+    """懒加载 recon_parse 处理器（只加载一次；不可用返回 None，不再反复扫描）。"""
+    global _AUTO_PARSER
+    if _AUTO_PARSER is None:
+        try:
+            from secpt.tools.plugin_loader import engine_tools_for
+
+            _AUTO_PARSER = engine_tools_for(["recon_parse"]).get("recon_parse", (None, None))[1]
+        except Exception:
+            _AUTO_PARSER = False
+    return _AUTO_PARSER or None
+
+
+def _auto_structured_bash(cfg: RunConfig, bash_fn, parser=None):
+    """bash 包装：扫描类命令的输出自动喂给 recon_parse 落 ws/assets.json（best-effort）。
+
+    解决"工具契约靠自觉"——模型裸跑扫描器而不调 recon_parse 时，资产图就断粮。
+    解析失败绝不影响 bash 本身（观测层纪律）；SECPT_AUTO_STRUCTURE=0 可关。
+    parser 参数仅供测试注入。
+    """
+
+    async def _wrapped(args: dict) -> str:
+        result = bash_fn(args)
+        if inspect.isawaitable(result):
+            result = await result
+        cmd = str((args or {}).get("command") or "")
+        if not _SCANNER_CMD_RE.search(cmd) or len(result) < 40:
+            return result
+        try:
+            fn = parser or _get_auto_parser()
+            if fn is None:
+                return result
+            out_dir = cfg.work_dir / "outputs"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"auto-struct-{int(time.time() * 1000)}.txt"
+            path.write_text(result, encoding="utf-8")
+            summary = fn({"path": str(path), "format": "auto", "merge": True})
+            if isinstance(summary, str) and not summary.startswith("Error"):
+                return (
+                    result
+                    + f"\n[auto-structure] 扫描输出已自动解析入 ws/assets.json（{summary[:120]}）"
+                )
+        except Exception:
+            pass
+        return result
+
+    return _wrapped
+
+
 class Engine:
     """单链 function-calling 主循环。llm 需实现 call(messages, tools, model)；
     tools 为 {name: fn(args)->str}；hooks 为可选回调（见 run 内调用点）；
@@ -1205,6 +1304,7 @@ class Engine:
         extra_tools: dict | None = None,
         verbose: bool = False,
         enable_delegate: bool | None = None,
+        tool_pool: dict | None = None,
     ) -> None:
         self.cfg = cfg
         self.llm = llm
@@ -1217,6 +1317,17 @@ class Engine:
         if enable_delegate and "delegate" not in self.extra_tools:
             _schema, _fn = make_delegate_tool(cfg, llm)
             self.extra_tools["delegate"] = (_schema, _fn)
+        # 备选工具池：不默认挂载（省 schema token），agent 发现新攻击面时用
+        # request_tools 运行时启用——修复"工具装配一次性、攻击面滚动"的错配
+        self._tool_pool: dict = dict(tool_pool or {})
+        if self._tool_pool:
+            self.extra_tools["request_tools"] = (
+                _REQUEST_TOOLS_SCHEMA,
+                self._make_request_tools_fn(),
+            )
+        # bash 扫描输出自动结构化（SECPT_AUTO_STRUCTURE=0 关闭）：裸扫描也喂资产图
+        if os.environ.get("SECPT_AUTO_STRUCTURE", "1") == "1" and "bash" in self.tools:
+            self.tools["bash"] = _auto_structured_bash(cfg, self.tools["bash"])
         self._extra_schemas: list[dict] = []
         for name, (schema, fn) in self.extra_tools.items():
             if _extract_governance(schema).get("network"):
@@ -1232,6 +1343,95 @@ class Engine:
         # 非阻塞 compaction 状态：待回填占位摘要的 k 集合 + 后台摘要 worker 任务
         self._pending_summary_ks: set[int] = set()
         self._bg_task: asyncio.Task | None = None
+        # PA2（PentAGI Mentor 思想）：卡死决策点用强模型诊断+换路线，替代固定文案。
+        # 默认关（SECPT_MENTOR=1 开）；模型取 SECPT_MENTOR_MODEL > SECPT_ESCALATE_MODEL；
+        # 未配模型/假 LLM/配额耗尽/调用失败 → 静默回退固定文案（best-effort 纪律不破）
+        self._mentor_enabled = os.environ.get("SECPT_MENTOR", "0") == "1"
+        self._mentor_model = (
+            os.environ.get("SECPT_MENTOR_MODEL", "").strip()
+            or os.environ.get("SECPT_ESCALATE_MODEL", "").strip()
+        )
+        try:
+            self._mentor_max_calls = max(0, int(os.environ.get("SECPT_MENTOR_MAX_CALLS", "2") or 2))
+        except ValueError:
+            self._mentor_max_calls = 2
+
+    def _make_request_tools_fn(self):
+        """request_tools 处理器：从备选池启用工具（只增不减、单次上限、审计留痕）。
+
+        网络类工具经池启用时套与初始装配同款的治理前置（scope→intercept）。
+        """
+
+        def _fn(args: dict) -> str:
+            names = args.get("names") or []
+            if isinstance(names, str):
+                names = [names]
+            reason = str(args.get("reason") or "").strip()
+            unknown = [str(n) for n in names if n not in self._tool_pool]
+            newly: list[str] = []
+            for n in names:
+                if len(newly) >= _POOL_PER_CALL_MAX:
+                    break
+                if n not in self._tool_pool:
+                    continue
+                schema, fn = self._tool_pool.pop(n)
+                if _extract_governance(schema).get("network"):
+                    fn = _governed_plugin_fn(self.cfg, n, fn)
+                self.tools[n] = fn
+                self._extra_schemas.append(_public_tool_schema(schema))
+                newly.append(str(n))
+            if not newly:
+                return (
+                    f"Error: 请求的工具不在池内或已启用: {unknown}；"
+                    f"池剩余: {sorted(self._tool_pool) or '空'}"
+                )
+            note = f"（未在池内: {unknown}）" if unknown else ""
+            return (
+                f"已启用 {len(newly)} 个工具: {', '.join(newly)}，schema 已注入下一轮请求。"
+                f"理由: {reason[:80] or '未填写'}{note}。池剩余: {sorted(self._tool_pool) or '空'}"
+            )
+
+        return _fn
+
+    async def _mentor_advice(
+        self, objective: str, actions: list, stuck_signal: str, findings
+    ) -> str | None:
+        """PA2 导师诊断：输入最近动作/卡死信号/已确认发现，返回换路线建议。
+
+        失败/超时(45s)/空返回一律返回 None（调用方回退固定文案，best-effort）。
+        tools=None 区分导师调用与主链调用（同一 self.llm 双用，签名兼容两种形态）。
+        """
+        lines = [f"- step{s} {t} {a} → {r}" for (s, t, a, r) in actions]
+        findings_txt = "；".join(f"{k}:{v[:60]}" for k, v in list(findings)[:6]) or "无"
+        prompt = (
+            "【导师介入】渗透/解题任务卡死诊断。只输出：1) 卡点最可能的原因（一句话）；"
+            "2) 换路线的具体建议 2-3 条（可直接执行）。禁止复述已知信息，总长 ≤200 字。\n\n"
+            f"任务目标：{objective[:400]}\n"
+            "最近动作（时间序，最多 10 条）：\n"
+            + ("\n".join(lines) or "- 无")
+            + f"\n卡死信号：{stuck_signal[:200]}\n"
+            f"已确认发现：{findings_txt}"
+        )
+        req = [{"role": "user", "content": prompt}]
+        try:
+            if hasattr(self.llm, "call"):
+                resp = await asyncio.wait_for(
+                    self.llm.call(req, None, self._mentor_model), timeout=45.0
+                )
+            else:
+                resp = await asyncio.wait_for(self.llm(req, None, self._mentor_model), timeout=45.0)
+        except Exception:
+            counter_inc("mentor_calls_total", status="error")
+            return None
+        try:
+            advice = (resp.choices[0].message.content or "").strip()
+        except Exception:
+            return None
+        if not advice:
+            return None
+        if getattr(resp, "usage", None) is not None:
+            counter_inc("mentor_tokens_total")  # token 明细随结构化日志留痕
+        return advice
 
     async def _compaction_worker(self, log) -> None:
         """后台摘要 worker：拉取 pending 请求生成六段摘要（不阻塞主循环）。
@@ -1340,7 +1540,11 @@ class Engine:
         loop_phase = "running"  # running | nudged | wrapping
         steps_since_nudge = 0  # nudge 后无结构性改善的步数（有改善清零）
         wrap_steps = 0  # 进入 wrapping 后的步数（>= STALL_AFTER_WRAP 判 stalled）
-        wrap_reason = ""  # 进入 wrapping 的原因（nudge_no_improve/budget_pct/no_yield）
+        wrap_reason = ""  # 进入 wrapping 的原因（nudge_no_improve/budget_pct/no_yield/tool_cap）
+        _tool_calls_done = 0  # PA4.2：本轮已执行工具调用数（cfg.max_tool_calls 上限）
+        _tc_parse_fail_streak = 0  # PA4.1：连续 arguments JSON 解析失败计数（成功清零）
+        _tc_rescue_shown = False  # PA4.1：自救提示每个连续失败 episode 只发一次
+        mentor_calls = 0  # PA2：导师调用配额计数（≤ SECPT_MENTOR_MAX_CALLS，默认 2）
         _margin_win: deque = deque(maxlen=_margin_window())
         _margin_findings = 0  # 窗口内成果数滚动和（finding=产出，不是"新信息"）
         _margin_cost = 0.0  # 窗口内成本滚动和（CNY；无 budget tracker 时恒 0）
@@ -1568,8 +1772,11 @@ class Engine:
                     fn_name = tc.function.name
                     try:
                         fn_args = json.loads(tc.function.arguments)
+                        _tc_parse_fail_streak = 0  # 成功即清零（自救提示按 episode 计）
                     except json.JSONDecodeError:
-                        fn_args = {}
+                        # PA4.1：不执行、不吞错——回填哨兵，由 _exec_one 返回自救错误串
+                        fn_args = _UNPARSEABLE
+                        _tc_parse_fail_streak += 1
                     items.append((tc, fn_name, fn_args))
 
                 sem = asyncio.Semaphore(_parallel_max())
@@ -1577,6 +1784,13 @@ class Engine:
                 async def _exec_one(item):
                     """执行单个工具调用；失败不拖垮整批（逐项捕获返回错误串）。"""
                     _tc, _name, _args = item
+                    if _args is _UNPARSEABLE:
+                        return (
+                            f"Error: 工具 {_name} 的 arguments 不是合法 JSON，本次未执行。"
+                            "修复：① arguments 必须是合法 JSON（注意转义）；"
+                            "② 参数复杂时改用 write_file 写脚本文件后 bash 执行；"
+                            "③ 单次输出过长可能被截断——缩小规模。"
+                        )
                     if _name not in self.tools:
                         return f"Error: unknown tool '{_name}'"
                     try:
@@ -1633,6 +1847,8 @@ class Engine:
                     # 串行记账：按原始顺序逐个执行原有回调体（语义与改造前逐一一致）
                     for (tc, fn_name, fn_args), result in zip(group, results, strict=True):
                         counter_inc("tool_calls_total", tool=fn_name)
+                        if fn_args is not _UNPARSEABLE:
+                            _tool_calls_done += 1  # PA4.2：仅计真实执行的调用
                         # keyguard：PEM 私钥块一律在进入记账/上下文前替换为占位符
                         # （私钥不进 transcript / warroom / 上下文；占位符保留长度信息）
                         result, _n_pk = redact_private_keys(result)
@@ -1688,9 +1904,70 @@ class Engine:
                             )
                             _last_progress_step = steps
 
-                # 卡死切换器：必要时注入提醒（user 角色）
+                # PA4.1：连续 JSON 解析失败 ≥2 → 自救提示（每个 episode 只发一次；
+                # 依附在批结果之后追加 user 消息，不破坏 tool_results 顺序协议）
+                if _tc_parse_fail_streak >= 2 and not _tc_rescue_shown:
+                    _tc_rescue_shown = True
+                    _rescue = _TC_PARSE_RESCUE_MSG.format(n=_tc_parse_fail_streak)
+                    messages.append({"role": "user", "content": _rescue})
+                    if self.hooks and hasattr(self.hooks, "on_user_message"):
+                        self.hooks.on_user_message(_rescue, kind="rescue")
+                    counter_inc("loop_rescue_total")
+                    log.warning("engine.tc_parse_rescue", streak=_tc_parse_fail_streak)
+
+                # PA4.2：角色分档工具调用硬上限 → 强制收尾（防单角色烧穿预算；
+                # 超"限"走既有 wrapping 通道，与 budget_pct 同款收尾指令）
+                if (
+                    cfg.max_tool_calls > 0
+                    and _tool_calls_done >= cfg.max_tool_calls
+                    and loop_phase == "running"
+                ):
+                    loop_phase = "wrapping"
+                    wrap_reason = "tool_cap"
+                    wrap_steps = 0
+                    counter_inc("loop_wrapping_total")
+                    _emit_loop_phase(
+                        self.hooks, cfg.audit, log, phase="wrapping", reason=wrap_reason
+                    )
+                    messages.append({"role": "user", "content": WRAP_MSG})
+                    if self.hooks and hasattr(self.hooks, "on_user_message"):
+                        self.hooks.on_user_message(WRAP_MSG, kind="wrap")
+                    log.warning(
+                        "engine.tool_call_cap", done=_tool_calls_done, cap=cfg.max_tool_calls
+                    )
+
+                # 卡死切换器：必要时注入提醒（user 角色）——PA2：先试导师诊断换路线
                 if detector.should_nudge():
                     nudge_msg = detector.nudge()
+                    if self._tool_pool:
+                        # 卡死时刻正是需要新工具的时刻——池内工具可 request_tools 升级
+                        nudge_msg += (
+                            "\n另：若卡点与工具面有关（二进制/需常驻会话/需带外验证/"
+                            "需结构化扫描），可调用 request_tools 启用备选工具"
+                            f"（池内: {sorted(self._tool_pool)}）。"
+                        )
+                    mentor_advice = None
+                    if (
+                        self._mentor_enabled
+                        and self._mentor_model
+                        and mentor_calls < self._mentor_max_calls
+                        and not os.environ.get("SECPT_FAKE_LLM")
+                    ):
+                        mentor_calls += 1
+                        mentor_advice = await self._mentor_advice(
+                            cfg.objective,
+                            list(_progress_actions),
+                            nudge_msg,
+                            sorted(self._finding_seen),
+                        )
+                        counter_inc(
+                            "mentor_calls_total", status="ok" if mentor_advice else "fallback"
+                        )
+                        if mentor_advice:
+                            nudge_msg = f"【导师建议】{mentor_advice}"
+                            log.info(
+                                "engine.mentor_advice", call=mentor_calls, chars=len(mentor_advice)
+                            )
                     messages.append({"role": "user", "content": nudge_msg})
                     if self.hooks and hasattr(self.hooks, "on_user_message"):
                         self.hooks.on_user_message(nudge_msg, kind="nudge")

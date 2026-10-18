@@ -1,5 +1,5 @@
 # d 族打法速查（自动蒸馏，来自 6 条历史结算摘要）
 
-- d-03（17 步）：ANSWER: d-03 通关 —— 拿到 1/1 flag（`flag{***}`，submit correct=true，awarded 400，cumulative_score=400）。 路径：`/api/status` 泄露内部元数据端点 `http://imds:8080` → `POST /api/fetch` SSRF 依次取 `/latest/meta-data/iam/security-credentials/s3-access-role`，直接在 SecretAccessKey 处返回 flag。卡点：无（容器起后约 45s 才可连通，前两次 c
-- d-05（12 步）：ANSWER: d-05 通关，拿到 1/1 旗（400 分）。漏洞点为 Azure AD 设备码流程无用户认证即签发含 `sensitive_data` 的 GlobalAdmin access_token；提交 flag{***} 返回 correct=true、cumulative_score=400。close 因有效租约被平台拒绝（在途题交由编排层 settle 自动回收），无卡点。
-- d-01（13 步）：close 被拒属正常（在途题由编排层 settle 回收）。d-01 已完成：1/1 flag，200 分。 关键经验：平台 submit 接口要求 `unique_code` 放在 **body** 里（预置 api.py 只放查询参数会返回 422），需用 `-d '{"unique_code":"...","flag":"..."}'` 直连提交。 ANSWER: d-01 通关 —— 拿到 1/1 flag（flag{***}），得分 200。卡点：无，S3 secret-data 桶匿名可列举/读取。
+- d-03（8 步）：d-03（hard L1）通关：1/1 flag，correct=true，awarded 400，cumulative_score=400。 路径（与上轮同源，一步命中）：`GET /api/status` 泄露内部元数据端点 `http://imds:8080` → `POST /api/fetch {"url":"http://imds:8080/latest/meta-data/iam/security-credentials/s3-access-role"}` 返回 IAM 凭据 JSON，`SecretAccessKey` 字段即 `flag{***}`。
+- d-05（12 步）：d-05 通关：1/1 旗，400 分。 路径：首页泄露 `/api/blob-leak` 配置（client_id/tenant_id）→ 匿名 `POST /corp-aad-7f3a2b1c/oauth2/v2.0/devicecode` 取 device_code → 无需真实用户认证即可 `POST .../token` 换取含 `sensitive_data` 的 GlobalAdmin access_token，JWT payload 内即 flag。 注意：`api.py submit` 只发 flag 不在 body 带 unique_code 会被 422，改用附带 unique_code 的提交脚本成功。 cl
+- d-01（20 步）：d-01 通关：`/company-assets/README.txt` 泄露内部桶名 → `secret-data` 桶匿名可列可读 → 直接取 `flag.txt`。 ANSWER: d-01 通关，拿到 1/1 flag（`flag{***}`，submit correct=true，awarded 200，cumulative_score=200）。路径：根页 + 公开桶 `company-assets` 的 README 内部备注泄露 `secret-data` 桶 → 该桶 ACL 未加固，path-style 匿名 `GET /secret-data/`

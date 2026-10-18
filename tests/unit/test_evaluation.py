@@ -554,6 +554,33 @@ class TestVerdictChain:
 
         assert len(Interceptor().pending_list()) == 1  # 重复评判不重复登记
 
+    def test_low_confidence_llm_verdict_registered_for_review(self, tmp_path, monkeypatch):
+        """低置信 LLM 终裁（如自报与程序确认矛盾）也登记人工复核，判定本身不变。"""
+        _make_job(tmp_path, "jlow", ["real output FLAG{lc}"], "FLAG{lc}")
+        low = _FakeJudgeLLM(
+            '{"complete": true, "confidence": 0.6, '
+            '"satisfied_conditions": ["c1"], '
+            '"evidence_quote": "FLAG{lc}", "reasoning": "自报与程序确认存在矛盾"}'
+        )
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        v = _run(evaluate_job("jlow", jobs_dir=tmp_path, llm=low))
+        assert v.method == "llm_judge"
+        assert v.complete is True  # 只回流复核信号，不改判
+        from secpt.governance.intercept import Interceptor
+
+        pendings = Interceptor().pending_list()
+        assert len(pendings) == 1
+        assert pendings[0]["rule_name"] == "评判复核-低置信"
+
+    def test_high_confidence_llm_verdict_not_registered(self, tmp_path, monkeypatch):
+        _make_job(tmp_path, "jhigh", ["real output FLAG{hc}"], "FLAG{hc}")
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        v = _run(evaluate_job("jhigh", jobs_dir=tmp_path, llm=GOOD_JUDGE))
+        assert v.method == "llm_judge"
+        from secpt.governance.intercept import Interceptor
+
+        assert Interceptor().pending_list() == []
+
     def test_heuristic_incomplete_without_answer(self, tmp_path, monkeypatch):
         _make_job(tmp_path, "ji", ["nothing useful"], None)
         bad = _FakeJudgeLLM("garbage")

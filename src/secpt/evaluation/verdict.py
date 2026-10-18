@@ -9,6 +9,7 @@
 产出：
 - var/jobs/<job_id>/verdict.json
 - events.jsonl 追加 verdict 事件
+- 低可信判定（heuristic 兜底 / llm_judge 置信 < 0.70）登记人工复核队列（不改判定）
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ from secpt.evaluation.evidence import collect_evidence
 from secpt.evaluation.jev import JevGate
 from secpt.evaluation.judge import JudgeUnavailable, LLMJudge
 from secpt.evaluation.rubric import Rubric, build_rubric, load_rubric_file
+
+# LLM 终裁置信低于该值（如自报与程序确认矛盾时 judge 给出的 0.6 档）→ 登记人工复核。
+# 目的不是改判，是让分歧回流校准信号（低置信 COMPLETE 的误报率由此可度量）。
+_LOW_CONF_REVIEW = 0.70
 
 
 @dataclass
@@ -240,11 +245,13 @@ async def _evaluate(
     _persist(verdict, job_dir)
     if verdict.method == "heuristic":
         _register_heuristic_review(verdict)
+    elif verdict.method == "llm_judge" and verdict.confidence < _LOW_CONF_REVIEW:
+        _register_heuristic_review(verdict, rule="评判复核-低置信")
     return verdict
 
 
-def _register_heuristic_review(verdict: Verdict) -> None:
-    """heuristic 兜底 verdict（低置信，未经真实 judge）登记 intercept pending 人工复核队列。
+def _register_heuristic_review(verdict: Verdict, rule: str = "评判复核-heuristic") -> None:
+    """低可信 verdict（heuristic 兜底 / LLM 终裁低置信）登记 intercept pending 人工复核队列。
 
     幂等：同一 job 已有未结算复核记录则跳过。评判是观测层——登记失败绝不影响 verdict。
     """
@@ -256,7 +263,7 @@ def _register_heuristic_review(verdict: Verdict) -> None:
             n = c.execute(
                 "SELECT COUNT(*) n FROM intercept_pending"
                 " WHERE job_id=? AND rule_name=? AND status='pending'",
-                (verdict.job_id, "评判复核-heuristic"),
+                (verdict.job_id, rule),
             ).fetchone()["n"]
         if int(n) > 0:
             return
@@ -277,12 +284,12 @@ def _register_heuristic_review(verdict: Verdict) -> None:
                     "verdict_review",
                     preview[:200],
                     -1,
-                    "评判复核-heuristic",
+                    rule,
                     time.time(),
                 ),
             )
         print(
-            f"[verdict] ⏸ heuristic 兜底已登记人工复核 #{pid}：{preview[:120]}"
+            f"[verdict] ⏸ 已登记人工复核 #{pid}（{rule}）：{preview[:120]}"
             f"（复核后 secpt approve {pid}）"
         )
         with contextlib.suppress(Exception):
@@ -290,7 +297,7 @@ def _register_heuristic_review(verdict: Verdict) -> None:
 
             notify(
                 "approval_pending",
-                f"secpt 评判待复核 #{pid}（heuristic 兜底）",
+                f"secpt 评判待复核 #{pid}（{rule}）",
                 f"{preview[:200]}\n人工复核后：secpt approve {pid}",
             )
     except Exception as e:

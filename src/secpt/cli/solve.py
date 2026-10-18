@@ -717,7 +717,10 @@ def solve_cmd(
         True, "--sandbox/--no-sandbox", help="bash 在 Docker 容器内执行（宿主隔离；需镜像）"
     ),
     vpn: bool = typer.Option(
-        False, "--vpn", help="任务前自动拉起并验证 VPN（SECPT_VPN_TYPE/CONFIG 配置）"
+        # VPN 总开关（PA 部署化）：SECPT_VPN=1 等效 --vpn，默认关；--no-vpn 可显式压过
+        os.environ.get("SECPT_VPN", "0") == "1",
+        "--vpn/--no-vpn",
+        help="任务前自动拉起并验证 VPN（开关 SECPT_VPN=0/1；连接参数 SECPT_VPN_TYPE/CONFIG）",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:

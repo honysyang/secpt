@@ -6,9 +6,10 @@ FROM secpt-sandbox
 RUN apt-get update && apt-get install -y --no-install-recommends \
         patchelf \
     && pip3 install --break-system-packages --no-cache-dir \
-        pwntools ROPgadget \
+        pwntools ROPgadget z3-solver \
     && rm -rf /var/lib/apt/lists/*
-# checksec/cyclic 由 pwntools 提供；qemu 用题目自带二进制（不进镜像）
+# checksec/cyclic 由 pwntools 提供；z3 做约束求解（f2-05 式"手搓解密器"的正规化）；
+# qemu 用题目自带二进制（不进镜像）
 
 WORKDIR /work
 USER secpt

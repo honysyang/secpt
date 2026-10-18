@@ -21,6 +21,15 @@ CORE_TOOLS = frozenset({"bash", "read_file", "list_dir", "write_file"})
 DEFAULT_ROLE = "渗透测试专家，正在解一道 CTF"
 DEFAULT_CONSTRAINTS = ["不要扫描题面外的网段。"]
 
+# 全局提效约束（engine_runner 装配 constraints 时统一追加，不逐 profile 重复）：
+# 引擎每步已支持并行执行多个 tool_calls（_PARALLEL_MAX=4），瓶颈是模型习惯一轮
+# 只发一个——每多发一个 tool_call 省一次模型往返（单步 5-15s，步数是延迟大头）。
+PROFILE_BATCH_CONSTRAINT = (
+    "一轮多个动作：相互独立的操作（并行探测多个路径/读多个文件/跑互不依赖的命令）"
+    "在同一轮 assistant 消息里一次发出多个 tool_calls，引擎会并行执行；"
+    "只有存在依赖关系（下一步的参数来自上一步的结果）才拆到下一轮。"
+)
+
 
 class Terminator(BaseModel):
     """终止条件：flag 类靠 flag_regex；budget 类靠预算 + stop_condition 提示。"""

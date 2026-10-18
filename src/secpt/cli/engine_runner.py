@@ -26,8 +26,41 @@ from secpt.core.job.models import JobRecord, TaskSpec
 from secpt.core.job.resume import jobs_dir, make_run_config, read_task_snapshot, write_task_snapshot
 from secpt.core.job.rounds import load_latest_round
 from secpt.core.job.store import JobStore
+from secpt.core.profile.loader import PROFILE_BATCH_CONSTRAINT
 from secpt.core.profile.render import DEFAULT_CONSTRAINTS, load_prior, render_system_extra
 from secpt.runtime import engine as _engine
+
+
+def _with_batch_constraint(constraints: list[str]) -> list[str]:
+    """追加全局提效约束（一轮并发多工具）；幂等——已有"一轮"字样则不重复。"""
+    out = list(constraints)
+    if not any("一轮" in c for c in out):
+        out.append(PROFILE_BATCH_CONSTRAINT)
+    return out
+
+
+# 备选工具池清单（SECPT_TOOL_POOL=1 时可被引擎内 request_tools 运行时启用）。
+# 浏览器不进池（6 个 schema 占 token，仍走 SECPT_BENCH_BROWSER 显式门控）。
+_TOOL_POOL_KIT = (
+    "http_request",
+    "session",
+    "recon_parse",
+    "oob",
+    "analyze_binary",
+    "crypto_pubkey",
+    "pwn_checksec",
+)
+
+# PA4.2：意图级工具调用硬上限（按角色分档；0=不限）。主力角色 100——批调用
+# （一轮多 tool_calls）下 40 步意图可合法产生 ~80 次调用，100 只拦真正的失控；
+# verify/report 是收敛角色，20 足够且必须收敛。SECPT_MAX_TOOL_CALLS 可全局覆盖。
+_ROLE_TOOL_CALL_CAPS = {
+    "exploit": 100,
+    "recon": 100,
+    "lateral": 100,
+    "verify": 20,
+    "report": 20,
+}
 
 
 def _ensure_model_ready(model: str | None = None) -> None:
@@ -180,6 +213,13 @@ def run_engine(
     _yp, _pt = discover_plugins()
     plugin_names = set(_yp) | set(_pt)
     extra_tools = engine_tools_for([t for t in stage_tools if t in plugin_names])
+    # 备选工具池（SECPT_TOOL_POOL=1，benchmark 战役默认开）：不默认挂载省 schema，
+    # 引擎内 request_tools 运行时启用——意图内发现新攻击面（如二进制/需带外）可升级
+    pool_tools: dict = {}
+    if os.environ.get("SECPT_TOOL_POOL", "0") == "1":
+        pool_tools = engine_tools_for(
+            [t for t in _TOOL_POOL_KIT if t not in extra_tools and t in plugin_names]
+        )
     # 内置四工具（CORE_TOOLS）与 report_finding 走结构化通道，绝不进 bash 白名单——
     # profile tools 里的 "bash" 是内置工具名，误并入白名单会放开 bash -lc _shell 解释
     from secpt.core.profile.loader import CORE_TOOLS
@@ -214,6 +254,14 @@ def run_engine(
         max_steps=prof.budget.steps if max_steps is None else max_steps,
         max_wall_s=prof.budget.wall_s if max_wall_s is None else max_wall_s,
     )
+    # PA4.2：工具调用硬上限——SECPT_MAX_TOOL_CALLS 全局覆盖（0/off=关），
+    # 未设时按角色分档；无角色（单链 CTF）不限，保持既有行为
+    _cap_env = os.environ.get("SECPT_MAX_TOOL_CALLS", "").strip().lower()
+    if _cap_env and _cap_env not in ("0", "off", "none"):
+        with contextlib.suppress(ValueError):
+            cfg.max_tool_calls = int(_cap_env)
+    elif _cap_env == "":
+        cfg.max_tool_calls = _ROLE_TOOL_CALL_CAPS.get(stage_role or "", 0)
     # 顶层单任务路径开启事件驱动恢复（断点续跑防重启绕预算）；
     # 编排层 stage 直构 RunConfig 保持默认 False（stage 链独立预算，防串扰）
     cfg.autoresume = True
@@ -253,7 +301,7 @@ def run_engine(
     cfg.audit = AuditLogger(
         str(Path(os.environ.get("SECPT_VAR", "var")) / "audit" / f"{job_id}.jsonl")
     )
-    constraints = list(prof.constraints) or [DEFAULT_CONSTRAINTS]
+    constraints = _with_batch_constraint(list(prof.constraints) or [DEFAULT_CONSTRAINTS])
     stop_cond = stage_stop or prof.terminator.stop_condition
     if stop_cond:
         constraints.append(stop_cond)
@@ -374,6 +422,7 @@ def run_engine(
                     llm=llm,
                     hooks=hooks,
                     extra_tools=extra_tools or None,
+                    tool_pool=pool_tools or None,
                     verbose=verbose,
                 ).run()
             )
@@ -447,7 +496,7 @@ def resume_engine(
         from secpt.core.profile.render import render_system_extra as _rse
 
         _prof = load_profile(spec.task_type)
-        _cons = list(_prof.constraints) or [DEFAULT_CONSTRAINTS]
+        _cons = _with_batch_constraint(list(_prof.constraints) or [DEFAULT_CONSTRAINTS])
         if _prof.terminator.stop_condition:
             _cons.append(_prof.terminator.stop_condition)
         cfg.system_extra = _rse(

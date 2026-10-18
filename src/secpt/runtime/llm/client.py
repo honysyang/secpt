@@ -47,6 +47,12 @@ _PROVIDERS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "OPENAI_API_KEY",
         ("OPENAI_BASE_URL", "OPENAI_API_BASE"),
     ),
+    # GLM（智谱开放平台，OpenAI 兼容端点）：模型名 glm/<model> 即路由至此
+    "glm": (
+        "https://open.bigmodel.cn/api/paas/v4",
+        "ZHIPU_API_KEY",
+        ("ZHIPU_BASE_URL",),
+    ),
 }
 
 # 兼容旧调用：裸模型名默认归属的 provider

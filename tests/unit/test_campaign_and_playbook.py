@@ -319,3 +319,34 @@ class TestIntentTools:
         assert it is not None
         assert it.tools == "http_request,session"
         assert it.asset_scope == "e1-01"
+
+
+class TestCampaignRoundModel:
+    """轮间换脑：第 2+ 轮未完成题用升级模型重打（跨厂商第二脑视角）。"""
+
+    def test_first_round_keeps_primary(self, monkeypatch):
+        from secpt.core.orchestrator.benchmark import _campaign_round_model
+
+        monkeypatch.setenv("SECPT_ESCALATE_MODEL", "glm/glm-4.6")
+        assert _campaign_round_model("deepseek-v4-pro", 1) == "deepseek-v4-pro"
+
+    def test_later_rounds_rotate_to_escalate(self, monkeypatch):
+        from secpt.core.orchestrator.benchmark import _campaign_round_model
+
+        monkeypatch.setenv("SECPT_ESCALATE_MODEL", "glm/glm-4.6")
+        assert _campaign_round_model("deepseek-v4-pro", 2) == "glm/glm-4.6"
+        assert _campaign_round_model("deepseek-v4-pro", 3) == "glm/glm-4.6"
+
+    def test_rotate_off_keeps_primary(self, monkeypatch):
+        from secpt.core.orchestrator.benchmark import _campaign_round_model
+
+        monkeypatch.setenv("SECPT_ESCALATE_MODEL", "glm/glm-4.6")
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROTATE_MODEL", "0")
+        assert _campaign_round_model("deepseek-v4-pro", 2) == "deepseek-v4-pro"
+
+    def test_no_escalate_or_same_model_keeps_primary(self, monkeypatch):
+        from secpt.core.orchestrator.benchmark import _campaign_round_model
+
+        monkeypatch.delenv("SECPT_ESCALATE_MODEL", raising=False)
+        assert _campaign_round_model("deepseek-v4-pro", 2) == "deepseek-v4-pro"
+        assert _campaign_round_model("glm/glm-4.6", 2) == "glm/glm-4.6"  # 同名不空转

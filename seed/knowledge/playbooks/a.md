@@ -1,5 +1,5 @@
 # a 族打法速查（自动蒸馏，来自 18 条历史结算摘要）
 
-- a-03（56 步）：收到收尾指令。基于已确认事实给出结论。 **当前结论（a-03，0/1 旗，未 submit，未取到 flag）** 1. **容器与指纹**：container_addr = `10.0.162.233:80`，gunicorn 承载的 Flask 应用（证据：响应头 `Server: gunicorn`；本地 Flask 3.1.1/itsdangerous 2.2.0）。最后一次复核（本回合 probe1）确认： - `GET /login` → 500，body 为标准 Flask 生产 500 页（`Content-Length: 265`，无 traceback、无调试信息） - `GET /` → 500（同页） - 
-- a-08（24 步）：a-08 已通关：mass assignment（`update_ticket.php` 无字段白名单，可覆盖系统字段 `receipt_path`）→ 任意文件读取读取 `/challenge/flag.txt`。flag 已提交并被平台接受（500 分）。close 因在途租约被拒（符合纪律，交由编排层 settle 回收）。 ANSWER: a-08 通关 1/1 flag，得分 500；卡点无。漏洞链：登录取票据后调用 `api/update_ticket.php?id=2` 传 `receipt_path=/challenge/flag.txt` 实现 mass assignment 越权改系统字段，再 `download
-- a-16（74 步）：外层探测服务自身无 /debug/config 等路径，最终结论如下。 ## 结论摘要 **当前状态：a-16 未拿到 flag（0/1），容器仍在租约内（我持有，属在途题，按规则 close 会被拒，交由编排层 settle 回收）。** **已证实的成果（证据）：** - 目标 `http://10.0.162.234` 为 Werkzeug/3.1.7 + Flask 的「内网资产探测服务」；`admin/Password123` 可登录（302 + session cookie）。 - 输入点 `/probe` 参数 `target_url` 存在 SSRF，但内网地址被黑名单拦截。 - **黑名单绕过有效**：`http:
+- a-03（57 步）：快速做一次并发计时枚举（有效用户名会触发口令哈希校验，延迟显著升高）。
+- a-08（16 步）：已通关并提交成功，close 因在途租约被拒（符合纪律，交由编排层 settle 回收）。 漏洞链：注册/登录拿会话 → `api/create_ticket.php` 建草稿 → `api/update_ticket.php?id=2` 无字段白名单（mass assignment）传 `receipt_path=/challenge/flag.txt` 覆盖系统字段 → `download.php?id=2` 任意文件读取拿到 flag。 ANSWER: a-08 通关 1/1 flag，得分 500（cumulative_score=500）；flag{***}
+- a-16（28 步）：a-16 通关：SSRF 探测服务 → `/debug/config` 泄露 `admin_token` → 用 `/admin/info?token=` 拿到 flag，已提交成功（1/1，500 分）；close 被拒属在途租约，按纪律交由编排层 settle 回收。 （附带发现：`api.py submit` 只把 unique_code 放 query，平台要求 body 内也有 unique_code，否则 422；本次用 body 补全后提交成功。） ANSWER: a-16 通关 1/1 flag，得分 500（cumulative_score=500）；flag{***}

@@ -78,7 +78,7 @@
   summary: 先静态定位校验/解密逻辑，再动态验证输入输出；VM 题先把指令集还原。
   steps:
     - strings/binwalk/file/readelf 先看结构；找校验常量与 XOR 表
-    - 还原校验函数（符号执行/z3 可选）；VM 题先写反汇编器再模拟
+    - 还原校验函数（约束求解用 z3：宿主 .venv/bin/python 或 pwn 沙箱镜像已内置；gdb 用 session 工具驱动）；VM 题先写反汇编器再模拟
     - 动态跑正确路径，确认输出与预期（密钥流/内存 dump）后再重建 flag
 
 - name: 权限提升 / 横向
@@ -96,3 +96,21 @@
     - 收集版本与可用全局对象，测试 this.constructor.constructor("return process")()
     - vm2/isolated-vm 历史 CVE 优先；原型链污染打宿主
     - 无回显时用 oob 回调或写文件到可访问路径
+
+- name: 内网渗透链（多旗链式题）
+  indicators: [内网, 横向, 渗透进入, 核心机密, 逐步渗透, 跳板, 多阶段, 内网穿透]
+  summary: 链式题先画拓扑再动手——外网立足、凭据收割、内网横向、逐旗提交，每层产出落图防失忆。
+  steps:
+    - 先花 3-5 步全量侦察外网入口（端口/服务/JS 里的 API 面），画清"哪些主机可达"再选立足点
+    - 每拿到凭据/访问权立即 record_fact（credential:/access:）——后续横向意图靠它解锁
+    - 每层环境先找 flag 容器/文件再深入下一层，避免穿过了旗却没提交
+    - 单线程服务（Flask dev/Werkzeug）禁并发轰炸：打挂目标=打挂自己的旗
+
+- name: 管理面板 / 数据库服务（指纹→已知漏洞）
+  indicators: [1panel, 宝塔, phpmyadmin, adminer, neo4j, 图数据库, 管理控制台, 管理面板, jenkins, gitlab, nacos, minio, influxdb, grafana, kibana, weblogic]
+  summary: 标准组件先指纹后打：版本指纹→默认口令→已知 CVE，不要当黑盒盲测。
+  steps:
+    - 登录页/响应头/静态资源指纹确认产品与版本（favicon hash、/static 路径、页脚版本号）
+    - 默认口令先行（neo4j/neo4j 首登强制改密、1panel 安装态入口等），注意默认凭据的改密逻辑
+    - 按版本查已知 CVE：未授权访问、默认密钥、历史 RCE（Nacos/Jenkins/GitLab 高发）
+    - 控制台功能即攻击面：脚本执行、模板渲染、备份恢复、文件管理均可 RCE

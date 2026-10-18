@@ -75,8 +75,28 @@ def make_intel_tools(store: IntelStore | None = None, *, job_id: str, box: dict 
     st = store or IntelStore()
     box = box if box is not None else {"n": 0}
 
+    def _noise_host(value: str) -> bool:
+        """平台/VPN 探针/本机地址不入资产图（1036 复盘：探针与平台被记成 asset）。"""
+        import os
+        from urllib.parse import urlsplit
+
+        raw = (value or "").strip()
+        host = urlsplit(raw if "//" in raw else f"http://{raw}").hostname or ""
+        host = host.lower()
+        if not host or host in ("localhost", "127.0.0.1", "0.0.0.0"):
+            return True
+        for env in ("BENCHMARK_BASE_URL", "SECPT_VPN_PROBE_URL"):
+            v = os.environ.get(env, "").strip()
+            if v:
+                ph = urlsplit(v if "//" in v else f"http://{v}").hostname or ""
+                if ph and host == ph.lower():
+                    return True
+        return False
+
     async def observe_asset(args: dict) -> str:
         try:
+            if _noise_host(str(args.get("value") or "")):
+                return f"SKIP: 平台/探针/本机地址不入图（{args['value'][:60]}）"
             parent_id = None
             if args.get("parent") and args.get("parent_type"):
                 parent_id = st.find_asset(args["parent_type"], args["parent"])

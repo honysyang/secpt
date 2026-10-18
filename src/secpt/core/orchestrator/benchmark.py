@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import threading
 import time
 import urllib.error
@@ -116,6 +117,29 @@ _BIN_HINTS = (
     "crypto",
 )
 
+# 面板/数据库/中间件信号 → web_search 装配（c 族"指纹→已知漏洞"的检索出口）。
+# 仅在已配置检索后端（TAVILY/BRAVE/SEARXNG）时才挂——没后端时挂了只是死 schema。
+_WEBSEARCH_HINTS = (
+    "1panel",
+    "宝塔",
+    "phpmyadmin",
+    "adminer",
+    "neo4j",
+    "图数据库",
+    "管理控制台",
+    "管理面板",
+    "控制面板",
+    "jenkins",
+    "gitlab",
+    "nacos",
+    "minio",
+    "influxdb",
+    "grafana",
+    "kibana",
+    "weblogic",
+    "中间件",
+)
+
 
 _OOB_HINTS = (
     "ssrf",
@@ -138,7 +162,10 @@ def tools_for_challenge(description: str) -> str:
 
     - web 族：http_request/session（结构化请求 + 常驻会话）+ recon_parse（扫描结果结构化）；
     - 含 SSRF/XXE/盲注/外带信号：额外启用 oob（带审计回调监听，盲验证）；
-    - 二进制/逆向族：analyze_binary/crypto_pubkey/pwn_checksec + recon_parse；
+    - 二进制/逆向族：analyze_binary/crypto_pubkey/pwn_checksec + recon_parse + session
+      （pty 驱动 gdb 动态调试）；
+    - 面板/数据库/中间件信号（_WEBSEARCH_HINTS）：web_search（需已配检索后端，
+      否则不挂——c 族"指纹→已知漏洞"的检索出口）；
     - 浏览器：仅 SECPT_BENCH_BROWSER=1 且 web 族且 playwright 可用时启用
       （6 个 browser_* schema 占 token，默认关）。
     只加轻量内置插件，不改变治理链。
@@ -149,9 +176,15 @@ def tools_for_challenge(description: str) -> str:
     if is_web:
         tools += ["http_request", "session", "recon_parse"]
     if any(k in low for k in _BIN_HINTS):
-        tools += ["analyze_binary", "crypto_pubkey", "pwn_checksec", "recon_parse"]
+        tools += ["analyze_binary", "crypto_pubkey", "pwn_checksec", "recon_parse", "session"]
     if is_web and any(k in low for k in _OOB_HINTS):
         tools.append("oob")
+    if any(k in low for k in _WEBSEARCH_HINTS) and (
+        os.environ.get("TAVILY_API_KEY")
+        or os.environ.get("BRAVE_API_KEY")
+        or os.environ.get("SECPT_SEARCH_URL")
+    ):
+        tools.append("web_search")
     if is_web and os.environ.get("SECPT_BENCH_BROWSER", "0") == "1":
         import importlib.util
 
@@ -327,6 +360,8 @@ BENCH_WORKER_OBJECTIVE = """【评测跑分循环 · 你的当前任务】
 烧掉预算的 2/3 仍未出 flag 时你必须先做决策（hint 或主动收尾换题），不要等系统强停。
 开局规范（编排层预置，勿浪费步数）：
 - api.py 已在你的工作区预置好，直接 `python3 api.py ...` 使用，**不要重写**；
+- probe.py 已预置（通用 HTTP 探测，输出绝对 URL 自动入资产图）——路径探测/
+  端点快筛优先用它，**不要每个意图手写 http 客户端脚本**；
 - 环境变量探测直接跑 `env`（白名单内），**不要加管道/重定向**（会被拦烧步）；
 - start 返回 container_addr 后，用 `python3 api.py wait <ip:port>` 自适应等端口就绪
   （内部每 2s TCP 探测、最长 40s）——**不要盲等 `sleep 20`**（1323 实测整场 120 次
@@ -335,8 +370,9 @@ BENCH_WORKER_OBJECTIVE = """【评测跑分循环 · 你的当前任务】
 **也不 close 自己正在解的题再想重开**（close 后 3 槽被兄弟占满就永远 start 不回来，
 1323 的 c-06 即死于此）：容器异常先重试原 addr/探测端口，确实要重启时把需求写进
 ANSWER 交给编排层调度（它持有全局槽位视图）。
-撞平台 409（配额/状态类）时：先 `python3 api.py holders` 看全局占用再决策，
-等租约过期或换题，不要对同一条命令反复重试。
+撞平台 409（配额/状态类）时：`api.py start` 已内置自动腾位重试（自动清理
+结算残留/孤儿容器后再试一次），返回里带 auto_healed 字段即说明已自愈；
+若仍 409 说明槽位全是在途题——先换题打，稍后回来重试，不要反复重试同一条命令。
 保留域纪律：example/example.com/.invalid/.test 等保留域与带 SECPT- 标记的 URL 是平台
 测试/金丝雀或占位地址，**不要主动请求**（含 DNS 探测/脚本内 urlopen）；外带类验证一律
 只用平台下发的 container_addr 或题面明确指定的平台通道。
@@ -422,6 +458,36 @@ def ledger_holders():
         return {}  # 账本不可读时不拦（fail-open，与编排层口径一致）
 
 
+def ledger_close_candidates():
+    """可安全腾位的候选（api.py start 409 自愈用）：已完成生命周期或租约已过期的登记项。
+
+    - solved/exhausted/failed：生命周期已结束，容器属结算滞后残留，关了不伤在途；
+    - claimed/running 但租约已过期：worker 已死的孤儿容器。
+    活租约（含同进程兄弟 worker）绝不出现在这里——那是别人的在途题。
+    """
+    try:
+        import sqlite3
+
+        path = os.environ.get(
+            "SECPT_LEDGER_DB",
+            os.path.join(os.environ.get("SECPT_VAR", "var"), "benchmark_ledger.sqlite"),
+        )
+        if not os.path.exists(path):
+            return []
+        conn = sqlite3.connect(path)
+        now = time.time()
+        rows = conn.execute(
+            "SELECT unique_code, status FROM challenges"
+            " WHERE status IN ('solved','exhausted','failed')"
+            " OR (status IN ('claimed','running') AND lease_until <= ?)"
+            " ORDER BY updated_at ASC LIMIT 2",
+            (now,),
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+    except Exception:
+        return []
+
+
 def health():
     """A3 三重健康探针：VPN 网关 / 平台 API / 任务是否已结束。
 
@@ -464,12 +530,24 @@ def main():
     elif cmd == "start" and rest:
         out = call("POST", f"/openapi/v1/challenges/start?unique_code={rest[0]}")
         if isinstance(out, dict) and out.get("error") == 409:
-            # 409 时附账本快照：让模型基于全局状态决策（槽位被谁占/哪些是本 worker 的僵尸）
+            # 409 自愈：自动腾位重试（模型零步数）——只关"结算滞后残留/孤儿"，
+            # 活租约（含兄弟 worker 的在途题）由 ledger_close_candidates 挡在外面
+            healed = []
+            for code, st in ledger_close_candidates():
+                r = call("POST", f"/openapi/v1/challenges/close?unique_code={code}")
+                if not (isinstance(r, dict) and r.get("error")):
+                    healed.append(f"{code}({st})")
+            if healed:
+                time.sleep(1)
+                out = call("POST", f"/openapi/v1/challenges/start?unique_code={rest[0]}")
+                out["auto_healed"] = healed
+        if isinstance(out, dict) and out.get("error") == 409:
+            # 自愈后仍 409 = 槽位全是在途题：交还模型决策（附全局占用快照）
             out["holders"] = ledger_holders()
             out["hint"] = (
-                "平台并发上限冲突：先 python3 api.py holders 查看占用。"
-                "claimed=已预留未起容器；running=容器在途（可能含本进程兄弟 worker）。"
-                "在途题一律不可 close，等其 settle 自动回收；只有租约过期的孤儿才可清理。"
+                "平台并发上限冲突且无孤儿可清理。claimed=已预留未起容器；"
+                "running=容器在途（可能含本进程兄弟 worker）。在途题一律不可 close，"
+                "等其 settle 自动回收；先打别的题，稍后回来重试 start。"
             )
     elif cmd == "wait" and rest:
         # 自适应就绪等待：start 返回 container_addr 后用它，端口一通立即返回——
@@ -524,6 +602,86 @@ def main():
     else:
         sys.exit(__doc__)
     print(json.dumps(out, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+# 通用 HTTP 探测模板（与 api.py 同思路：编排层预置省脚手架步）。
+# 每行输出绝对 URL——引擎 finding 正则识别后由 GraphScribe 自动落资产图，
+# 自写探测脚本（相对路径输出）是图记忆断粮的主因（1036 复盘）。
+PROBE_PY_TEMPLATE = '''#!/usr/bin/env python3
+"""通用 HTTP 探测（编排层预置，勿重写）。输出绝对 URL，图记忆自动摄取。
+
+用法:
+  python3 probe.py <url> [url2 ...]                # GET 多个 URL（并发 8 线程）
+  python3 probe.py -X POST <url> '<json_body>'     # POST JSON
+  python3 probe.py -H 'Cookie: a=b' -H 'X: 1' <url>...
+"""
+import http.client
+import re
+import ssl
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
+
+
+def request(method, url, body=None, extra=None, timeout=8):
+    u = urlsplit(url)
+    port = u.port or (443 if u.scheme == "https" else 80)
+    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    conn = cls(u.hostname, port, timeout=timeout)  # TLS 校验默认开启（红线，不关）
+    headers = {"User-Agent": "probe/1.0", "Accept": "*/*"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    headers.update(extra or {})
+    conn.request(method, u.path or "/", body=body, headers=headers)
+    r = conn.getresponse()
+    data = r.read(8192)
+    hd = {k.lower(): v for k, v in r.getheaders()}
+    conn.close()
+    return r.status, hd, data
+
+
+def probe(url, method="GET", body=None, extra=None):
+    try:
+        status, hd, data = request(method, url, body=body, extra=extra)
+        m = re.search(rb"<title[^>]*>(.*?)</title>", data, re.S | re.I)
+        title = m.group(1).decode("utf-8", "replace").strip()[:60] if m else ""
+        print(
+            f"[{status}] {url} len={len(data)}"
+            + (f" loc={hd.get('location', '')}" if hd.get("location") else "")
+            + (f" title={title}" if title else ""),
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[ERR] {url} {e}", flush=True)
+
+
+def main():
+    args = sys.argv[1:]
+    method, body, extra, urls = "GET", None, {}, []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-X" and i + 1 < len(args):
+            method = args[i + 1]
+            i += 2
+        elif a == "-p" and i + 1 < len(args):
+            body, method = args[i + 1], "POST"
+            i += 2
+        elif a == "-H" and i + 1 < len(args):
+            k, _, v = args[i + 1].partition(":")
+            extra[k.strip()] = v.strip()
+            i += 2
+        else:
+            urls.append(a)
+            i += 1
+    if not urls:
+        sys.exit(__doc__)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(lambda u: probe(u, method, body, extra), urls))
 
 
 if __name__ == "__main__":
@@ -704,6 +862,9 @@ async def run_benchmark(
         )
     # 状态同步注入：账本路径 + 本 worker 身份（api.py holders/close 所有权判定的数据源）
     _export_state_env(led)  # P0-1：真正导出到 os.environ（api.py 运行期读的就是它）
+    # 备选工具池默认开（战役内 worker 同进程）：agent 意图内发现新攻击面时用
+    # request_tools 运行时启用池内工具，不再受"题面关键词一次性装配"限制
+    os.environ.setdefault("SECPT_TOOL_POOL", "1")
     objective += (
         "\n\n【共享账本（状态同步真相源，api.py holders/close 已内置读取，勿自行翻库）】\n"
         f"SECPT_LEDGER_DB={os.environ['SECPT_LEDGER_DB']}\n"
@@ -782,6 +943,9 @@ async def run_benchmark(
             api = ws / "api.py"
             if not api.exists():  # 模型自定义过则不覆盖（resume 场景尊重现场）
                 api.write_text(API_PY_TEMPLATE, encoding="utf-8")
+            probe = ws / "probe.py"
+            if not probe.exists():  # 通用 HTTP 探测（输出绝对 URL 喂资产图）
+                probe.write_text(PROBE_PY_TEMPLATE, encoding="utf-8")
         except Exception as e:
             print(f"[benchmark] api.py 预落盘失败（忽略，模型自写）: {e}", flush=True)
         if uc:
@@ -933,6 +1097,19 @@ def _save_campaign_state(path: Path, state: dict) -> None:
         tmp.replace(path)
 
 
+def _campaign_round_model(model: str | None, n: int) -> str | None:
+    """轮间换脑（PA）：第 2+ 轮未完成题用升级模型重打——换路线之外再换"脑子"。
+
+    第 1 轮已带 digest 记忆换路线，但同源模型盲区相同；第 2 轮起切
+    SECPT_ESCALATE_MODEL（跨厂商第二脑）给出异源视角。SECPT_CAMPAIGN_ROTATE_MODEL=0 关。
+    """
+    if n > 1 and os.environ.get("SECPT_CAMPAIGN_ROTATE_MODEL", "1") != "0":
+        alt = os.environ.get("SECPT_ESCALATE_MODEL", "").strip()
+        if alt and alt != model:
+            return alt
+    return model
+
+
 async def run_benchmark_campaign(
     spec: TaskSpec,
     *,
@@ -964,6 +1141,23 @@ async def run_benchmark_campaign(
 
         build_playbooks()
         distill_experiences()
+
+    # P5（1036 复盘）：中断优雅终态——默认 KeyboardInterrupt 直接穿透，不做任何
+    # 租约回收，幽灵租约最长挡别人 900s。先清理租约再抛 KeyboardInterrupt，
+    # 保持中断语义不变；非主线程注册失败则静默降级（TTL 兜底）。
+    def _on_signal(signum, _frame):
+        with contextlib.suppress(Exception):
+            ChallengeLedger().release_own_claims(reason=f"campaign sig{signum} 中断")
+        print(
+            f"[campaign] 收到信号 {signum}：本进程租约已释放，退出"
+            f"（{len(state['rounds'])} 轮记录）",
+            flush=True,
+        )
+        raise KeyboardInterrupt
+
+    with contextlib.suppress(Exception):
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(_sig, _on_signal)
 
     for n in range(1, rounds + 1):
         if n > 1:
@@ -1005,7 +1199,14 @@ async def run_benchmark_campaign(
         print(f"[campaign] ===== 第 {n}/{rounds} 轮开始 =====", flush=True)
         _round_t0 = time.time()
         _deadline = (t0 + wall_s) if wall_s > 0 else None
-        summary = await run_benchmark(spec, llm=llm, model=model, deadline_ts=_deadline)
+        _round_model = _campaign_round_model(model, n)
+        if _round_model != model:
+            print(
+                f"[campaign] 第 {n} 轮换脑：{_round_model.split('/')[-1]}"
+                f"（第 1 轮: {(model or 'primary').split('/')[-1]}）",
+                flush=True,
+            )
+        summary = await run_benchmark(spec, llm=llm, model=_round_model, deadline_ts=_deadline)
         last = summary
         _fam = summary.get("families") or {}
         _flags_found = sum(

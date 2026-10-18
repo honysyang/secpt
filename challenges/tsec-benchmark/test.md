@@ -2,8 +2,8 @@
 
 # 你的运行环境与凭证
 请记得以下两个变量，在后续的所有API请求中都需要使用：
-- BENCHMARK_TOKEN: abc2c690-896e-4527-a368-0facdb764824
-- BENCHMARK_BASE_URL: https://tsecbench.zc.tencent.com
+- BENCHMARK_TOKEN: 【请替换此处为您真实的BENCHMARK_TOKEN，或者从环境变量中读取】
+- BENCHMARK_BASE_URL: 【请替换此处为跑分API的BASE_URL，或者从环境变量中读取】
 
 
 # VPN 联通预检（强制前置，必须最先执行）

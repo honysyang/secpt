@@ -43,6 +43,15 @@ class TestResolveModel:
         assert key == "oa-test"
         assert mid == "gpt-4o"
 
+    def test_glm_provider_builtin(self, monkeypatch):
+        """GLM（智谱）一等路由：glm/<model> → bigmodel 端点 + ZHIPU_API_KEY。"""
+        monkeypatch.delenv("SECPT_MODEL_BASE_GLM", raising=False)
+        monkeypatch.setenv("ZHIPU_API_KEY", "glm-test")
+        base, key, mid = resolve_model("glm/glm-4.6")
+        assert base == "https://open.bigmodel.cn/api/paas/v4"
+        assert key == "glm-test"
+        assert mid == "glm-4.6"
+
     def test_env_injection(self, monkeypatch):
         monkeypatch.setenv("SECPT_MODEL_BASE_MYGW", "https://gw.internal/v1")
         monkeypatch.setenv("SECPT_MODEL_KEY_MYGW", "gw-key")

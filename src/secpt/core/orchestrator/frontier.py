@@ -58,6 +58,29 @@ def frontier_db_path(base_job_id: str) -> Path:
 # 复核纪律运行时强制（加强②）：首轮失败自动回队一次，第二次失败才终态
 _RECHECK_ATTEMPTS = 2
 
+_HOST_LIKE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$|^[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$")
+
+
+def _intent_scope_entries(intent) -> list[str] | None:
+    """意图授权白名单 = objective 中的实际网络目标 ∪ host 形态的 asset_scope。
+
+    asset_scope 的本职是租约互斥键（常是题号如 c-03），不是网络目标——直接当
+    scope 会让引擎拦掉对自己容器的全部请求（tsec1-1036 实证：8 分钟 24 次
+    scope.denied，模型被逼写脚本绕过治理链）。objective 里内联的容器地址/
+    平台端点才是真目标；纯题号形态（无点号、非 IP）不进白名单。
+    """
+    entries: list[str] = []
+    try:
+        from secpt.runtime.engine import extract_scope_targets
+
+        entries.extend(extract_scope_targets(getattr(intent, "objective", "") or ""))
+    except Exception:
+        pass
+    raw = str(getattr(intent, "asset_scope", "") or "").strip()
+    if raw and _HOST_LIKE_RE.match(raw) and raw not in entries:
+        entries.append(raw)
+    return entries or None
+
 
 def _acquire_task_lock(base: str):
     """任务级单编排锁（加强④）：flock 独占 var/jobs/<base>/.frontier.lock。
@@ -1865,8 +1888,9 @@ async def run_frontier(
                     getattr(intent, "role", ""), model, attempts=intent.attempts
                 ),
                 hook_factory=hook_factory,
-                # G1 目标授权：意图资产即该子任务授权目标（无资产意图不启用 scope）
-                scope_entries=[intent.asset_scope] if intent.asset_scope else None,
+                # G1 目标授权：objective 里的实际网络目标（start 返回的容器地址等）
+                # ∪ host 形态资产 scope；asset_scope 题号不进白名单（1036 误拦教训）
+                scope_entries=_intent_scope_entries(intent),
                 # C2：意图级工具覆盖（按题族动态启用，如 web 族的 http_request/session）
                 tools_extra=_tools_extra or None,
                 **kw,

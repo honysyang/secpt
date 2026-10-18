@@ -82,10 +82,16 @@ async def call_pooled(
     api_key: str | None = None,
     fallback_model: str | None = None,
 ) -> object:
-    """池化调用。无池配置时退化为单模型调用（行为与 call_llm 完全一致）。"""
-    pool = pool_models() or [model]
+    """池化调用。无池配置时退化为单模型调用（行为与 call_llm 完全一致）。
+
+    请求模型优先：mentor/verify/escalate 点名的模型不被池覆盖（PA2 语义——
+    "导师用 deepseek-v4-pro"不能被池首项悄悄换成别的），池成员作为出现意外
+    （可重试失败耗尽/熔断）时的自动切换后备；去重保序。
+    """
+    members = pool_models()
+    chain = [model] + [m for m in members if m != model] if members else [model]
     last_exc: Exception | None = None
-    for m in pool:
+    for m in chain:
         if not _admit(m):
             continue
         try:

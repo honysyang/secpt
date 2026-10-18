@@ -1,10 +1,16 @@
 # secpt 比赛自包含镜像（Kali 基座：工具覆盖优先，全部离线预装）
 #
+# 比赛姿态：单镜像方案——智能体与工具执行同容器直跑（SECPT_SANDBOX=0，
+# bash 直接用镜像内的 Kali 工具，无第二容器/无 docker-in-docker）。
+# 仓库里的 sandbox*.Dockerfile 是宿主机本地可选的执行沙箱，比赛镜像不使用。
+#
 # 平台契约：
 # - 启动后自动跑 benchmark（ENTRYPOINT 无参）
 # - BENCHMARK_TOKEN / BENCHMARK_BASE_URL 由平台运行时注入
 # - DEEPSEEK_API_KEY 需在平台「运行时环境变量」手动添加（绝不打进镜像）
-# - 比赛环境不依赖 VPN；镜像不内置任何 VPN 配置/凭证
+# - 内网场景：运行时注入 SECPT_VPN_TYPE=openvpn + SECPT_VPN_CONFIG（容器内路径）
+#   + SECPT_VPN_PROBE_URL，并 --cap-add NET_ADMIN --device /dev/net/tun；
+#   镜像已含 openvpn 二进制，但绝不内置任何 VPN 配置/凭证
 #
 # 为什么用 Kali：Debian 源缺 radare2/nikto/nuclei/feroxbuster/checksec/subfinder
 # 等安全工具；Kali 源全部可 apt 离线预装，避免运行时拉取。Python 用 3.13 venv
@@ -26,27 +32,41 @@ RUN sed -i 's|http://http.kali.org/kali/|http://mirrors.tuna.tsinghua.edu.cn/kal
 
 # 工具层（显式清单，不用 kali-linux-headless 元包——1835 个包、含 GUI/冗余，体积失控）。
 # 刻意不装 seclists 全量（安装后 ~1.85GB）；用 dirb/wfuzz 自带字典 + 构建时精选。
+# 实战缺口补全（1202/1323 复盘）：telnet（c-07 弱口令实战）/ssh 客户端（session 驱动）/
+# redis·mysql·pgsql 客户端（拿到凭据后的连接面）/smbclient+snmp（内网族）/
+# zip+7z（附件归档）/ping。
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
     && apt-get install -y --no-install-recommends \
         python3.13 python3.13-venv python3.13-dev \
-        curl wget ca-certificates openssl iproute2 procps \
+        curl wget ca-certificates openssl iproute2 procps iputils-ping \
+        openvpn openssh-client telnet \
         nmap whatweb bind9-dnsutils bind9-host whois masscan socat \
-        sqlite3 grep sed gawk findutils coreutils file unzip binutils \
+        sqlite3 grep sed gawk findutils coreutils file unzip zip p7zip-full binutils \
         hydra john hashcat sqlmap wfuzz ffuf gobuster dirb feroxbuster \
-        nikto nuclei subfinder \
+        nikto nuclei subfinder arjun \
+        redis-tools default-mysql-client postgresql-client smbclient snmp \
         radare2 gdb strace ltrace patchelf upx-ucl checksec \
         binwalk foremost sleuthkit pngcheck steghide libimage-exiftool-perl \
         netcat-openbsd tcpdump jq git perl php-cli nodejs npm qemu-user \
         default-jre-headless chromium \
     && rm -rf /var/lib/apt/lists/*
 
-# 精选字典（不装 1.85GB 的 seclists 包；下载失败不阻断构建）
-RUN mkdir -p /usr/share/wordlists/custom \
+# 精选字典（不装 1.85GB 的 seclists 包；下载失败不阻断构建）。
+# 关键：建立 /usr/share/wordlists/seclists/... 兼容软链——agent 习惯引用该路径
+# （1202 实证：引用了镜像里不存在的 seclists 路径，fuzz 直接落空烧步）。
+RUN mkdir -p /usr/share/wordlists/custom /usr/share/wordlists/seclists/Discovery/Web-Content \
     && for u in \
         "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/raft-small-words.txt" \
+        "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/raft-small-directories-lowercase.txt" \
         "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/raft-medium-directories.txt" \
-        "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/directory-list-2.3-small.txt"; do \
+        "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/raft-medium-files-small.txt" \
+        "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/directory-list-2.3-small.txt" \
+        "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/quickhits.txt"; do \
         curl -fsSL --max-time 30 "$u" -o "/usr/share/wordlists/custom/$(basename "$u")" || true; \
+    done \
+    && ln -sf /usr/share/dirb/wordlists/common.txt /usr/share/wordlists/custom/common.txt \
+    && for f in /usr/share/wordlists/custom/*; do \
+        ln -sf "$f" "/usr/share/wordlists/seclists/Discovery/Web-Content/$(basename "$f")"; \
     done \
     && ls -la /usr/share/wordlists/custom | head
 

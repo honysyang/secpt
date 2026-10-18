@@ -15,7 +15,7 @@ AI 评判层 + 经验闭环。**当前架构以 `docs/架构现状.md` 为权威
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-make test        # = pytest tests/ -q（基线：255 passed / 4 skipped）
+make test        # = pytest tests/ -q（2026-10-17 口径：收集 852；全绿+4 可跳过=完成）
 make lint        # ruff check（必须全绿才算完成）
 make format      # ruff format
 make format-check  # ruff format --check（只查不改，与 CI 一致）
