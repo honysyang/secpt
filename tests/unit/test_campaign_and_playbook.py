@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
+
+import pytest
 
 from secpt.core.job.models import TaskBudget, TaskSpec
 from secpt.core.orchestrator import benchmark as bm
@@ -107,6 +110,66 @@ class TestChunking:
 
 
 class TestCampaign:
+    def test_is_challenge_done_and_available_selection(self):
+        """available（容器在跑）但未通关的题必须纳入选题；完成判定按旗数。"""
+        assert bm._is_challenge_done({"is_completed": True})
+        assert bm._is_challenge_done({"flag_count": 4, "correct_flag_count": 4})
+        assert not bm._is_challenge_done({"flag_count": 4, "correct_flag_count": 3})
+        rows = [
+            {
+                "unique_code": "a-1",
+                "container_status": "available",
+                "container_addr": ["10.0.0.1:80"],
+                "flag_count": 1,
+                "correct_flag_count": 0,
+                "is_completed": False,
+            },
+            {
+                "unique_code": "a-2",
+                "container_status": "stopped",
+                "flag_count": 1,
+                "correct_flag_count": 1,
+                "is_completed": True,
+            },
+        ]
+        assert [c["unique_code"] for c in bm._sorted_open(rows)] == ["a-1"]
+
+    def test_effective_soft_mb_anti_loop(self):
+        """软着陆防抖：冷却窗口内回收过/基线已超软限 → 抬高本段阈值。"""
+        # 正常：基线低、无冷却
+        assert bm._effective_soft_mb(11264, 500, 0, 1000, 600, 1536) == 11264
+        # 冷却窗口内刚回收过（100s 前 < 600s）→ 抬高
+        assert bm._effective_soft_mb(11264, 500, 900, 1000, 600, 1536) == 12800
+        # 冷却已过（900s 前）→ 不抬高
+        assert bm._effective_soft_mb(11264, 500, 100, 1000, 600, 1536) == 11264
+        # 首启无历史：基线高也不抬升（避免把低阈值配置误判为循环）
+        assert bm._effective_soft_mb(11264, 12000, 0, 1000, 600, 1536) == 11264
+        # 回收过且基线仍高于冷却后阈值 → 基线+余量
+        assert bm._effective_soft_mb(11264, 13000, 900, 1000, 600, 1536) == 14536
+        # 关闭软着陆（0）永远返回 0
+        assert bm._effective_soft_mb(0, 12000, 900, 1000, 600, 1536) == 0
+
+    def test_newest_event_mtime(self, tmp_path):
+        """进度看门狗只统计本战役 worker 的 events.jsonl（前缀匹配、取最大 mtime）。"""
+        jobs = tmp_path / "jobs"
+        (jobs / "j1-i0001").mkdir(parents=True)
+        (jobs / "j1-i0002").mkdir(parents=True)
+        p1 = jobs / "j1-i0001" / "events.jsonl"
+        p2 = jobs / "j1-i0002" / "events.jsonl"
+        p1.write_text("{}\n", encoding="utf-8")
+        p2.write_text("{}\n", encoding="utf-8")
+        os.utime(p1, (1000, 1000))
+        os.utime(p2, (2000, 2000))
+        assert bm._newest_event_mtime(jobs, "j1") == 2000
+        # 其他任务的 job 不能把本战役判成"有进度"
+        other = jobs / "other-i0001" / "events.jsonl"
+        other.parent.mkdir(parents=True)
+        other.write_text("{}\n", encoding="utf-8")
+        os.utime(other, (3000, 3000))
+        assert bm._newest_event_mtime(jobs, "j1") == 2000
+        # 无匹配 → 0（看门狗以首次扫描为基线，不会立即误杀）
+        assert bm._newest_event_mtime(jobs, "missing") == 0.0
+
     def test_two_rounds_then_complete(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "3")
@@ -205,6 +268,247 @@ class TestCampaign:
         out = _run(bm.run_benchmark_campaign(_spec()))
         assert len(calls) == 1
         assert out["campaign"]["rounds_done"] == 1
+
+    def test_unlimited_rounds_env_zero(self, tmp_path, monkeypatch):
+        """SECPT_CAMPAIGN_ROUNDS=0：不限轮，直到平台结束才停。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "0")
+        calls: list[int] = []
+
+        async def fake_run(spec, **kw):
+            calls.append(1)
+            return {
+                "job_id": "x",
+                "mode": "benchmark(parallel)",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 0.1,
+                "challenges_picked": 1,
+                "ledger": {},
+            }
+
+        monkeypatch.setattr(bm, "run_benchmark", fake_run)
+        rows = [
+            [
+                {
+                    "unique_code": "a-1",
+                    "flag_count": 1,
+                    "correct_flag_count": 0,
+                    "is_completed": False,
+                }
+            ],
+            [
+                {
+                    "unique_code": "a-1",
+                    "flag_count": 1,
+                    "correct_flag_count": 0,
+                    "is_completed": False,
+                }
+            ],
+            [],
+        ]
+        seq = iter(rows)
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: next(seq))
+        snap_calls = {"n": 0}
+
+        def _snap(force=False, ttl=5):
+            snap_calls["n"] += 1
+            # 每轮间有两次实况查询（轮后判定 + 下轮开始）：第 1 次未完成→续跑，
+            # 第 2 次未完成→进第 2 轮，第 3 次平台已结束 → break
+            if snap_calls["n"] >= 3:
+                raise bm.BenchmarkEnded("任务已结束")
+            return {str(c["unique_code"]): c for c in bm.fetch_challenges()}
+
+        monkeypatch.setattr(bm, "_platform_snapshot", _snap)
+        monkeypatch.setattr(
+            "secpt.core.orchestrator.ledger.ChallengeLedger.release_own_claims",
+            lambda self, reason="": 0,
+        )
+        out = _run(bm.run_benchmark_campaign(_spec()))
+        # 第 1 轮后仍有未完成题（不限轮，继续）；第 2 轮后平台结束 → 停
+        assert len(calls) == 2
+        assert out["campaign"]["rounds_done"] == 2
+
+    def test_transient_snapshot_error_retries(self, tmp_path, monkeypatch):
+        """轮间瞬时不可达（URLError→BenchmarkUnavailable）：退避重试后续跑，不提前收工。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "3")
+        calls: list[int] = []
+
+        async def fake_run(spec, **kw):
+            calls.append(1)
+            return {
+                "job_id": "x",
+                "mode": "benchmark(parallel)",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 0.1,
+                "challenges_picked": 1,
+                "ledger": {},
+            }
+
+        async def _no_sleep(_s):
+            return None
+
+        monkeypatch.setattr(bm.asyncio, "sleep", _no_sleep)  # 退避不真睡（单测提速）
+        monkeypatch.setattr(bm, "run_benchmark", fake_run)
+        pending = [
+            {
+                "unique_code": "a-1",
+                "flag_count": 1,
+                "correct_flag_count": 0,
+                "is_completed": False,
+            }
+        ]
+        snaps = {"n": 0}
+
+        def _snap(force=False, ttl=5):
+            snaps["n"] += 1
+            # #1 瞬时断网（helper 内部重试）→ #2 未完成 → 进第 2 轮
+            # → #3 未完成（轮后判定）→ #4 平台已结束 → break
+            if snaps["n"] == 1:
+                raise bm.BenchmarkUnavailable("平台连接失败: timed out")
+            if snaps["n"] >= 4:
+                raise bm.BenchmarkEnded("任务已结束")
+            return {str(c["unique_code"]): c for c in pending}
+
+        monkeypatch.setattr(bm, "_platform_snapshot", _snap)
+        monkeypatch.setattr(
+            "secpt.core.orchestrator.ledger.ChallengeLedger.release_own_claims",
+            lambda self, reason="": 0,
+        )
+        out = _run(bm.run_benchmark_campaign(_spec()))
+        assert len(calls) == 2  # 断网没有把战役提前终止
+        assert out["campaign"]["rounds_done"] == 2
+        assert snaps["n"] >= 4  # 确实走过重试
+
+    @pytest.mark.parametrize(
+        ("cum", "expected"),
+        [(None, "deepseek-v4-flash"), ("1", "glm/glm-5.3-flash")],
+    )
+    def test_restart_rotation_policy(self, tmp_path, monkeypatch, cum, expected):
+        """默认按本段轮次（持久化历史不影响本段第 1 轮，仍用主脑）；
+        SECPT_ROTATE_BY_CUMULATIVE=1 时才按累计轮次换脑。"""
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "1")
+        monkeypatch.setenv("SECPT_ESCALATE_MODEL", "glm/glm-5.3-flash")
+        monkeypatch.delenv("BENCHMARK_TASK_ID", raising=False)
+        monkeypatch.delenv("SECPT_ROTATE_BY_CUMULATIVE", raising=False)
+        if cum:
+            monkeypatch.setenv("SECPT_ROTATE_BY_CUMULATIVE", cum)
+        models: list[str | None] = []
+
+        async def fake_run(spec, **kw):
+            models.append(kw.get("model"))
+            return {
+                "job_id": "x",
+                "mode": "benchmark(parallel)",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 0.1,
+                "challenges_picked": 1,
+                "ledger": {},
+            }
+
+        monkeypatch.setattr(bm, "run_benchmark", fake_run)
+        pending = [
+            {
+                "unique_code": "a-1",
+                "flag_count": 1,
+                "correct_flag_count": 0,
+                "is_completed": False,
+            }
+        ]
+        monkeypatch.setattr(
+            bm,
+            "_platform_snapshot",
+            lambda force=False, ttl=5: {str(c["unique_code"]): c for c in pending},
+        )
+        # 预置上一段进程已完成 1 轮：累计轮次=2，但本段轮次=1
+        sp = bm.campaign_state_path(_spec())
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({"rounds": [{"n": 1}]}), encoding="utf-8")
+        out = _run(bm.run_benchmark_campaign(_spec(), model="deepseek-v4-flash"))
+        assert models == [expected]
+        assert out["campaign"]["rounds_done"] == 2
+
+    def test_empty_snapshot_is_not_treated_as_complete(self, tmp_path, monkeypatch):
+        """平台 200 空列表 ≠ 全部通关：退避重试后上抛，交给 entrypoint 重启续跑。"""
+        import pytest
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "0")
+        calls: list[int] = []
+
+        async def fake_run(spec, **kw):
+            calls.append(1)
+            return {
+                "job_id": "x",
+                "mode": "benchmark(parallel)",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 0.1,
+                "challenges_picked": 1,
+                "ledger": {},
+            }
+
+        async def _no_sleep(_s):
+            return None
+
+        monkeypatch.setattr(bm.asyncio, "sleep", _no_sleep)
+        monkeypatch.setattr(bm, "run_benchmark", fake_run)
+        monkeypatch.setattr(bm, "_platform_snapshot", lambda force=False, ttl=5: {})
+        with pytest.raises(bm.BenchmarkUnavailable):
+            _run(bm.run_benchmark_campaign(_spec()))
+        assert len(calls) == 1
+
+    def test_rss_recycle_soft_landing_exit_3(self, tmp_path, monkeypatch):
+        """RSS 触软限：本轮排干后以 SystemExit(3) 退出（entrypoint 重启续跑）。"""
+        import time as _time
+
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_CAMPAIGN_ROUNDS", "0")
+        monkeypatch.setenv("SECPT_RSS_SOFT_MB", "1")  # 1MB：第一次心跳即触发
+
+        async def fake_run(spec, **kw):
+            drain = kw.get("external_drain")
+            assert drain is not None  # 软着陆信号必须传给本轮
+            for _ in range(200):
+                if drain.is_set():
+                    break
+                _time.sleep(0.05)
+            assert drain.is_set()
+            return {
+                "job_id": "x",
+                "mode": "benchmark(parallel)",
+                "flags": [],
+                "chains": [],
+                "open_remaining": 0,
+                "wall_s": 0.1,
+                "challenges_picked": 1,
+                "ledger": {},
+            }
+
+        monkeypatch.setattr(bm, "run_benchmark", fake_run)
+        monkeypatch.setattr(bm, "fetch_challenges", lambda: [])
+
+        def _ended(force=False, ttl=5):
+            raise bm.BenchmarkEnded("任务已结束")
+
+        monkeypatch.setattr(bm, "_platform_snapshot", _ended)
+        monkeypatch.setattr(
+            "secpt.core.orchestrator.ledger.ChallengeLedger.release_own_claims",
+            lambda self, reason="": 0,
+        )
+        import pytest
+
+        with pytest.raises(SystemExit) as ei:
+            _run(bm.run_benchmark_campaign(_spec()))
+        assert ei.value.code == 3
 
 
 # ───────────────────────── A3：优雅排空 ─────────────────────────

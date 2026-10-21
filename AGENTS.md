@@ -64,10 +64,20 @@ src/secpt/
                  / notify(通知通道)
   core/
     job/         作业层：TaskSpec/JobRecord/store/event/resume/rounds/manager/worker
-    orchestrator/ dag 分流(默认单链) / stages 多阶段 / frontier 意图调度(source=direct
-                人工直投) / steer.py 人在环路操舵
-                注：SpecialistOrchestrator（固定 DAG）已退役，勿复活——team 路径走
-                frontier 角色意图；WarroomHooks 在 core/memory/warroom.py
+    orchestrator/ dag 统一路由(benchmark→campaign；其余→frontier) / frontier 意图调度
+                (planner 产独立通用任务；triage/JEV 快判 main/logistics；stages 折叠线性链；
+                 main+logistics 双通道；交付门 delivery_gate；教练 coach 注入；retro.md)
+                triage.py 快判 / coach.py 卡壳纠偏 / delivery_gate.py 交付核验与结束判定
+                注：roles.py 五角色模板是 legacy（SECPT_ROLE_TEMPLATES=1）；
+                SpecialistOrchestrator 与 run_stages/run_single_chain 已退役（S6 模式收敛，
+                见 policy.DEPRECATED_MODULES），勿复活——唯一执行编排是 frontier；
+                WarroomHooks 在 core/memory/warroom.py
+                v4：hypothesis.py 假设树（世界模型）/ watch.py 值守层（失败类型化+触发器，零 LLM）/
+                commander.py 无状态主智能体（战略文档+防漂移闸+简报编译器）；收敛看假设树非池空
+                v3 开关：SECPT_ORCH_LOGISTICS=0 关后勤 / SECPT_ORCH_DELIVERY=0 关交付门 /
+                SECPT_ORCH_COMMANDER=0 回退 v3 planner /
+                SECPT_ORCH_JEV=1(+JEV_API_KEY) 让外部 typed JEV 参与快判 /
+                SECPT_ROLE_TEMPLATES=1 恢复 legacy 角色模板（默认关闭）
     profile/     profile YAML loader + render（system_extra 渲染）
     context/     S3 四件套：estimator/compaction(0.72)/roundpool(0.95)/budget/summarize
     memory/      warroom 四表（历史/可选：无生产装配点——多意图协作走 intel 图 + findings + traces）
@@ -75,6 +85,10 @@ src/secpt/
   evaluation/    AI 评判层：anticheat → ground_truth → Jev 门控 → judge → verdict
   findings/      漏洞发现全生命周期：模型/存储/report_finding 工具/verify 对抗式复现/cve 去重
   intel/         图记忆：资产图+探索血缘图+锚点覆盖度+联想召回+冷压缩
+  web/           Web 控制台：server.py(stdlib HTTP+静态) / api.py(payload 构造+任务注册表) /
+                 static/(index/app.js/style.css，零构建)。数据全部读既有单点事实源
+                 （events.jsonl seq 游标 / intel / findings / experiences / frontier+假设树）；
+                 任务提交=后台线程 dag.run_task（fake 模式传 FakeLLM 不污染 env）
   learning/      经验闭环：distill(run后) / store(jsonl,sha1去重) / retrieve(启动注入)
   traffic/       MITM 透明录制（mitmproxy）+ harness（per-job 容器生命周期）
   evidence/      内容寻址证据快照（SHA-256 blob）+ 四角色绑定 + 证据包导出

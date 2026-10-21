@@ -501,6 +501,17 @@ for _name, _fn in [
 # ---------------------------------------------------------------------------
 
 
+@app.command("web")
+def web_cmd(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（默认仅本机）"),
+    port: int = typer.Option(8080, "--port", help="监听端口"),
+) -> None:
+    """启动 Web 控制台（浏览器版工作台：对话/轨迹/作战面板/资产/发现/配置/工具/经验）。"""
+    from secpt.web.server import serve
+
+    serve(host=host, port=port)
+
+
 @app.command("engage")
 def engage_cmd(
     target: str | None = typer.Option(

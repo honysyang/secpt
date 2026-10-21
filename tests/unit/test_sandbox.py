@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-from typing import ClassVar
 
 import pytest
 
@@ -190,41 +189,42 @@ class TestAutoFallbackToHost:
 
 
 class TestWallZeroSemantics:
-    """--wall 0 = 显式不限（spec wall_s=-1 → run_engine 收 0）；0 = profile 默认。"""
+    """--wall 语义经统一路由透传：>0 → frontier deadline_ts（全局截止）；
+    -1（显式不限）/ 0（profile 默认）→ 不设全局截止。"""
 
-    def _capture(self, wall_s):
+    def _capture(self, wall_s, monkeypatch):
         import asyncio as _a
 
         from secpt.core.job.models import TaskBudget, TaskSpec
-        from secpt.core.orchestrator.dag import run_single_chain
+        from secpt.core.orchestrator import dag as _dag
 
-        captured = {}
+        captured: dict = {}
 
-        class _R:
-            flag = None
-            steps = 1
-            wall_s = 1.0
-            status = "step_exceeded"
-            messages: ClassVar[list] = []
+        async def fake_run_frontier(objective, **kw):
+            captured.update(kw)
+            return {"mode": "frontier", "flags": [], "chains": [], "wall_s": 0.0}
 
-        import secpt.cli.engine_runner as er
-
-        orig = er.run_engine
-        er.run_engine = lambda **kw: (captured.update(kw), _R())[1]
-        try:
-            spec = TaskSpec(job_id="w1", objective="o", budget=TaskBudget(wall_s=wall_s))
-            _a.new_event_loop().run_until_complete(run_single_chain(spec, llm=object()))
-        finally:
-            er.run_engine = orig
-        return captured.get("max_wall_s")
+        monkeypatch.setattr("secpt.core.orchestrator.frontier.run_frontier", fake_run_frontier)
+        spec = TaskSpec(
+            job_id="w1", task_type="ctf", objective="o", budget=TaskBudget(wall_s=wall_s)
+        )
+        _a.new_event_loop().run_until_complete(_dag.run_task(spec, llm=object()))
+        return captured.get("deadline_ts")
 
     def test_wall_negative_one_is_unlimited(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
-        assert self._capture(-1.0) == 0  # 0 = engine 层"不限"
+        assert self._capture(-1.0, monkeypatch) is None  # 不设全局截止（7×24 语义）
 
     def test_wall_zero_is_profile_default(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
-        assert self._capture(0.0) is None  # None → run_engine 用 profile
+        assert self._capture(0.0, monkeypatch) is None  # 不设全局截止，profile 预算生效
+
+    def test_wall_positive_sets_deadline(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        import time
+
+        dl = self._capture(600.0, monkeypatch)
+        assert dl is not None and dl > time.time() + 590  # deadline ≈ now + 600s
 
 
 class TestPersistentContainer:

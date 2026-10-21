@@ -59,7 +59,7 @@ class RoeSpec(BaseModel):
 
 
 class Stage(BaseModel):
-    """多阶段渗透的一个阶段（profile.stages；空则走单链）"""
+    """多阶段渗透的一个阶段（profile.stages；非空 → 折叠为 frontier 线性意图链）"""
 
     name: str
     role: str = ""
@@ -79,7 +79,8 @@ class Profile(BaseModel):
     prior_extra: list[str] = Field(default_factory=list)
     terminator: Terminator = Field(default_factory=Terminator)
     budget: Budget = Field(default_factory=Budget)
-    stages: list[Stage] = Field(default_factory=list)  # 非空 → 多阶段编排
+    stages: list[Stage] = Field(default_factory=list)  # 非空 → 折叠为 frontier 线性意图链
+    workers: int = 1  # S6 模式收敛：frontier 并发 worker 数（多资产实战场景 3-4）
     traffic: bool = False  # true → 任务级 MITM 流量录制（B3）
     sandbox_image: str = ""  # 非空 → 本 profile 的沙箱镜像（如 secpt-sandbox-pwn）
     bash_timeout_s: int = 0  # 非 0 → 覆盖引擎 bash 工具超时（如 pwn 的 QEMU 长交互）

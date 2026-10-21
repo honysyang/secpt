@@ -268,8 +268,9 @@ class TestOrchestrationGovernance:
         assert "record_fact" in role_stage("recon")
 
     def test_planner_passes_depends_on(self, tmp_path, monkeypatch):
-        """planner 产出的 depends_on（intent_id / fact:谓词）必须落到意图上。"""
+        """legacy 角色 planner 的 depends_on（intent_id / fact:谓词）必须落到意图上。"""
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_ROLE_TEMPLATES", "1")
         from secpt.core.orchestrator.frontier import Frontier, plan_round
         from secpt.intel.store import IntelStore
 

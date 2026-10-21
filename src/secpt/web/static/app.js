@@ -1,0 +1,889 @@
+/* ═══════════ secpt 指挥台 V2（对齐高保真原型，接真实 API） ═══════════
+   数据层：全部来自后端单点事实源，轮询增量：
+   - 事件流：/api/jobs/{id}/events?after=seq（1.5s 增量，断点续传）
+   - 作战面板：/api/jobs/{id}/workspace（4s）
+   - 任务/资产/发现/经验/配置：8s 或进视图时拉取
+   交互：追问当前任务 → 人工直投意图入池（source=direct）；
+        下达新任务 → 后台线程跑 dag.run_task。 */
+"use strict";
+const $=(s,el=document)=>el.querySelector(s), $$=(s,el=document)=>[...el.querySelectorAll(s)];
+const esc=t=>{const d=document.createElement("div");d.textContent=t==null?"":String(t);return d.innerHTML};
+const fmtT=ts=>{const d=new Date(ts*1000);return d.toTimeString().slice(0,8)};
+const fmtDur=s=>s<60?`${s.toFixed(0)}s`:`${Math.floor(s/60)}m${Math.round(s%60)}s`;
+const fmtTok=n=>n>=1000?(n/1000).toFixed(1)+"k":""+n;
+const fmtCny=n=>"¥"+(n||0).toFixed(4);
+
+const M={jobs:[],events:[],workspace:{},findings:[],assets:[],
+  tools:{builtin:[],plugins:[],skills:[]},experiences:[],config:{saved:{},effective:{}}};
+const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"new",taskFilter:"all",
+  labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
+  assetTypes:[],assetQ:"",findSev:["critical","high","medium","low"],findQ:"",
+  expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false};
+const AGENT_IC="⬡";
+const ACOLORS=["#9E8CF0","#6BA8E8","#3ECF8E","#E8792B","#E86AA6","#E0B04A"];
+function acolor(n){let h=0;for(const ch of String(n))h=(h*31+ch.charCodeAt(0))>>>0;return ACOLORS[h%ACOLORS.length]}
+const jobOf=id=>M.jobs.find(j=>j.job_id===id);
+const curJob=()=>jobOf(state.jobId)||M.jobs[0]||{job_id:"",status:"—",task_type:"",objective:""};
+
+/* ── 数据加载 ── */
+async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()}
+
+async function loadJobs(){
+  const d=await api("/api/jobs");
+  M.jobs=(d.jobs||[]).map(j=>({job_id:j.job_id,status:j.status,task_type:j.task_type||"",
+    objective:j.objective||"",created_at:j.created_at?new Date(j.created_at).getTime()/1000:0}));
+  if(!state.jobId&&M.jobs.length)state.jobId=M.jobs[0].job_id;
+}
+async function loadEvents(full){
+  const jid=state.jobId;if(!jid)return;
+  const after=full?0:state.cursor;
+  const d=await api(`/api/jobs/${jid}/events?after=${after}`);
+  if(full)M.events=[];
+  M.events=M.events.concat(d.events||[]);
+  state.cursor=d.cursor;
+}
+async function loadWorkspace(){if(state.jobId)M.workspace=await api(`/api/jobs/${state.jobId}/workspace`)}
+async function loadAssets(){M.assets=(await api("/api/assets")).assets||[]}
+async function loadFindings(){M.findings=(await api("/api/findings")).findings||[]}
+async function loadTools(){const d=await api("/api/tools");
+  M.tools={builtin:d.builtin||[],plugins:d.plugins||[],skills:d.skills||[]}}
+async function loadExperience(){
+  M.experiences=(await api("/api/experiences")).experiences.map(x=>({
+    ...x,hits:(x.usage&&x.usage.hit)||0,injections:(x.usage&&x.usage.total)||0}));
+}
+async function loadConfig(){M.config=await api("/api/config")}
+
+/* ── 侧栏导航 ── */
+function navCounts(){
+  const running=M.jobs.filter(j=>j.status==="running").length;
+  return [["workspace","◈","工作台",running],
+    ["dashboard","◱","总览",0],
+    ["assets","▣","资产",M.assets.length],
+    ["findings","⚑","发现",M.findings.length],
+    ["tools","⚒","工具",0],
+    ["experience","❄","经验",M.experiences.length],
+    ["config","⚙","配置",0]];
+}
+function renderNav(){
+  $("#navbtns").innerHTML=navCounts().map(([id,ic,label,n])=>`
+    <button class="nav-btn ${state.view===id?"active":""}" data-v="${id}">
+      <span class="ic">${ic}</span>${label}${n?`<span class="bdg ${id==="findings"?"hot":""}">${n>99?"99+":n}</span>`:""}
+    </button>`).join("");
+  $$("#navbtns .nav-btn").forEach(b=>b.onclick=()=>setView(b.dataset.v));
+}
+function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;renderDock();
+  if(state.view!=="workspace")setView("workspace");else renderBody();refreshJobData(true)}
+function setView(v){state.view=v;renderNav();renderBody()}
+
+/* ── 轮次分组 ── */
+function buildRounds(events){
+  const rounds=new Map(),calls=new Map();
+  for(const e of events){
+    if(!rounds.has(e.round))rounds.set(e.round,{round:e.round,events:[],tokens:0,cost:0,tools:0,flags:0,errors:0,t0:e.ts,t1:e.ts,summary:""});
+    const r=rounds.get(e.round);r.events.push(e);r.t1=Math.max(r.t1,e.ts);
+    if(e.type==="tokens"){r.tokens+=(e.payload.prompt||0)+(e.payload.completion||0);r.cost+=e.payload.cost_cny||0}
+    if(e.type==="tool_call"){r.tools++;calls.set(e.payload.call_id,{call:e})}
+    if(e.type==="tool_result"){const c=calls.get(e.payload.call_id);if(c){c.result=e;if(e.payload.status!=="ok")r.errors++}}
+    if(e.type==="assistant"&&e.payload.content)r.summary=e.payload.content.split("\n")[0].slice(0,88);
+    if(e.type==="finding"&&e.payload.kind==="flag"){r.flags++}
+  }
+  return [...rounds.values()].sort((a,b)=>a.round-b.round||a.t0-b.t0);
+}
+function tryFmt(s){try{return JSON.stringify(JSON.parse(s),null,1)}catch{return s}}
+function actorOf(e){return esc(e.actor||"agent")}
+
+/* ── 对话流渲染 ── */
+function renderFeed(){
+  const feed=$("#feed");if(!feed)return;
+  const rounds=buildRounds(M.events);
+  const last=rounds[rounds.length-1];
+  rounds.forEach(r=>{r.open=r.flags>0||r===last});
+  let html="";
+  for(const r of rounds){
+    const calls=r.events.filter(e=>e.type==="tool_call");
+    const results=new Map(r.events.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
+    const dur=fmtDur(r.t1-r.t0);
+    html+=`<div class="rsep ${r.open?"open":""}" data-act="r-toggle" data-r="${r.round}">
+      <b>ROUND ${r.round}</b><span>已工作 ${dur}</span><span>·</span><span>${fmtTok(r.tokens)} tok</span><span>·</span><span>${fmtCny(r.cost)}</span><span>·</span><span>${r.tools} tools</span>${r.flags?`<span style="color:var(--flag)">🏁${r.flags}</span>`:""}<span class="arr">▼</span></div>`;
+    if(!r.open){
+      html+=`<div style="font-size:12.5px;color:var(--fg3);margin:0 0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.summary||"(无文本输出)")}</div>`;
+      continue;
+    }
+    const items=[
+      ...calls.map(c=>({t:"tool",o:{call:c,result:results.get(c.payload.call_id)},seq:c.seq})),
+      ...r.events.filter(e=>["assistant","user_msg","finding","error","loop_phase","status_change","plan_event","intent_event"].includes(e.type)&&(e.type!=="assistant"||e.payload.content)).map(e=>({t:"ev",o:e,seq:e.seq}))
+    ].sort((a,b)=>a.seq-b.seq);
+    for(const i of items){
+      if(i.t==="tool"){html+=toolLogHTML(i.o);continue}
+      const e=i.o,p=e.payload||{};
+      if(e.type==="assistant"){
+        html+=`<div class="msg-agent"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor)}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
+      }else if(e.type==="user_msg"){
+        const kindLabel={direct:"你 · 追问/指令",new_task:"你 · 下达任务",steer:"你 · 操舵",coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"msg");
+        html+=`<div class="msg-user"><div class="bub"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div></div>`;
+      }else if(e.type==="finding"){
+        html+=`<div class="milestone"><span class="mk">${p.kind==="flag"?"🏁":"⚑"}</span><span class="mv">${esc(p.value)}</span>${p.evidence?`<div class="sub">evidence · ${esc(p.evidence)}</div>`:""}</div>`;
+      }else if(e.type==="error"){
+        html+=`<div class="milestone finding"><span class="mk">⚠</span><span class="mv">${esc(p.message||JSON.stringify(p))}</span></div>`;
+      }else if(e.type==="loop_phase"){
+        html+=`<div class="sysnote">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
+      }else if(e.type==="status_change"){
+        html+=`<div class="sysnote">status → ${esc(p.status)}</div>`;
+      }else if(e.type==="plan_event"){
+        const w=e.payload.wake||{};const wakeTxt=w.detail||w.kind||"常规规划";
+        const bits=[`决策 <b>${esc(p.decision||"continue")}</b>`,`派 <b>${p.tasks||0}</b> 个任务`];
+        if(p.beliefs)bits.push(`信念结算 ${p.beliefs}`);
+        if(p.hypotheses)bits.push(`新假设 ${p.hypotheses}`);
+        if(p.drift_rejected)bits.push(`<span style="color:var(--warn)">防漂移拒收</span>`);
+        const planned=(p.planned||[]).map(t=>`<li>${esc(t.title)}<span class="lane ${t.lane==="main"?"lane-main":"lane-logistics"}">${t.lane==="main"?"主":"后勤"}</span></li>`).join("");
+        html+=`<div class="msg-agent"><div class="a-head"><span class="abadge" style="--ac:${acolor("commander")}">${AGENT_IC} commander</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
+      }else if(e.type==="intent_event"){
+        const st=e.payload.status;
+        const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消"}[st]||"✗ 结算";
+        const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
+        html+=`<div class="sysnote"><b>${verb}</b>「${esc(e.payload.title)}」→ ${esc(st)}${laneTxt}${e.payload.reason?` · ${esc(e.payload.reason)}`:""}</div>`;
+      }
+    }
+  }
+  feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>`;
+  $$("[data-act=r-toggle]",feed).forEach(h=>h.onclick=()=>{
+    const rd=buildRounds(M.events).find(x=>x.round===+h.dataset.r);if(!rd)return;rd.open=!rd.open;
+    h.classList.toggle("open");toggleRoundBody(h,rd.open);
+  });
+  $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>h.closest(".tlog").classList.toggle("open"));
+  applyFilter();
+  if(state.follow)feed.scrollTop=feed.scrollHeight;
+}
+function toggleRoundBody(h,open){
+  let n=h.nextElementSibling;
+  while(n&&!n.classList.contains("rsep")){n.style.display=open?"":"none";n=n.nextElementSibling}
+}
+
+/* ── 任务列表（工作台左列）：父子任务合并为一行 ──
+   一个任务下达后编排层会派生多个子任务（-iXXXX 意图段 / -r2 续段 / -rs RESET），
+   原样平铺会出现"一次下达冒出 N 个任务"。这里按任务树合并：
+   - 父任务行 = 树的展示单位（名称/目标取父，状态聚合：有 running 即 running）
+   - 子任务折叠进父行，悬浮可见清单，点击 hover 展开的 ⋚ 切换展开
+   - 无父（列表被截断）的子任务独立成行 */
+const _CHILD_RE=/-(?:i[0-9a-fA-F]{4,8}|r\d+|rs)$/;
+function parentOf(jid){return jid.replace(_CHILD_RE,"")}
+function buildTaskTree(jobs){
+  const byId=new Map(jobs.map(j=>[j.job_id,j]));
+  const groups=new Map();  // parentId -> {parent, children[]}
+  const order=[];
+  for(const j of jobs){
+    const pid=parentOf(j.job_id);
+    const parent=byId.get(pid);
+    if(parent&&pid!==j.job_id){
+      if(!groups.has(pid)){groups.set(pid,{parent,children:[]});order.push(pid)}
+      groups.get(pid).children.push(j);
+    }else{
+      if(!groups.has(j.job_id)){groups.set(j.job_id,{parent:j,children:[]});order.push(j.job_id)}
+    }
+  }
+  return order.map(pid=>groups.get(pid));
+}
+function treeStatus(g){
+  const all=[g.parent,...g.children];
+  if(all.some(j=>j.status==="running"))return "running";
+  if(all.some(j=>j.status==="failed"||j.status==="error"))return "failed";
+  if(all.every(j=>j.status==="succeeded"||j.status==="completed"||j.status==="done"))return "succeeded";
+  return g.parent.status;
+}
+/* 状态灯：只有 running 是绿；终态成功=橙、失败/取消=红、其他=灰 */
+function dotClass(status){
+  const s=(status||"").toLowerCase();
+  if(s==="running")return "running";
+  if(s==="failed"||s==="error"||s==="cancelled"||s==="exhausted"||s==="stalled")return "bad";
+  if(s==="succeeded"||s==="completed"||s==="done")return "okwarn";
+  return "off";
+}
+function taskRunning(jid){
+  const j=jobOf(jid);
+  if(!j)return false;
+  if(j.status==="running")return true;
+  // 整树语义：任一子任务（-iXXXX/-r2 派生）在跑即算运行中
+  const prefix=j.job_id+"-";
+  return M.jobs.some(x=>x.job_id.startsWith(prefix)&&x.status==="running");
+}
+const viewRunning=()=>taskRunning(state.jobId);
+function syncSendBtn(){
+  const btn=$("#btn-send");if(!btn)return;
+  const run=viewRunning();
+  btn.classList.toggle("stoppable",run);
+  btn.textContent=run?"◼":"↑";
+  btn.title=run?"停止任务（协作式取消）":"Ctrl+Enter 发送";
+}
+function labelOf(j){return state.labels[j.job_id]||j.job_id}
+function renameTask(jid){
+  const cur=state.labels[jid]||"";
+  const nm=prompt("为任务重命名：",cur);
+  if(nm===null)return;
+  const v=nm.trim();
+  if(!v){delete state.labels[jid];toast("已恢复默认名称")}
+  else{state.labels[jid]=v;toast("已重命名为「"+v+"」")}
+  localStorage.setItem("secpt-labels",JSON.stringify(state.labels));
+  renderTaskPanel();
+}
+async function downloadLog(jid){
+  const job=jobOf(jid);if(!job)return;
+  let evs=[];
+  try{const d=await api(`/api/jobs/${jid}/events?after=0`);evs=d.events||[]}catch(e){}
+  const name=state.labels[jid]||jid;
+  let txt="=== secpt 运行日志 ===\n";
+  txt+=`任务: ${name} (${jid})\n`;
+  txt+=`目标: ${job.objective.replace(/\s+/g," ").slice(0,200)}\n`;
+  txt+=`状态: ${job.status}  类型: ${job.task_type}\n`;
+  txt+=`生成时间: ${new Date().toLocaleString()}\n`;
+  txt+=`事件数: ${evs.length}\n`;
+  txt+="\n--- 事件流 ---\n";
+  evs.forEach(e=>{
+    const p=e.payload||{};
+    txt+=`[${String(e.seq).padStart(4,"0")}] R${e.round} · ${fmtT(e.ts)} · ${e.type} · ${e.actor||"agent"}\n`;
+    if(e.type==="tool_call")txt+=`  tool: ${p.tool}\n  args: ${tryFmt(typeof p.args==="string"?p.args:JSON.stringify(p.args))}\n`;
+    else if(e.type==="tool_result")txt+=`  status: ${p.status} · ${p.bytes||0}B\n  output: ${String(p.preview||"(空)").slice(0,400)}\n`;
+    else if(e.type==="assistant")txt+=`  思考: ${String(p.content||"").slice(0,500)}\n`;
+    else if(e.type==="user_msg")txt+=`  用户(${p.kind||"msg"}): ${String(p.content||"").slice(0,300)}\n`;
+    else if(e.type==="finding")txt+=`  成果(${p.kind||""}): ${p.value}\n`;
+    else if(["error","loop_phase","status_change","verdict"].includes(e.type))txt+=`  ${JSON.stringify(p).slice(0,200)}\n`;
+  });
+  const blob=new Blob([txt],{type:"text/plain;charset=utf-8"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=`${name}_${jid}_log.txt`;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  toast(`已下载日志 · ${evs.length} 条事件`);
+}
+function renderTaskPanel(){
+  const el=$("#hist-list");if(!el)return;
+  const st=M.jobs.reduce((a,j)=>(a[j.status]=(a[j.status]||0)+1,a),{});
+  const tf=$("#t-filters");
+  if(tf){
+    tf.innerHTML=[["all","全部"],["running","●"+(st.running||0)]].map(([v,l])=>`<button class="chip ${state.taskFilter===v?"on":""}" data-tf="${v}">${l}</button>`).join("");
+    $$(".chip",tf).forEach(c=>c.onclick=()=>{state.taskFilter=c.dataset.tf;renderTaskPanel()});
+  }
+  let list=[...M.jobs].sort((a,b)=>((b.status==="running")-(a.status==="running"))||(b.created_at||0)-(a.created_at||0));
+  let tree=buildTaskTree(list);
+  if(state.taskFilter==="running")tree=tree.filter(g=>treeStatus(g)==="running");
+  if(state.expandedTrees===undefined)state.expandedTrees=new Set();
+  el.innerHTML=tree.map(g=>{
+    const st=treeStatus(g);
+    const dc=dotClass(st);
+    const lab=state.labels[g.parent.job_id];
+    const hasKids=g.children.length>0;
+    const expanded=state.expandedTrees.has(g.parent.job_id);
+    const sel=[g.parent.job_id,...g.children.map(c=>c.job_id)].includes(state.jobId);
+    const runN=g.children.filter(c=>c.status==="running").length;
+    const isRunning=st==="running";
+    const kids=hasKids?g.children.map(c=>{
+      const cd=dotClass(c.status);
+      return `<div class="trow child ${c.job_id===state.jobId?"sel":""}" data-j="${c.job_id}" style="display:${expanded?"":"none"}">
+        <div class="t-id"><span class="dot ${cd}"></span><div class="t-name-col"><span class="t-name">${esc(c.job_id.split("-").slice(-2).join("-"))}</span></div></div>
+        <div class="t-obj">${esc((c.objective||"").replace(/\s+/g," ").replace(/^【总目标】\n?/,"").slice(0,36))}</div>
+      </div>`}).join(""):"";
+    return `${kids}<div class="trow ${sel?"sel":""}" data-j="${g.parent.job_id}" data-tree="${hasKids?1:0}" title="${hasKids?esc(g.children.map(c=>c.job_id+" · "+c.status).join("\n")):""}">
+      <div class="t-id"><span class="dot ${dc}"></span><div class="t-name-col"><span class="t-name">${esc(lab||g.parent.job_id)}</span></div></div>
+      <div class="t-obj">${esc((g.parent.objective||"").replace(/\s+/g," ").slice(0,42))}</div>
+      <div class="t-acts">
+        ${hasKids?`<span class="twbadge" data-act="tw" title="子任务数${runN?` · ${runN} 执行中`:""}">⚑${g.children.length}${runN?`<span class="subn" style="color:var(--ok)"> ●${runN}</span>`:""}</span>`:""}
+        <button class="t-act" data-act="menu" title="任务操作">⋯</button>
+      </div></div>`}).join("")
+    ||`<div class="empty" style="padding:18px 6px">无任务</div>`;
+  $$(".trow",el).forEach(r=>{
+    r.onclick=e=>{
+      if(e.target.closest(".t-act"))return;
+      setTask(r.dataset.j);
+    };
+    $$(".t-act",r).forEach(b=>b.onclick=e=>{
+      e.stopPropagation();
+      if(b.dataset.act==="tw"){
+        const pid=r.dataset.j;
+        state.expandedTrees.has(pid)?state.expandedTrees.delete(pid):state.expandedTrees.add(pid);
+        renderTaskPanel();
+      }
+      else if(b.dataset.act==="menu")openTaskMenu(r);
+    });
+  });
+}
+
+/* ── 工具执行日志条目 ── */
+function toolLogHTML(c){
+  const st=c.result?(c.result.payload.status==="ok"?"ok":"err"):"wait";
+  const stTxt=c.result?c.result.payload.status:"running…";
+  const bytes=c.result?(c.result.payload.bytes||0):0;
+  const args=c.call.payload.args;
+  return `<div class="tlog open ${c.result?"":"pending"}">
+    <div class="tl-head" data-act="tl-toggle"><span class="arr">▼</span><span>⚙</span><span class="tname">${esc(c.call.payload.tool)}</span><span class="abadge" style="--ac:${acolor(c.call.actor)}">${AGENT_IC} ${actorOf(c.call)}</span>
+      <span class="st ${st}">${stTxt} · ${bytes}B · ${fmtT(c.call.ts)}</span></div>
+    <div class="tl-body">
+      <span class="lbl">args · 调用参数</span><pre>${esc(tryFmt(typeof args==="string"?args:JSON.stringify(args)))}</pre>
+      ${c.result?`<span class="lbl">output · 响应结果（${esc(stTxt)} · ${bytes}B）</span><pre>${esc(c.result.payload.preview||"(空)")}</pre>`:`<span class="lbl">executing · 执行中</span><pre>等待工具返回…</pre>`}
+    </div></div>`;
+}
+function applyFilter(){
+  const f=state.filter,feed=$("#feed");if(!feed)return;
+  $$(".rsep",feed).forEach(rs=>{
+    let n=rs.nextElementSibling,has=false,nodes=[];
+    while(n&&!n.classList.contains("rsep")){nodes.push(n);if(f==="tool"&&n.classList.contains("tlog"))has=true;if(f==="agent"&&n.classList.contains("msg-agent"))has=true;if(f==="milestone"&&n.classList.contains("milestone"))has=true;n=n.nextElementSibling}
+    if(f==="all"){rs.style.display="";nodes.forEach(x=>x.style.display="");return}
+    rs.style.display=has?"":"none";
+    nodes.forEach(x=>x.style.display=has?"":"none");
+  });
+}
+
+/* ── 工作台骨架 ── */
+function workspaceHTML(){
+  if(state.newTaskMode){
+    $("#k-run").textContent=M.jobs.filter(x=>x.status==="running").length;
+    $("#k-model").textContent=M.config.effective.model_primary||"model";
+    return `<div class="ws2">
+    <aside class="hist">
+      <button class="newtask" id="btn-camp-new">＋ 新建任务</button>
+      <div class="hist-cap"><span>任务 · ${M.jobs.length}</span><span style="flex:1"></span><span id="t-filters" style="display:flex;gap:5px"></span></div>
+      <div class="hist-list" id="hist-list"></div>
+    </aside>
+    <div class="stage new-mode">
+      <div class="center-hero">
+        <div class="hero-brand">${AGENT_IC} secpt <span class="muted">· 下达新任务</span></div>
+        <div class="composer center">
+          <div class="attach-strip" id="attach-strip"></div>
+          <textarea id="c-in" rows="3" placeholder="目标 / 范围 / 约束 / 交付要求…（附件点 ＋，Ctrl+Enter 发送）"></textarea>
+          <div class="composer-foot">
+            <button class="cbtn" id="btn-attach" title="附件 / 图片">＋</button>
+            <input type="file" id="c-files" multiple hidden>
+            <div class="mode-switch">
+              <button data-m="followup" class="${state.mode==="followup"?"on":""}">追问当前任务</button>
+              <button data-m="new" class="on">下达新任务</button>
+            </div>
+            <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
+            <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
+          </div>
+        </div>
+        <div class="hero-hint">任务流：Commander 规划拆分 → 执行体 ReAct 并行 → 后勤后台 → 交付门验收 → 经验沉淀</div>
+      </div>
+    </div>
+  </div>`;
+  }
+  const j=curJob();
+  const rounds=buildRounds(M.events);
+  const cost=rounds.reduce((a,r)=>a+r.cost,0);
+  const tokens=rounds.reduce((a,r)=>a+r.tokens,0);
+  const dur=rounds.length?(rounds[rounds.length-1].t1-rounds[0].t0):0;
+  const flags=(M.workspace.flags||[]).length;
+  $("#k-cost").textContent=fmtCny(cost);
+  $("#k-flag").textContent=flags;
+  $("#k-run").textContent=M.jobs.filter(x=>x.status==="running").length;
+  $("#k-model").textContent=M.config.effective.model_primary||"model";
+  const title=(state.labels[j.job_id]||(j.objective||"").replace(/^【总目标】\n?/,"")).split("\n")[0].slice(0,46);
+  return `<div class="ws2">
+    <aside class="hist">
+      <button class="newtask" id="btn-camp-new">＋ 新建任务</button>
+      <div class="hist-cap"><span>任务 · ${M.jobs.length}</span><span style="flex:1"></span><span id="t-filters" style="display:flex;gap:5px"></span></div>
+      <div class="hist-list" id="hist-list"></div>
+    </aside>
+    <div class="stage">
+      <div class="crumb-bar">
+        <span class="dot ${dotClass(j.status)}"></span>
+        <span class="ic">◈</span>
+        <span class="title">${esc(title)||"（无标题）"}</span>
+        <span class="meta">${esc(j.job_id)} · <b>${esc(j.status)}</b> · ${esc(j.task_type)}</span>
+        <div class="crumb-metrics"><span><b>${rounds.length}</b> rounds</span><span><b>${fmtDur(dur)}</b></span><span><b>${fmtTok(tokens)}</b> tok</span><span><b>${fmtCny(cost)}</b></span><span class="${flags?"gold":""}">🏁 <b>${flags}</b></span></div>
+      </div>
+      <div class="anchor-bar">
+        <span class="anchor flag">🏁 <span class="n">${flags}</span> 成果</span>
+        <span class="anchor err">⚠ <span class="n">${rounds.reduce((a,r)=>a+r.errors,0)}</span> 错误</span>
+        ${[["all","全部"],["tool","工具"],["agent","智能体"],["milestone","成果"]].map(([v,l])=>`<button class="chip ${state.filter===v?"on":""}" data-f="${v}">${l}</button>`).join("")}
+        <label class="follow"><input type="checkbox" id="ws-follow" ${state.follow?"checked":""}>跟随</label>
+      </div>
+      <div class="feed" id="feed"></div>
+      <div class="composer-float">
+        <div class="composer">
+          <div class="attach-strip" id="attach-strip"></div>
+          <textarea id="c-in" rows="2" placeholder="${state.mode==="followup"?"注入指令 / 追问当前任务（人工直投，规划让路）…":"目标 / 范围 / 约束 / 交付要求…"}"></textarea>
+          <div class="composer-foot">
+            <button class="cbtn" id="btn-attach" title="附件（下达新任务时随任务上传）">＋</button>
+            <input type="file" id="c-files" multiple hidden>
+            <div class="mode-switch">
+              <button data-m="followup" class="${state.mode==="followup"?"on":""}">追问当前任务</button>
+              <button data-m="new" class="${state.mode==="new"?"on":""}">下达新任务</button>
+            </div>
+            <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
+            <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── 工作台绑定（真实 API） ── */
+function bindWorkspace(){
+  const body=$("#body");
+  renderFeed();
+  renderTaskPanel();
+  $$(".chip[data-f]",body).forEach(c=>c.onclick=()=>{state.filter=c.dataset.f;$$(".chip[data-f]",body).forEach(x=>x.classList.toggle("on",x===c));applyFilter()});
+  const wf=$("#ws-follow");if(wf)wf.onchange=e=>{state.follow=e.target.checked};
+  // 新建模式无 feed：renderFeed/renderTaskPanel 对缺失元素有守卫，安全
+  $$(".mode-switch button",body).forEach(b=>b.onclick=()=>{
+    state.mode=b.dataset.m;
+    if(state.newTaskMode&&b.dataset.m==="followup")state.newTaskMode=false;
+    renderBody()});
+  const cin=$("#c-in");
+  cin.addEventListener("keydown",e=>{
+    if((e.ctrlKey||e.metaKey)&&e.key==="Enter"){
+      if($("#btn-send").classList.contains("stoppable"))stopComposer();else sendComposer();
+    }
+  });
+  $("#btn-send").onclick=()=>{
+    if($("#btn-send").classList.contains("stoppable"))stopComposer();else sendComposer();
+  };
+  $("#btn-attach").onclick=()=>$("#c-files").click();
+  $("#c-files").onchange=async e=>{
+    for(const f of e.target.files)state.composerFiles.push(await toB64(f));
+    e.target.value="";renderAttachStrip();
+  };
+  syncSendBtn();
+  const cn=$("#btn-camp-new");if(cn)cn.onclick=()=>{setView("workspace");state.mode="new";state.newTaskMode=true;renderBody();$("#c-in").focus()};
+}
+async function stopComposer(){
+  const jid=state.jobId;if(!jid)return;
+  try{
+    await api(`/api/jobs/${jid}/cancel`,{method:"POST"});
+    toast(`已请求停止 ${jid}（整树协作式取消，引擎下一步优雅退出）`);
+    await loadJobs();renderBody();syncSendBtn();
+  }catch(e){toast(`停止失败：${e.message}`)}
+}
+function toB64(file){
+  return file.arrayBuffer().then(buf=>{
+    let bin="";const b=new Uint8Array(buf);
+    for(let i=0;i<b.length;i+=0x8000)bin+=String.fromCharCode(...b.subarray(i,i+0x8000));
+    return {name:file.name,data_b64:btoa(bin),isImage:(file.type||"").startsWith("image/")};
+  });
+}
+function renderAttachStrip(){
+  const bar=$("#attach-strip");if(!bar)return;
+  bar.innerHTML=state.composerFiles.map((f,i)=>
+    `<span class="attach-chip">${f.isImage?`<img src="data:;base64,${f.data_b64}" alt="">`:"📄"}${esc(f.name)}<b data-rm="${i}">✕</b></span>`).join("");
+  bar.style.display=state.composerFiles.length?"flex":"none";
+  $$("[data-rm]",bar).forEach(x=>x.onclick=()=>{state.composerFiles.splice(+x.dataset.rm,1);renderAttachStrip()});
+}
+function openTaskMenu(row){
+  const jid=row.dataset.j;
+  const old=$(".tmenu");if(old)old.remove();
+  const menu=document.createElement("div");
+  menu.className="tmenu";
+  const running=taskRunning(jid);
+  menu.innerHTML=`
+    <button data-m="ren">✎ 重命名</button>
+    <button data-m="tw">⚑ 子任务展开/收起</button>
+    <button data-m="dl">⤓ 下载运行日志</button>
+    ${running?'<button data-m="stop" class="danger">◼ 停止任务</button>':""}
+    <button data-m="del" class="danger">🗑 删除任务</button>`;
+  document.body.appendChild(menu);
+  const r=row.getBoundingClientRect();
+  menu.style.top=Math.min(innerHeight-menu.offsetHeight-8,r.bottom+2)+"px";
+  menu.style.left=Math.min(innerWidth-menu.offsetWidth-8,r.right-menu.offsetWidth)+"px";
+  const close=()=>{menu.remove();document.removeEventListener("click",onDoc)};
+  const onDoc=e=>{if(!menu.contains(e.target))close()};
+  setTimeout(()=>document.addEventListener("click",onDoc),0);
+  menu.onclick=async e=>{
+    const act=e.target.dataset.m;if(!act)return;close();
+    if(act==="ren")renameTask(jid);
+    else if(act==="tw"){state.expandedTrees.has(jid)?state.expandedTrees.delete(jid):state.expandedTrees.add(jid);renderTaskPanel()}
+    else if(act==="dl")downloadLog(jid);
+    else if(act==="stop"){
+      try{await api(`/api/jobs/${jid}/cancel`,{method:"POST"});toast(`已请求停止 ${jid}`);loadJobs().then(renderTaskPanel)}
+      catch(err){toast(`停止失败：${err.message}`)}
+    }
+    else if(act==="del"){
+      if(!confirm(`删除任务 ${jid}？运行中会先停止；仅从列表移除，历史目录保留。`))return;
+      try{await api(`/api/jobs/${jid}`,{method:"DELETE"});
+        toast("已删除");await loadJobs();
+        if(state.jobId===jid){state.jobId=M.jobs[0]?M.jobs[0].job_id:"";state.cursor=0;M.events=[];refreshJobData(true)}
+        else renderTaskPanel();
+      }catch(err){toast(`删除失败：${err.message}`)}
+    }
+  };
+}
+async function sendComposer(){
+  const cin=$("#c-in");const text=cin.value.trim();
+  if(!text){toast("内容为空");return}
+  cin.value="";
+  try{
+    if(state.mode==="followup"){
+      const r=await api(`/api/jobs/${state.jobId}/message`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({content:text})});
+      toast(`已注入任务池（${r.intent_id||"direct"}）· 规划让路，执行体接单`);
+      refreshJobData(true);
+    }else{
+      const r=await api("/api/jobs",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({objective:text,profile:curJob().task_type||"ctf",
+          files:state.composerFiles,fake:false})});
+      state.composerFiles=[];
+      state.newTaskMode=false;
+      toast(`新任务已启动：${r.job_id}（${r.mode}）`);
+      await loadJobs();setTask(r.job_id);
+    }
+  }catch(e){toast(`下发失败：${e.message}`)}
+}
+
+/* ── 右上角悬浮胶囊坞 ── */
+let dockOpen="";
+function closeDock(){if(dockOpen){dockOpen="";renderDock()}}
+function renderDock(){
+  const dock=$("#dock");if(!dock)return;
+  const w=M.workspace||{},intents=w.intents||[];
+  const running=intents.filter(i=>i.status==="running").length;
+  const flags=(M.events||[]).filter(e=>e.type==="finding"&&e.payload.kind==="flag");
+  const finds=M.findings||[];
+  const stColor={open:"var(--info)",running:"var(--ok)",done:"var(--fg3)",exhausted:"var(--bad)"};
+  let html="";
+  if(intents.length){
+    html+=`<div class="dock-item ${dockOpen==="tasks"?"open":""}" data-d="tasks">
+      <div class="dock-panel">
+        <h5>TASK POOL · ${intents.length}</h5>
+        <div class="dockstat">${["running","open","done","exhausted"].map(k=>{
+          const n=intents.filter(i=>i.status===k).length;
+          return n?`<span class="ds-${k}">${n} ${k==="running"?"执行中":k==="open"?"待执行":k==="done"?"完成":"失败"}</span>`:"";
+        }).join("")}${(w.hypotheses||[]).length?`<span>假设 ${(w.hypotheses||[]).filter(h=>h.state==="testing"||h.state==="proposed").length} 未决/${(w.hypotheses||[]).length}</span>`:""}</div>
+        ${intents.map(i=>`<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
+          <span class="dot" style="margin-top:5px;${i.status==="running"?"animation:pulse 1.8s infinite;":""}background:${stColor[i.status]||"var(--fg3)"}"></span>
+          <div class="kmain">${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
+          <div class="ksub"><span>${esc(i.status)}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`).join("")}
+      </div>
+      <button class="dock-pill" data-act="dock"><span class="dot ${running?"running":""}" style="${running?"":"background:var(--fg3)"}"></span>任务状态<span class="pv">${running?running+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
+    </div>`;
+  }
+  if(flags.length||finds.length){
+    html+=`<div class="dock-item ${dockOpen==="outcome"?"open":""}" data-d="outcome">
+      <div class="dock-panel">
+        ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
+        ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
+        <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · ${finds.length}</h5>
+        ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无发现</div>'}
+      </div>
+      <button class="dock-pill" data-act="dock">🏁 产出成果<span class="pv">${(flags.length?flags.length+" 旗":"")+(flags.length&&finds.length?" · ":"")+(finds.length?finds.length+" 发现":"")}</span><span class="caret-ic">▼</span></button>
+    </div>`;
+  }
+  dock.innerHTML=html;
+  $$("[data-act=dock]",dock).forEach(b=>b.onclick=()=>{
+    const d=b.closest(".dock-item").dataset.d;
+    dockOpen=(dockOpen===d?"":d);renderDock();
+  });
+  $$("[data-act=copy]",dock).forEach(x=>x.onclick=e=>{
+    e.stopPropagation();
+    const val=x.parentElement.querySelector("span").textContent;
+    try{navigator.clipboard&&navigator.clipboard.writeText(val)}catch(err){}
+    toast("已复制到剪贴板");
+  });
+  $$(".hyp[data-f]",dock).forEach(el=>el.onclick=()=>{const f=finds.find(x=>x.id===el.dataset.f);if(f)openFinding(f)});
+}
+
+/* ── 其他视图 ── */
+function toolUsage(){const m={};M.events.forEach(e=>{if(e.type==="tool_call")m[e.payload.tool]=(m[e.payload.tool]||0)+1});return m}
+
+function renderBody(){
+  const body=$("#body");
+  if(state.view==="workspace"){body.innerHTML=workspaceHTML();bindWorkspace();return}
+
+  if(state.view==="dashboard"){
+    const rounds=buildRounds(M.events);
+    const cost=rounds.reduce((a,r)=>a+r.cost,0),tokens=rounds.reduce((a,r)=>a+r.tokens,0);
+    const running=M.jobs.filter(j=>j.status==="running");
+    const sev={critical:0,high:0,medium:0,low:0};M.findings.forEach(f=>{if(sev[f.severity]!=null)sev[f.severity]++});
+    const sevColor={critical:"bad",high:"high",medium:"warn",low:"fg3"};
+    const usage=toolUsage();
+    const top=Object.entries(usage).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const days=[];
+    for(let i=6;i>=0;i--){
+      const d=new Date(Date.now()-i*86400000);
+      const day0=new Date(d);day0.setHours(0,0,0,0);
+      const day1=new Date(day0.getTime()+86400000);
+      const js=M.jobs.filter(j=>(j.created_at||0)>=day0.getTime()/1000&&(j.created_at||0)<day1.getTime()/1000);
+      days.push([i===0?"今日":`${d.getMonth()+1}/${d.getDate()}`,js.length,js.filter(x=>x.status==="failed"||x.status==="error").length]);
+    }
+    const dmax=Math.max(1,...days.map(d=>d[1]));
+    body.innerHTML=`<div class="view">
+      <h2>总览</h2><div class="view-sub">全局态势 · 卡片与图例可点击下钻</div>
+      <div class="statgrid">
+        <div class="stat link" data-go="workspace"><div class="v" style="color:var(--ok)">${running.length}<span class="faint" style="font-size:14px"> / ${M.jobs.length}</span></div><div class="k">运行中 / 全部任务</div></div>
+        <div class="stat link" data-go="findings"><div class="v" style="color:var(--flag)">${M.findings.length}</div><div class="k">累计发现 · ${sev.critical} critical</div></div>
+        <div class="stat"><div class="v">${fmtCny(cost)}</div><div class="k">当前任务成本 · ${fmtTok(tokens)} tok</div></div>
+        <div class="stat link" data-go="experience"><div class="v">${M.experiences.length}</div><div class="k">沉淀经验</div></div>
+      </div>
+      <div class="dash2">
+        <div class="card"><div class="card-t">发现严重度 <span class="faint" style="font-size:11px">· 点击图例下钻到发现视图</span></div>
+          <div class="sevbar">${["critical","high","medium","low"].map(k=>`<i style="width:${sev[k]/(M.findings.length||1)*100}%;background:var(--${sevColor[k]})"></i>`).join("")}</div>
+          <div class="legend">${["critical","high","medium","low"].map(k=>`<span class="lg" data-sev="${k}"><i style="background:var(--${sevColor[k]})"></i>${k} ${sev[k]}</span>`).join("")}</div></div>
+        <div class="card"><div class="card-t">近 7 日任务</div>
+          ${days.map(([d,su,fa])=>`
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:12px">
+              <span class="faint" style="width:34px">${d}</span>
+              <div style="flex:1;height:12px;border-radius:3px;background:var(--bg3);overflow:hidden;display:flex">
+                <i style="width:${su/dmax*100}%;background:var(--ok);opacity:.55"></i>
+                <i style="width:${fa/dmax*100}%;background:var(--bad);opacity:.55"></i></div>
+              <span class="mono faint" style="width:64px;text-align:right">${su}✓ ${fa}✗</span></div>`).join("")}
+          <div class="legend"><span><i style="background:var(--ok);opacity:.55"></i>任务</span><span><i style="background:var(--bad);opacity:.55"></i>失败</span></div></div>
+        <div class="card"><div class="card-t">工具调用 TOP 5 · 当前任务</div>
+          ${top.map(([t,n])=>`<div style="display:flex;gap:12px;align-items:center;padding:4px 0;font-size:12.5px"><span class="mono" style="width:120px;flex:none;overflow:hidden;text-overflow:ellipsis">${esc(t)}</span><div style="flex:1;height:3px;border-radius:2px;background:var(--bg3)"><i style="display:block;height:100%;width:${n/top[0][1]*100}%;background:var(--info);border-radius:2px"></i></div><span class="mono faint">${n}</span></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无调用</div>'}</div>
+        <div class="card"><div class="card-t">运行中任务</div>
+          ${running.map(j=>`<div class="hyp link" data-job="${esc(j.job_id)}"><div class="h-top"><span class="dot running"></span><span class="mono" style="font-size:11.5px">${esc(j.job_id)}</span></div><div class="h-title">${esc((j.objective||"").slice(0,50))}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无运行中任务</div>'}</div>
+        <div class="card"><div class="card-t">最新发现 <span class="faint" style="font-size:11px">· 点击查看详情</span></div>
+          ${M.findings.slice(0,5).map(f=>`<div class="hyp link" data-fid="${esc(f.id)}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无发现</div>'}</div>
+        <div class="card"><div class="card-t">最新经验 <span class="faint" style="font-size:11px">· 点击查看全文</span></div>
+          ${M.experiences.slice(0,3).map(x=>`<div class="hyp link" data-eid="${esc(x.id)}"><div class="h-top"><span class="badge b-type">${esc(x.technique||"generic")}</span><span class="conf">${x.hits}/${x.injections}</span></div><div class="h-title">${esc(x.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无经验</div>'}</div>
+      </div></div>`;
+    $$("[data-go]",body).forEach(el=>el.onclick=()=>setView(el.dataset.go));
+    $$("[data-sev]",body).forEach(el=>el.onclick=()=>{state.findSev=[el.dataset.sev];state.findQ="";setView("findings")});
+    $$("[data-job]",body).forEach(el=>el.onclick=()=>setTask(el.dataset.job));
+    $$("[data-fid]",body).forEach(el=>el.onclick=()=>openFinding(M.findings.find(f=>f.id===el.dataset.fid)));
+    $$("[data-eid]",body).forEach(el=>el.onclick=()=>openExperience(M.experiences.find(x=>x.id===el.dataset.eid)));
+    return;
+  }
+
+  if(state.view==="assets"){
+    const types={};M.assets.forEach(a=>types[a.type]=(types[a.type]||0)+1);
+    const tlist=Object.entries(types).sort((a,b)=>b[1]-a[1]);
+    body.innerHTML=`<div class="view"><h2>资产图谱</h2><div class="view-sub"><span id="a-count"></span> · 点击值复制 · 来源任务可跳转回工作台</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+        <button class="chip ${!state.assetTypes.length?"on":""}" data-at="__all">全部</button>
+        ${tlist.map(([t,n])=>`<button class="chip ${state.assetTypes.includes(t)?"on":""}" data-at="${esc(t)}">${esc(t)} <span class="mono faint" style="font-size:10px">${n}</span></button>`).join("")}
+        <input id="a-search" placeholder="搜索值 / 来源任务…" style="margin-left:auto;width:230px" value="${esc(state.assetQ)}">
+      </div>
+      <div class="card" style="padding:0;max-height:calc(100vh - 300px);overflow:auto"><table class="tbl"><thead><tr><th style="width:100px">类型</th><th>值</th><th style="width:130px">来源任务</th><th style="width:150px">首次发现</th></tr></thead><tbody id="a-tbody"></tbody></table></div></div>`;
+    $$("[data-at]",body).forEach(c=>c.onclick=()=>{
+      const t=c.dataset.at;
+      if(t==="__all")state.assetTypes=[];
+      else state.assetTypes=state.assetTypes.includes(t)?state.assetTypes.filter(x=>x!==t):[...state.assetTypes,t];
+      renderBody();
+    });
+    $("#a-search").oninput=e=>{state.assetQ=e.target.value;renderAssets()};
+    renderAssets();
+    return;
+  }
+
+  if(state.view==="findings"){
+    const sevAll=["critical","high","medium","low"];
+    const sev={critical:0,high:0,medium:0,low:0};M.findings.forEach(f=>{if(sev[f.severity]!=null)sev[f.severity]++});
+    const sevColor={critical:"bad",high:"high",medium:"warn",low:"fg3"};
+    body.innerHTML=`<div class="view"><h2>发现 / 风险</h2><div class="view-sub">${M.findings.length} 条 · 点击图例筛选严重度 · 点击行查看详情</div>
+      <div class="card" style="padding:13px 16px">
+        <div class="sevbar">${sevAll.map(k=>`<i style="width:${sev[k]/(M.findings.length||1)*100}%;background:var(--${sevColor[k]})"></i>`).join("")}</div>
+        <div class="legend" style="margin-top:10px">${sevAll.map(k=>`<span class="lg ${state.findSev.includes(k)?"":"off"}" data-sev="${k}"><i style="background:var(--${sevColor[k]})"></i>${k} ${sev[k]}</span>`).join("")}</div></div>
+      <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
+        <input id="f-search" placeholder="搜索标题 / CWE / 目标…" style="flex:1;max-width:340px" value="${esc(state.findQ)}">
+        <span class="faint mono" style="font-size:11.5px" id="f-count"></span></div>
+      <div id="f-list"></div></div>`;
+    $$("[data-sev]",body).forEach(l=>l.onclick=()=>{
+      const k=l.dataset.sev;
+      state.findSev=state.findSev.includes(k)?state.findSev.filter(x=>x!==k):[...state.findSev,k];
+      if(!state.findSev.length)state.findSev=[...sevAll];
+      renderBody();
+    });
+    $("#f-search").oninput=e=>{state.findQ=e.target.value;renderFindings()};
+    renderFindings();
+    return;
+  }
+
+  if(state.view==="tools"){
+    const usage=toolUsage();
+    const groups=[["内置工具",M.tools.builtin],["插件工具",M.tools.plugins],["打法技能",M.tools.skills]];
+    const q=(state.toolQ||"").toLowerCase();
+    const row=(t)=>{const n=usage[t.name]||0;
+      if(q&&!((t.name+" "+(t.description||"")+" "+(t.summary||"")).toLowerCase().includes(q)))return"";
+      return `<div class="trow2" data-tool="${esc(t.name)}"><span class="tname2">${esc(t.name)}</span>
+        <span class="tdesc">${esc(((t.description||t.summary)||"(无描述)").slice(0,86))}</span>
+        ${n?`<span class="badge b-type mono" style="flex:none">${n} 次</span>`:`<span class="faint mono" style="font-size:10.5px;flex:none">未调用</span>`}</div>`};
+    body.innerHTML=`<div class="view"><h2>工具与技能</h2><div class="view-sub">调用次数来自当前任务事件流 · 点击工具查看它的调用记录（参数与响应）</div>
+      <input id="t-search" placeholder="搜索工具 / 技能…" style="width:280px;margin-bottom:16px" value="${esc(state.toolQ)}">
+      ${groups.map(([title,arr])=>`<div class="card"><div class="card-t">${title} <span class="faint mono" style="font-size:11px">${arr.length}</span></div>${arr.map(row).join("")}</div>`).join("")}</div>`;
+    $("#t-search").oninput=e=>{state.toolQ=e.target.value;renderBody();$("#t-search").focus()};
+    $$("[data-tool]",body).forEach(el=>el.onclick=()=>openTool(el.dataset.tool));
+    return;
+  }
+
+  if(state.view==="experience"){
+    const techs=[...new Set(M.experiences.map(x=>x.technique).filter(Boolean))];
+    body.innerHTML=`<div class="view"><h2>沉淀经验</h2><div class="view-sub">${M.experiences.length} 条 · 命中率 = 命中 / 注入 · 点击卡片查看全文与踩坑记录</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+        <button class="chip ${!state.expTech?"on":""}" data-et="__all">全部</button>
+        ${techs.map(t=>`<button class="chip ${state.expTech===t?"on":""}" data-et="${esc(t)}">${esc(t)}</button>`).join("")}
+        <input id="e-search" placeholder="搜索经验…" style="margin-left:auto;width:220px" value="${esc(state.expQ)}"></div>
+      <div id="e-list"></div></div>`;
+    $$("[data-et]",body).forEach(c=>c.onclick=()=>{state.expTech=c.dataset.et==="__all"?"":c.dataset.et;renderBody()});
+    $("#e-search").oninput=e=>{state.expQ=e.target.value;renderExperience()};
+    renderExperience();
+    return;
+  }
+
+  if(state.view==="config"){
+    const cfg=M.config.effective;
+    const L={model_primary:"主模型",model_fallback:"备模型",logistics_workers:"后勤并发数",orch_commander:"Commander 编排",orch_delivery:"交付门",orch_logistics:"后勤编排",role_templates:"角色模板 legacy",mentor:"导师模型纠偏",delegate:"delegate 子智能体",tool_pool:"备选工具池"};
+    const groups=[["模型",["model_primary","model_fallback"]],["编排",["orch_commander","orch_delivery","orch_logistics","role_templates","mentor","delegate","tool_pool"]],["后勤",["logistics_workers"]]];
+    body.innerHTML=`<div class="view" style="max-width:720px"><h2>配置</h2>
+      <div class="view-sub">运行时覆盖 · 优先级低于 shell export、高于内置默认、不改 .env · <span id="cfg-mod" style="color:var(--warn)"></span></div>
+      ${groups.map(([g,keys])=>`<div class="card"><div class="card-t">${g}</div>${keys.map(k=>`
+        <div style="margin-bottom:13px"><label class="faint" style="font:10.5px var(--mono);display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase">${L[k]||k} · ${k}</label>
+        <input data-cfg="${k}" data-def="${esc(M.config.saved[k]||"")}" value="${esc(cfg[k]||"")}" placeholder="生效值：${esc(M.config.saved[k]||"(内置默认)")}" style="width:100%"></div>`).join("")}</div>`).join("")}
+      <div style="display:flex;gap:10px"><button class="btn primary" id="cfg-save">保存配置</button><button class="btn" id="cfg-reset">恢复上次保存</button></div></div>`;
+    const inputs=$$("[data-cfg]",body);
+    const upd=()=>{
+      const mod=inputs.filter(i=>i.value!==i.dataset.def);
+      $("#cfg-mod").textContent=mod.length?`已修改 ${mod.length} 项（未保存）`:"";
+      inputs.forEach(i=>i.style.borderColor=mod.includes(i)?"var(--warn)":"");
+    };
+    inputs.forEach(i=>i.addEventListener("input",upd));
+    $("#cfg-save").onclick=async()=>{
+      const w=inputs.find(i=>i.dataset.cfg==="logistics_workers");
+      if(w&&w.value!==""&&isNaN(Number(w.value))){w.style.borderColor="var(--bad)";toast("后勤并发数必须是数字");return}
+      try{
+        const cfg={};inputs.forEach(i=>{if(i.value.trim()!=="")cfg[i.dataset.cfg]=i.value.trim()});
+        M.config=await api("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)});
+        toast("已保存并即时生效（新任务起）");
+        inputs.forEach(i=>i.dataset.def=i.value);upd();
+      }catch(e){toast(`保存失败：${e.message}`)}
+    };
+    $("#cfg-reset").onclick=()=>{inputs.forEach(i=>i.value=i.dataset.def);upd();toast("已恢复为上次保存值")};
+    upd();
+    return;
+  }
+}
+
+/* ── 资产渲染 ── */
+function renderAssets(){
+  const el=$("#a-tbody");if(!el)return;
+  const q=(state.assetQ||"").toLowerCase(),on=state.assetTypes;
+  const rows=M.assets.filter(a=>(!on.length||on.includes(a.type))&&(!q||(a.value+" "+(a.first_seen_job||"")).toLowerCase().includes(q)));
+  $("#a-count").textContent=`${rows.length} 条资产（库中共 ${M.assets.length}）`;
+  const view=rows.slice(0,200);
+  el.innerHTML=view.map(a=>`<tr data-val="${esc(a.value)}">
+    <td><span class="badge b-type">${esc(a.type)}</span></td>
+    <td class="mono" style="font-size:12px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.value)}">${esc(a.value)}</td>
+    <td><span class="mono faint" style="font-size:11.5px">${esc(a.first_seen_job||"—")}</span></td>
+    <td class="faint" style="font-size:11.5px">${a.ts?new Date(a.ts*1000).toLocaleString("zh-CN",{hour12:false}):"—"}</td></tr>`).join("")
+    +`<tr><td colspan="4" class="faint" style="text-align:center;font-size:11px">显示前 ${view.length} / 共 ${rows.length} 条</td></tr>`;
+  $$("#a-tbody tr[data-val]").forEach(tr=>tr.onclick=()=>{
+    try{navigator.clipboard&&navigator.clipboard.writeText(tr.dataset.val)}catch(e){}
+    toast("资产值已复制");
+  });
+}
+
+/* ── 发现渲染 ── */
+function renderFindings(){
+  const el=$("#f-list");if(!el)return;
+  const q=(state.findQ||"").toLowerCase();
+  const order={critical:0,high:1,medium:2,low:3};
+  const list=M.findings.filter(f=>state.findSev.includes(f.severity)&&(!q||(f.title+" "+f.target+" "+(f.cwe||"")).toLowerCase().includes(q)))
+    .sort((a,b)=>(order[a.severity]??9)-(order[b.severity]??9));
+  $("#f-count").textContent=`${list.length} 条匹配`;
+  el.innerHTML=list.map(f=>`<div class="row-find" data-id="${esc(f.id)}">
+    <div class="sevline" style="background:var(--${{critical:"bad",high:"high",medium:"warn",low:"fg3"}[f.severity]||"fg3"})"></div>
+    <div style="flex:1;min-width:0"><div class="t">${esc(f.title)}</div><div class="m">${f.cwe?esc(f.cwe)+" · ":""}${esc(f.target)} · ${esc(f.job_id)}</div></div>
+    <span class="badge b-${f.severity}">${f.severity}</span></div>`).join("")
+    ||`<div class="empty"><b>◌</b>无匹配发现 · 可点击图例放宽严重度筛选</div>`;
+  $$("[data-id]",el).forEach(r=>r.onclick=()=>openFinding(M.findings.find(x=>x.id===r.dataset.id)));
+}
+
+/* ── 经验渲染 ── */
+function renderExperience(){
+  const el=$("#e-list");if(!el)return;
+  const q=(state.expQ||"").toLowerCase();
+  const list=M.experiences.filter(x=>(!state.expTech||x.technique===state.expTech)&&(!q||(x.title+" "+x.what_worked+" "+x.technique).toLowerCase().includes(q)));
+  el.innerHTML=list.map(x=>`<div class="card link" data-eid="${esc(x.id)}">
+    <div style="display:flex;gap:10px;align-items:center"><b style="font-size:13.5px">${esc(x.title)}</b><span class="badge b-type" style="margin-left:auto">${esc(x.technique||"generic")}</span></div>
+    <div class="muted" style="font-size:12.5px;margin:8px 0;line-height:1.65">${esc(x.what_worked)}</div>
+    <div style="display:flex;gap:10px;align-items:center;font-size:11.5px"><span class="faint">命中率</span>
+      <div style="flex:1;height:3px;border-radius:2px;background:var(--bg3)"><i style="display:block;height:100%;width:${x.hits/Math.max(1,x.injections)*100}%;background:var(--ok);border-radius:2px"></i></div>
+      <span class="mono faint">${x.hits}/${x.injections}</span></div></div>`).join("")
+    ||`<div class="empty"><b>◌</b>无匹配经验</div>`;
+  $$("[data-eid]",el).forEach(c=>c.onclick=()=>openExperience(M.experiences.find(x=>x.id===c.dataset.eid)));
+}
+
+/* ── 详情抽屉 ── */
+function openTool(name){
+  const t=[...M.tools.builtin,...M.tools.plugins,...M.tools.skills].find(x=>x.name===name);
+  if(!t)return;
+  const usage=toolUsage()[name]||0;
+  const results=new Map(M.events.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
+  const recs=M.events.filter(e=>e.type==="tool_call"&&e.payload.tool===name).slice(-3)
+    .map(c=>{const r=results.get(c.payload.call_id);
+      return `── ${fmtT(c.ts)} · ${r?r.payload.status:"运行中"}${r&&r.payload.bytes?" · "+r.payload.bytes+"B":""} ──\nARGS: ${tryFmt(typeof c.payload.args==="string"?c.payload.args:JSON.stringify(c.payload.args))}\n${r?"OUTPUT: "+String(r.payload.preview||"(空)").slice(0,300):"(运行中)"}`})
+    .join("\n\n");
+  openDetail(name,`${t.kind||"skill"}${t.source?" · "+t.source:""} · 当前任务调用 ${usage} 次`,
+    ((t.description||t.summary)||"(无描述)")+(recs?"\n\n【最近调用记录】\n\n"+recs:"\n\n（当前任务暂无调用记录）"));
+}
+function openExperience(x){
+  if(!x)return;
+  openDetail(x.title,`${x.technique||"generic"} · 命中 ${x.hits}/${x.injections}`,
+    x.what_worked+"\n\n【pitfalls · 踩坑】\n- "+((x.pitfalls||[]).join("\n- ")||"（无）")+"\n\n【触发指标】"+(x.indicators||[]).join("、"));
+}
+function openFinding(f){
+  if(!f)return;
+  openDetail(f.title,`${f.id} · ${f.severity} · ${f.status} · 置信度 ${((f.confidence||0)*100).toFixed(0)}%`,
+    `${f.description||"(无描述)"}\n\n—— 目标：${f.target}\n来源任务：${f.job_id}${f.cwe?"\nCWE："+f.cwe:""}`);
+}
+function openDetail(title,meta,bodyText){
+  $("#fd-title").textContent=title;$("#fd-meta").textContent=meta;$("#fd-body").textContent=bodyText;
+  $("#fd-exp").style.display="none";
+  $("#fdetail").classList.add("show");$("#scrim").classList.add("show");
+}
+
+/* ── 命令面板 ── */
+function renderPalette(q){
+  const acts=[
+    ...navCounts().map(([id,,l])=>({t:"视图",label:l,run:()=>setView(id)})),
+    {t:"动作",label:"下达新任务",run:()=>{setView("workspace");state.mode="new";state.newTaskMode=true;renderBody();$("#c-in").focus()}},
+    {t:"动作",label:"切换主题",run:toggleTheme},
+    ...M.jobs.slice(0,8).map(j=>({t:"任务",label:j.job_id+" · "+(j.objective||"").slice(0,26).replace(/\s+/g," "),run:()=>setTask(j.job_id)})),
+  ].filter(a=>!q||a.label.toLowerCase().includes(q.toLowerCase()));
+  $("#p-list").innerHTML=acts.slice(0,12).map((a,i)=>`<div class="p-item ${i===0?"sel":""}" data-i="${i}"><span class="faint" style="font:10px var(--mono);width:34px">${a.t}</span>${esc(a.label)}</div>`).join("")||`<div class="empty" style="padding:14px">无匹配</div>`;
+  $$("#p-list .p-item").forEach(el=>el.onclick=()=>{acts[+el.dataset.i].run();togglePalette(false)});
+}
+function togglePalette(show){$("#palette").classList.toggle("show",show);if(show){$("#p-input").value="";renderPalette("");$("#p-input").focus()}else $("#scrim").classList.remove("show")}
+function toggleTheme(){
+  const cur=document.documentElement.dataset.theme==="light"?"dark":"light";
+  document.documentElement.dataset.theme=cur;localStorage.setItem("secpt-theme",cur);
+}
+let toastTimer;
+function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),2200)}
+
+/* ── 全局绑定 ── */
+$("#btn-theme").onclick=toggleTheme;
+$("#btn-k").onclick=()=>togglePalette(true);
+$("#scrim").onclick=()=>{$("#fdetail").classList.remove("show");togglePalette(false);closeDock()};
+$("#p-input").oninput=e=>renderPalette(e.target.value);
+$("#fd-exp").onclick=()=>toast("经验由任务结束时自动蒸馏（learning 闭环）");
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&state.newTaskMode&&state.view==="workspace"){state.newTaskMode=false;renderBody()}
+  if(e.key==="Escape"){$("#fdetail").classList.remove("show");togglePalette(false);closeDock()}
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();togglePalette(!$("#palette").classList.contains("show"))}
+});
+document.documentElement.dataset.theme=localStorage.getItem("secpt-theme")||(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");
+
+/* ── 启动 + 轮询 ── */
+async function refreshJobData(full){
+  try{
+    await Promise.all([loadJobs(),loadWorkspace(),loadConfig()]);
+    if(full)await loadEvents(true);
+    if(state.view==="workspace")renderBody();
+    renderDock();
+  }catch(e){/* 静默重试 */}
+}
+async function boot(){
+  await Promise.all([loadJobs(),loadAssets(),loadFindings(),loadTools(),loadExperience(),loadConfig()]);
+  if(state.jobId)try{await loadEvents(true)}catch(e){}
+  await loadWorkspace();
+  renderNav();setView("workspace");renderDock();
+  setInterval(async()=>{try{await loadEvents(false);
+    if(state.view==="workspace"){renderFeed();renderTaskPanel()}
+    syncSendBtn();renderDock()}catch(e){}},1500);
+  setInterval(async()=>{try{await Promise.all([loadWorkspace(),loadJobs(),loadFindings(),loadExperience()]);
+    if(state.view==="workspace")renderTaskPanel();
+    renderNav();renderDock()}catch(e){}},4000);
+  setInterval(async()=>{try{await loadAssets();await loadConfig();
+    if(state.view==="assets")renderAssets();renderNav()}catch(e){}},8000);
+}
+boot();

@@ -32,6 +32,7 @@ class ChainResult:
     depth: int = 0
     source: str = ""
     asset_scope: str = ""
+    lane: str = "main"  # 执行通道：main 主路径 / logistics 后台后勤
 
     def to_dict(self) -> dict:
         return asdict(self)

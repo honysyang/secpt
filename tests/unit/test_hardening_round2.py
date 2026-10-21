@@ -67,6 +67,22 @@ class TestConcurrentRunGate:
         me2.claim("g-03")
         assert "g-03" not in me2.active_foreign_leases()
 
+    def test_release_dead_claims_frees_ghost_leases(self, tmp_path):
+        """OOM 重启：旧 PID 的租约按 pid@host 判死立即回收，不用等 900s TTL。"""
+        host = socket.gethostname()
+        ghost = self._mk_ledger(tmp_path, f"99999999@{host}")
+        ghost.ensure("g-02")
+        assert ghost.claim("g-02") is True
+        me = self._mk_ledger(tmp_path, f"{os.getpid()}@{host}")
+        assert me.release_dead_claims() == ["g-02"]
+        assert me.claim("g-02") is True  # 回收后可立即重领
+        # 存活 worker 的租约不动（不干扰并发实例）
+        alive = self._mk_ledger(tmp_path, f"1@{host}")
+        alive.ensure("g-01")
+        alive.claim("g-01")
+        assert "g-01" not in me.release_dead_claims()
+        assert alive.status("g-01") == "claimed"
+
     def test_run_benchmark_refuses_when_active_foreign(self, tmp_path, monkeypatch):
         from secpt.core.orchestrator import benchmark as B
 

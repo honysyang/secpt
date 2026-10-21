@@ -135,7 +135,7 @@ def test_cli_run_file_and_task_mutex(tmp_path: Path) -> None:
 
 
 def test_cli_run_tree_deprecated_redirects_to_solve(tmp_path: Path) -> None:
-    """secpt run --mode tree 已废弃：提示并自动转发 solve 单链（--file 作为题面）。"""
+    """secpt run --mode tree 已废弃：提示并自动转发 solve（--file 作为题面）。"""
     from unittest.mock import patch
 
     from secpt.cli.app import app
@@ -159,7 +159,7 @@ def test_cli_run_tree_deprecated_redirects_to_solve(tmp_path: Path) -> None:
     assert "已废弃" in result.output
     mock_solve.assert_called_once()
     assert mock_solve.call_args.args[0] == str(f)
-    assert mock_solve.call_args.kwargs["mode"] == "single"
+    assert "mode" not in mock_solve.call_args.kwargs  # S6：solve 已无 mode 参数
 
 
 def test_cli_engage_file_and_objective_mutex(tmp_path: Path) -> None:

@@ -105,49 +105,26 @@ class TestGroundTruth:
         assert _find_ground_truth(tmp_path) is None
 
 
-class TestRouteMode:
-    """执行模式自动路由：最小充分打法（用户不需要知道任务类型）。"""
+# S6 模式收敛：执行模式路由已内聚到 dag.run_task（benchmark → campaign；
+# 其余 → frontier），不再有 route_mode 自动路由层。
+# profile 规则路由（题面关键词 → profile 名）仍在 core/profile/router.py。
 
-    def _prof(self, stages=None):
-        from secpt.core.profile.loader import Budget, Profile, Stage
 
-        return Profile(
-            name="t",
-            stages=[Stage(**s) for s in (stages or [])],
-            budget=Budget(steps=10, wall_s=60),
-        )
+def test_benchmark_route_beats_ctf():
+    """题面含 flag 也先路由 benchmark（tsec-run-1150 复盘：flag 撞 ctf 规则）。"""
+    from secpt.core.profile.router import _match_rules
 
-    def test_stages_profile_routes_stages(self):
-        from secpt.cli.solve import route_mode
+    matched = _match_rules("获取 flag答案 拿总分 benchmark 跑分 unique_code")
+    assert matched[0] == "benchmark"
 
-        prof = self._prof(stages=[{"name": "recon", "role": "r"}])
-        assert route_mode(prof, "auto") == "stages"
 
-    def test_plain_profile_defaults_single(self):
-        from secpt.cli.solve import route_mode
+def test_profile_auto_route_rules():
+    from secpt.core.profile.router import _match_rules
 
-        assert route_mode(self._prof(), "auto") == "single"
-
-    def test_explicit_mode_wins(self):
-        from secpt.cli.solve import route_mode
-
-        assert route_mode(self._prof(), "frontier") == "frontier"
-        assert route_mode(self._prof(stages=[{"name": "s"}]), "single") == "single"
-
-    def test_benchmark_route_beats_ctf(self):
-        """题面含 flag 也先路由 benchmark（tsec-run-1150 复盘：flag 撞 ctf 规则）。"""
-        from secpt.core.profile.router import _match_rules
-
-        matched = _match_rules("获取 flag答案 拿总分 benchmark 跑分 unique_code")
-        assert matched[0] == "benchmark"
-
-    def test_profile_auto_route_rules(self):
-        from secpt.core.profile.router import _match_rules
-
-        assert _match_rules("题目：读取机密 FLAG") == ["ctf"]
-        assert _match_rules("对源码做代码审计")[0] == "codeaudit"
-        assert _match_rules("红队攻防演练")[0] == "redteam"
-        assert _match_rules("一次普通的渗透任务") == []  # 无命中 → LLM/默认兜底
+    assert _match_rules("题目：读取机密 FLAG") == ["ctf"]
+    assert _match_rules("对源码做代码审计")[0] == "codeaudit"
+    assert _match_rules("红队攻防演练")[0] == "redteam"
+    assert _match_rules("一次普通的渗透任务") == []  # 无命中 → LLM/默认兜底
 
 
 class TestAttachmentIndex:

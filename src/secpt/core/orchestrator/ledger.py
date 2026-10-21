@@ -220,6 +220,35 @@ class ChallengeLedger:
             )
             return int(cur.rowcount or 0)
 
+    def release_dead_claims(self, *, reason: str = "") -> list[str]:
+        """启动自愈：释放"持有者已死"的 claimed/running 租约 → exhausted。
+
+        进程被 OOM/SIGKILL 后 PID 已变，新进程 worker_id 不同 → release_own_claims
+        永远匹配不到残留行，claim() 只看 lease_until，要白等最长 900s TTL。
+        本方法按 pid@host 判活：同主机已死进程的租约立即回收；跨主机/无法判定
+        的持有者保守视为存活（不误释放并发 worker）。返回回收的题号。
+        """
+        now = time.time()
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT unique_code, worker_id FROM challenges"
+                " WHERE status IN ('claimed','running') AND worker_id != '' AND lease_until > ?",
+                (now,),
+            ).fetchall()
+            dead = [
+                str(r["unique_code"])
+                for r in rows
+                if str(r["worker_id"]) != self.worker_id
+                and not _lease_holder_alive(str(r["worker_id"]))
+            ]
+            if dead:
+                c.executemany(
+                    "UPDATE challenges SET status='exhausted', worker_id='', lease_until=0,"
+                    " last_error=?, updated_at=? WHERE unique_code=?",
+                    [(reason[:200] or "启动回收死进程残留", now, uc) for uc in dead],
+                )
+            return dead
+
     def release_all_claims(self, *, reason: str = "") -> int:
         """运维操作：强制释放全部 claimed/running 租约（回 exhausted 可重试）。
 

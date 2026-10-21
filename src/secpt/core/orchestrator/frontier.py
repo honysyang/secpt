@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS intents (
     subgoal TEXT DEFAULT '',            -- Goals 层：本意图服务的子目标（跨轮方向一致性的锚点）
     role TEXT DEFAULT '',               -- 角色体系：recon/exploit/verify/report（空=普通意图）
     asset_scope TEXT DEFAULT '',        -- 角色意图挂靠的资产（去重键 + claim 过滤键）
+    lane TEXT DEFAULT 'main',           -- 执行通道：main（主路径）| logistics（后台后勤）
+    hypothesis TEXT DEFAULT '',         -- 挂靠假设（v4 假设树节点 id；空=无信念挂钩）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -271,6 +273,9 @@ class Intent:
     role: str = ""
     asset_scope: str = ""
     tools: str = ""  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
+    lane: str = "main"  # 执行通道：main 主路径 / logistics 后台后勤
+    hypothesis: str = ""  # 挂靠假设 id（v4 假设树；空=无信念挂钩）
+    fail_reason: str = ""
 
 
 _SCOPE_LEDGERS: dict[str, object] = {}  # ③ 跨进程广播载体：按库路径缓存（见 _get_scope_ledger）
@@ -398,6 +403,17 @@ def _carry_ws_artifacts(old_job: str, new_job: str) -> str:
                 lines.append(f"- {rel} ({p.stat().st_size} bytes)")
     except Exception:
         return "（复制失败，可重新探测）"
+    # v4.1：清单持久化（manifest.json）——搬运不再是黑盒，复验/审计可核对
+    if lines:
+        with contextlib.suppress(Exception):
+            import json as _json
+
+            (new_ws / "manifest.json").write_text(
+                _json.dumps(
+                    {"carried_from": old_job, "files": lines}, ensure_ascii=False, indent=2
+                ),
+                encoding="utf-8",
+            )
     return "\n".join(lines) if lines else "（无）"
 
 
@@ -670,6 +686,114 @@ def retro(fr: Frontier, *, base: str = "") -> str:
     if _find_recurse_candidate(fr, base=base) is not None:
         return "recurse"
     return "continue"
+
+
+def _parent_event(base: str, etype: str, payload: dict) -> None:
+    """编排层事件直写父流（对话面板的轨迹源）。
+
+    seq 取当前行数 +1（与 _aggregate_sub_events 同一口径，单调不回退）；
+    全程同步无 await，与主循环聚合写入互不交错。best-effort：观测层失败不炸编排。
+    """
+    import json as _json
+
+    from secpt.core.job.resume import jobs_dir
+
+    try:
+        parent = jobs_dir() / base
+        parent.mkdir(parents=True, exist_ok=True)
+        f = parent / "events.jsonl"
+        seq = 0
+        if f.is_file():
+            with open(f, encoding="utf-8") as rf:
+                seq = sum(1 for _ in rf)
+        with open(f, "a", encoding="utf-8") as out:
+            out.write(
+                _json.dumps(
+                    {
+                        "seq": seq + 1,
+                        "job_id": base,
+                        "ts": time.time(),
+                        "round": 0,
+                        "type": etype,
+                        "payload": payload,
+                        "actor": "commander" if etype == "plan_event" else "orchestrator",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+def _write_retro(
+    *,
+    base: str,
+    objective: str,
+    flags: list[str],
+    chains: list,
+    delivery,
+    fr: Frontier,
+    wall_s: float = 0.0,
+) -> Path | None:
+    """主智能体收尾：把战果、任务链、否定点与交付判定写成 retro.md。
+
+    确定性、零 LLM；与 solve 的经验蒸馏互补（蒸馏把成功路径写入经验库，
+    retro 留下本次运行的完整审计摘要）。任何失败都静默降级，不影响主返回。
+    """
+    try:
+        from secpt.core.job.resume import jobs_dir
+
+        path = jobs_dir() / base / "retro.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        done = [c for c in chains if str(getattr(c, "status", "")) == "done"]
+        failed = [
+            c for c in chains if str(getattr(c, "status", "")) in ("exhausted", "blocked", "failed")
+        ]
+        lines = [
+            "# 任务复盘（主智能体自动生成）",
+            "",
+            f"- 任务：{base}",
+            f"- 目标：{objective[:1200]}",
+            f"- 用时：{wall_s}s",
+            f"- 战果：{', '.join(flags) if flags else '（无 flag）'}",
+            f"- 任务链：{len(chains)}（done {len(done)} / 异常 {len(failed)}）",
+            f"- 主路径剩余：{fr.count_open(lane='main')}；后勤剩余：{fr.count_open(lane='logistics')}",
+        ]
+        if delivery is not None:
+            as_dict = delivery.as_dict() if hasattr(delivery, "as_dict") else delivery
+            lines.append(
+                f"- 交付判定：{'通过' if as_dict.get('accepted') else '未通过'}"
+                f" — {as_dict.get('reason', '')}"
+            )
+        else:
+            lines.append("- 交付判定：未运行（截止/轮次耗尽）")
+        lines += ["", "## 任务链", ""]
+        for c in chains:
+            lines.append(
+                f"- [{getattr(c, 'status', '')}] {getattr(c, 'intent', '')} "
+                f"(source={getattr(c, 'source', '')}, steps={getattr(c, 'steps', 0)}, "
+                f"lane={getattr(c, 'lane', '-')})"
+            )
+        if failed:
+            lines += ["", "## 失败/否定（下一轮先看这里）", ""]
+            for c in failed[:12]:
+                lines.append(
+                    f"- [{getattr(c, 'status', '')}] {getattr(c, 'intent', '')}: "
+                    f"{str(getattr(c, 'fail_reason', '') or '')[:240]}"
+                )
+        lines += [
+            "",
+            "## 沉淀",
+            "",
+            "- 成功路径/适用条件由 solve 的经验蒸馏进入经验库；",
+            "- 本文件是本次运行的审计摘要，供下一轮 planner 与人工复盘使用。",
+            "",
+        ]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+    except Exception:
+        return None
 
 
 def _find_recurse_candidate(fr: Frontier, *, base: str = "") -> dict | None:
@@ -958,6 +1082,12 @@ class Frontier:
         if "tools" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN tools TEXT DEFAULT ''")
+        if "lane" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN lane TEXT DEFAULT 'main'")
+        if "hypothesis" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN hypothesis TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -980,6 +1110,8 @@ class Frontier:
         role: str = "",  # 角色体系：recon/exploit/verify/report（空=普通意图）
         asset_scope: str = "",  # 挂靠资产（去重键 + claim 过滤键）
         tools: str = "",  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
+        lane: str = "main",  # 执行通道：main 主路径 / logistics 后台后勤
+        hypothesis: str = "",  # 挂靠假设（v4 假设树节点 id）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
@@ -987,8 +1119,8 @@ class Frontier:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
                                         source,depends_on,subgoal,max_steps,max_wall_s,
-                                        role,asset_scope,tools,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?)""",
+                                        role,asset_scope,lane,hypothesis,tools,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -1003,6 +1135,8 @@ class Frontier:
                     int(max_wall_s),
                     role[:20],
                     asset_scope[:300],
+                    lane[:20],
+                    hypothesis[:40],
                     tools[:300],
                     now,
                     now,
@@ -1133,27 +1267,34 @@ class Frontier:
         except Exception:
             return False
 
-    def claim_next(self, role: str | None = None) -> Intent | None:
+    def claim_next(self, role: str | None = None, lane: str | None = None) -> Intent | None:
         """领下一条：priority DESC → depth DESC（深度优先）→ 先创建先领。
 
         role 指定时只认领该角色（或未定角色的老意图）——角色 worker 拓扑：
         声明确认自己角色后，认领互斥由原子 UPDATE 保证，不抢其他角色的活。
+        lane 指定时只认领该通道（main 主路径 / logistics 后台后勤）。
         跨进程原子性：BEGIN IMMEDIATE 先取写锁再做 SELECT+UPDATE——deferred
         事务下 SELECT 不加写锁，两个进程可能同时选中同一行再各自 UPDATE
         成功（双认领、attempts 双计）；持写锁后该序列不可交错。
         """
         role_filter = "AND (role=? OR role='')" if role else ""
+        lane_filter = "AND lane=?" if lane else ""
+        args: list[str] = []
+        if role:
+            args.append(role)
+        if lane:
+            args.append(lane)
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             # 加强①：资产租约——带 asset_scope 的意图在**同一事务内**抢占租约，
             # 他人持有的资产一律跳过。此前同资产意图可被两个 worker 并发执行
             # （只有 SharedStopper 的事后让出），登录态/有状态靶场会互扰。
             row = c.execute(
-                f"""SELECT * FROM intents WHERE status='open' {role_filter}
+                f"""SELECT * FROM intents WHERE status='open' {role_filter} {lane_filter}
                    AND (asset_scope='' OR asset_scope NOT IN
                         (SELECT asset_scope FROM asset_leases))
                    ORDER BY priority DESC, depth DESC, created_at LIMIT 1""",
-                (role,) if role else (),
+                tuple(args),
             ).fetchone()
             if row is None:
                 return None
@@ -1189,6 +1330,9 @@ class Frontier:
             role=d.get("role", "") or "",
             asset_scope=d.get("asset_scope", "") or "",
             tools=d.get("tools", "") or "",
+            lane=d.get("lane", "main") or "main",
+            hypothesis=d.get("hypothesis", "") or "",
+            fail_reason=d.get("fail_reason", "") or "",
         )
 
     def find_duplicate(self, role: str, asset_scope: str) -> bool:
@@ -1294,11 +1438,14 @@ class Frontier:
             )
             return cur.rowcount > 0
 
-    def count_open(self) -> int:
+    def count_open(self, *, lane: str | None = None) -> int:
+        sql = "SELECT COUNT(*) n FROM intents WHERE status='open'"
+        args: tuple[str, ...] = ()
+        if lane:
+            sql += " AND lane=?"
+            args = (lane,)
         with self._conn() as c:
-            return int(
-                c.execute("SELECT COUNT(*) n FROM intents WHERE status='open'").fetchone()["n"]
-            )
+            return int(c.execute(sql, args).fetchone()["n"])
 
     def total(self) -> int:
         with self._conn() as c:
@@ -1362,13 +1509,16 @@ class Frontier:
             report["known_assets"] = []
         return report
 
-    def open_summary(self, limit: int = 10) -> list[dict]:
+    def open_summary(self, limit: int = 10, *, lane: str | None = "main") -> list[dict]:
+        sql = "SELECT id,title,priority,depth,lane FROM intents WHERE status='open'"
+        args: list = []
+        if lane:
+            sql += " AND lane=?"
+            args.append(lane)
+        sql += " ORDER BY priority DESC, depth DESC LIMIT ?"
+        args.append(limit)
         with self._conn() as c:
-            rows = c.execute(
-                """SELECT id,title,priority,depth FROM intents
-                   WHERE status='open' ORDER BY priority DESC, depth DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            rows = c.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
     def subgoal_coverage(self, limit: int = 10) -> list[dict]:
@@ -1462,6 +1612,50 @@ _PLANNER_PROMPT = """你是渗透任务的 planner。根据【总目标】【近
 "depends_on": "intent_id 或 fact:谓词，可省略"}}]"""
 
 
+# Default v3 planner: generic, independent tasks; no role templates.
+# (Legacy role planner above remains available via SECPT_ROLE_TEMPLATES=1.)
+_PLANNER_PROMPT_V3 = """你是渗透任务的主智能体（Planner）。根据【总目标】【近期结果】【当前待办】规划下一步，只产出彼此独立、可由任意执行体领取的任务。
+
+纪律（必须遵守）：
+1. 任务独立：任务之间默认没有依赖，不要输出 depends_on；执行体领取后独立完成。
+2. 不预设角色：不要输出 role，也不要把任务写成 recon/exploit/lateral 角色模板；
+   任务描述本身说明要做什么、完成判据是什么即可。
+3. 深度优先：优先派能推进当前最有希望利用链的任务，不要浅层铺开。
+4. 否定记账：近期结果里已证伪的路线不要重复派（至多复核一次）。
+5. 每条任务必须可判定：done_criteria 写清"怎样算做完"。
+6. 最多产 {max_new} 条；没有值得做的就产空列表（任务自然收敛）。
+7. 子目标记账：可用可选字段 "subgoal"；优先覆盖【子目标覆盖度】里未测的方向。
+8. 后勤分流：下载工具/依赖、大批量搜索、字典/爆破、爬取、长耗时收集这类
+   不阻塞主路径的工作，标 "lane": "logistics"；其余标 "lane": "main"。
+   需要验证 flag/结论、复现、交付的任务一律 main，不要放后勤。
+9. 资产范围：可选 "asset_scope"，若填写必须取自【已有资产实体】；没有明确资产就留空。
+
+【总目标】
+{objective}
+
+【近期结果（含后台后勤结果，可合并使用）】
+{results}
+
+【当前待办（main 通道）】
+{opens}
+
+【图记忆·最新事实/发现（跨任务）】
+{facts}
+
+【覆盖度缺口·未触达资产（优先派这里）】
+{untested}
+
+【已有资产实体（asset_scope 可选，必须从这里选）】
+{entities}
+
+【子目标覆盖度】
+{coverage}
+
+只输出 JSON：[{{"title": "...", "goal": "...", "done_criteria": "...",
+"priority": 1-10, "depth": {next_depth}, "subgoal": "...",
+"lane": "main|logistics", "asset_scope": "可选，已有资产实体中的一项"}}]"""
+
+
 async def plan_round(
     objective: str,
     frontier: Frontier,
@@ -1471,9 +1665,21 @@ async def plan_round(
     max_new: int = 3,
     next_depth: int = 0,
 ) -> int:
-    """planner 新会话产意图。解析失败/无 llm 返回 0（调度继续，不阻塞）。"""
+    """planner 新会话产意图。解析失败/无 llm 返回 0（调度继续，不阻塞）。
+
+    默认 v3：任务彼此独立、无角色模板；triage 快判决定 main/logistics 通道。
+    ``SECPT_ROLE_TEMPLATES=1`` 恢复旧的角色 planner（兼容测试/旧部署）。
+    """
+    from secpt.core.orchestrator.triage import (
+        TaskTriage,
+        refine_with_jev,
+        triage_task,
+    )
+
+    legacy_roles = os.environ.get("SECPT_ROLE_TEMPLATES", "0") == "1"
     situation = frontier.situation_report()
-    prompt = _PLANNER_PROMPT.format(
+    prompt_template = _PLANNER_PROMPT if legacy_roles else _PLANNER_PROMPT_V3
+    prompt = prompt_template.format(
         max_new=max_new,
         objective=objective[:1500],
         results=json.dumps(situation["recent_results"], ensure_ascii=False)[:1200] or "（无）",
@@ -1503,31 +1709,55 @@ async def plan_round(
     except json.JSONDecodeError:
         return 0
     n = 0
-    # 资产挂靠强制：实体集（含 goal-seed 种子），不在集内的角色意图直接丢弃
+    # 资产挂靠强制：实体集（含 goal-seed 种子），不在集内的资产直接丢弃
     known = {a["value"] for a in situation.get("known_assets", [])}
     for item in data[:max_new]:
         title = str(item.get("title") or "").strip()
         if not title:
             continue
-        role = str(item.get("role") or "").strip()
+        role = str(item.get("role") or "").strip() if legacy_roles else ""
         asset_scope = str(item.get("asset_scope") or "").strip()
-        # 空想意图防线：声明角色的意图必须挂靠已知实体，否则丢弃（不派发）
-        if role and asset_scope and asset_scope not in known:
+        # 空想意图防线：声明资产的意图必须挂靠已知实体，否则丢弃（不派发）
+        if asset_scope and asset_scope not in known:
             continue
-        # 去重：同 asset_scope+role 已存在（open/running）→ 不派（防重复派同一资产）
+        # 去重：仅旧角色模式按 asset_scope+role 去重（通用任务允许不同角度并行）
         if role and asset_scope and frontier.find_duplicate(role, asset_scope):
             continue
+        goal = str(item.get("goal") or "")
+        done_criteria = str(item.get("done_criteria") or "")
+        try:
+            requested_priority = int(item.get("priority", 5))
+        except (TypeError, ValueError):
+            requested_priority = 5
+        triage = triage_task(
+            title,
+            goal,
+            done_criteria,
+            priority=requested_priority,
+            role=role,
+            asset_scope=asset_scope,
+        )
+        if str(item.get("lane") or "").strip() == "logistics" and not triage.needs_delivery:
+            triage = TaskTriage(
+                lane="logistics",
+                priority=triage.priority,
+                needs_delivery=triage.needs_delivery,
+                risk=triage.risk,
+                reason=(triage.reason + "；" if triage.reason else "") + "planner 标记为后勤",
+            )
+        triage = await refine_with_jev(triage, title=title, goal=goal)
         subgoal = str(item.get("subgoal") or "").strip()
         frontier.add(
             title,
-            goal=str(item.get("goal") or ""),
-            done_criteria=str(item.get("done_criteria") or ""),
-            priority=int(item.get("priority", 5)),
+            goal=goal,
+            done_criteria=done_criteria,
+            priority=int(triage.priority or requested_priority),
             depth=int(item.get("depth", next_depth)),
             subgoal=subgoal,
             role=role,
             asset_scope=asset_scope,
-            depends_on=str(item.get("depends_on") or ""),
+            depends_on=str(item.get("depends_on") or "") if legacy_roles else "",
+            lane=triage.lane,
         )
         if subgoal:
             # Goals 层：子目标落探索图（幂等；best-effort，失败不阻断派发）
@@ -1548,14 +1778,15 @@ def build_intent_objective(
     *,
     base: str = "",
     handoff: str = "",
+    allow_logistics: bool = False,
 ) -> str:
     recent_txt = "\n".join(
         f"- [{r['status']}] {r['title']}: {r['result'][:200]}" for r in recent[:4]
     )
-    # 角色体系：recon/exploit/verify/report 意图追加角色化阶段提示（对齐 specialist 的
-    # objective_extra 语义），profile 渲染链路原样复用
+    # 角色体系（legacy）：仅 SECPT_ROLE_TEMPLATES=1 时注入角色化阶段提示。
+    # v3 默认不使用角色模板——任务本身就是完整语义，执行体是通用 ReAct agent。
     role_stage = ""
-    if getattr(intent, "role", ""):
+    if os.environ.get("SECPT_ROLE_TEMPLATES", "0") == "1" and getattr(intent, "role", ""):
         from secpt.core.orchestrator.roles import role_stage as _rs
 
         role_stage = "\n\n" + _rs(intent.role, getattr(intent, "asset_scope", "") or "")
@@ -1571,10 +1802,11 @@ def build_intent_objective(
             techniques = "\n\n" + _tech_text
     except Exception:
         techniques = ""
-    # 跨资产情报：exploit/verify 注入本任务已确认漏洞（P2 情报共享）——同目标不同
-    # 资产的漏洞模式/凭据路径通常可复用，避免各资产 worker 重复挖同一类洞
+    # 跨资产情报：注入本任务已确认漏洞（P2 情报共享）——同目标不同
+    # 资产的漏洞模式/凭据路径通常可复用，避免各执行体重复挖同一类洞。
+    # v3 通用执行体没有角色，因此不再用 role 过滤。
     shared = ""
-    if base and getattr(intent, "role", "") in ("exploit", "verify"):
+    if base:
         try:
             from secpt.findings.store import FindingStore
 
@@ -1596,18 +1828,126 @@ def build_intent_objective(
                 shared = "\n".join(_lines)
         except Exception:
             shared = ""
+    logistics = ""
+    if allow_logistics:
+        logistics = (
+            "\n\n【后勤委托】遇到下载工具/依赖、大批量搜索、字典/爆破、爬取、长耗时收集"
+            "等会拖慢主路径的工作，先调用 delegate_logistics 异步交给后勤，再立即继续"
+            "当前任务；不要为这类工作阻塞等待。验证 flag/结论、复现与交付不要交给后勤。"
+        )
+    # v4.1 智能体层：挂靠假设的上下文注入——执行体不是领"一段文字"，是在验证一个
+    # 可证伪假设；实验设计必须围绕判定实验（test），结论按假设语义落点。
+    hypothesis_ctx = ""
+    _hid = getattr(intent, "hypothesis", "") or ""
+    if _hid and base:
+        try:
+            from secpt.core.orchestrator.hypothesis import (
+                HypothesisTree,
+                hypothesis_db_path,
+            )
+
+            _node = HypothesisTree(hypothesis_db_path(base)).get(_hid)
+            if _node is not None:
+                hypothesis_ctx = (
+                    f"\n\n【你在验证的假设（{_hid}，置信度 {_node.confidence:.0%}）】"
+                    f"\n- 假设：{_node.statement}"
+                    f"\n- 判定实验：{_node.test}"
+                    f"\n- 已有证据：{('、'.join(_node.evidence_refs[-3:])) or '（无）'}"
+                    "\n本任务的结果会直接更新该假设（证实→confirmed / 证伪→refuted），"
+                    "结论请明确回答判定实验的落点。"
+                )
+        except Exception:
+            hypothesis_ctx = ""
+    # v4.1 协作层：后勤已完成成果对主任务可见（否则后勤干了活主任务不知道）
+    logistics_done = ""
+    _done_logi = [
+        r for r in recent if r.get("status") == "done" and "后勤" in str(r.get("title", ""))
+    ]
+    if _done_logi:
+        _lines = ["", "【后勤已完成（直接取用，不要重复准备）】"]
+        for r in _done_logi[:3]:
+            _lines.append(f"- {r['title']}: {str(r.get('result', ''))[:160]}")
+        logistics_done = "\n".join(_lines)
     return f"""【总目标】
 {global_objective}
 
 【当前意图】{intent.title}
 目标：{intent.goal}
-完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}
+完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}
 {handoff}{techniques}
 
 【近期相关结果（避免重复踩坑）】
-{recent_txt or "（无）"}{shared}
+{recent_txt or "（无）"}{shared}{logistics}{logistics_done}
 
-要求：只推进当前意图，完成判据满足后以 ANSWER: <结论> 收尾。"""
+要求：只推进当前意图，完成判据满足后以 ANSWER: <结论> 收尾。
+结论必须证据锚定：关键证据给出文件路径/命令输出摘录/哈希之一，没有证据支撑的断言不要写。"""
+
+
+_DELEGATE_LOGISTICS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delegate_logistics",
+        "description": (
+            "把下载工具/依赖、大批量搜索、字典/爆破、爬取、长耗时收集等耗时且重复的工作"
+            "异步交给后勤智能体，立即返回，不阻塞当前任务。结果稍后写入任务池/工作台。"
+            "不要用它验证 flag/结论、复现或交付。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "完整、可独立执行的后勤任务（要做什么、目标、期望产物）",
+                },
+                "why": {"type": "string", "description": "为什么适合后台执行（可选）"},
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+
+def _make_delegate_logistics_tool(fr: Frontier, base: str, parent: Intent) -> dict:
+    """Build the per-intent ``delegate_logistics`` closure injected into the engine.
+
+    The tool is synchronous and enqueues directly into the task pool.  It uses a
+    fresh SQLite connection per call (Frontier methods do), so it is safe from the
+    engine's worker thread.  Logistics tasks deliberately carry no asset lease:
+    they must not block the main task on the same asset.
+    """
+
+    def _fn(args: dict) -> str:
+        task = str((args or {}).get("task") or "").strip()
+        if not task:
+            return "Error: 缺少 task（要交给后勤的具体工作）"
+        try:
+            if fr.count_open(lane="logistics") >= 20:
+                return "Error: 后勤队列已满（20 条），先等待现有任务回写"
+            why = str((args or {}).get("why") or "").strip()
+            goal = f"【父任务】{parent.title}\n任务：{task}"
+            if why:
+                goal += f"\n为什么适合后台：{why}"
+            if getattr(parent, "asset_scope", ""):
+                goal += f"\n父任务资产：{parent.asset_scope}"
+            iid = fr.add(
+                f"后勤：{task[:60]}",
+                goal=goal,
+                done_criteria="产出结果并回写任务池/工作台；不阻塞主路径",
+                priority=2,
+                depth=0,
+                source="worker",
+                lane="logistics",
+                max_steps=30,
+                max_wall_s=300,
+            )
+            return (
+                f"已交给后勤（{iid}），后台执行。不要等待结果；继续当前任务的下一步，"
+                "后勤完成后会把结果写入任务池/工作台。"
+            )
+        except Exception as e:
+            return f"Error: 后勤委托失败: {e}"
+
+    return {"delegate_logistics": (_DELEGATE_LOGISTICS_SCHEMA, _fn)}
 
 
 async def run_frontier(
@@ -1628,12 +1968,19 @@ async def run_frontier(
     # 跑分（benchmark）传 False，持续解完所有已入队题目
     role_plan: bool = False,  # 团队模式：预置 recon→exploit×N 角色意图骨架（折叠 Specialist DAG）
     default_assets: list[str] | None = None,  # 团队模式资产兜底（goal 拆解无 asset_scope 时用入口）
+    stages: object | None = None,  # S6 模式收敛：profile.stages 折叠为线性 depends_on 意图链
+    # （原 run_stages 多阶段编排的唯一存续形态；调用方以 max_intents=len(stages) 关闭 planner）
+    default_max_steps: int = 0,  # S6：意图未设步数预算时的全局默认（solve --steps 透传；0=profile 预算）
     on_started: object | None = None,  # P0-2：意图「真正开跑」回调 intent->None（如置 running）
     on_settled: object | None = None,  # ② 结算回调 intent->None：编排层确定性收尾（如 close 容器）
     scope_ledger: object | None = None,  # ③ 跨进程广播载体（ChallengeLedger，缺省懒建同库实例）
     should_drain: object | None = None,  # A3：优雅排空回调 ()->bool；True 时停止认领新意图
     deadline_ts: float | None = None,  # 通用全局截止（epoch 秒）；缺省读 SECPT_DEADLINE_TS
     reserve_s: float = 300.0,  # 截止前预留秒数（留给收尾/报告，不再开新意图）
+    enable_logistics: bool = False,  # 后勤后台通道（dag/solve 主入口开启；直调默认关）
+    enable_delivery: bool = False,  # 交付门（dag/solve 主入口开启；直调默认关）
+    delivery_max_attempts: int = 1,  # 交付门最多补几次验证任务（防无限追加）
+    enable_commander: bool = True,  # v4 Commander（假设树+战略文档+事件唤醒；benchmark/stages 强制关）
 ) -> dict:
     """意图驱动主循环。返回汇总（chains/flags/wall）。
 
@@ -1641,12 +1988,21 @@ async def run_frontier(
     - 队列中存在未完成的 direct（人工直投）意图 → 规划者暂停，只执行 direct，
       全部 direct 完成且无新 direct → 结束（ARTEX 模式②）；此后恢复正常规划
     - D2.2：max_workers>1 时并发跑多个 claim→run→settle 循环（原子认领）
-    - role_plan=True（团队模式）：按 GoalSpec.asset_scope 预置 recon→exploit 意图骨架，
-      worker 按角色认领并行推进；verify/report 由 planner 按依赖补产
+    - v3：planner 默认产独立通用任务（无角色模板），triage 快判 main/logistics；
+      后勤在独立通道后台执行，不阻塞主路径。主路径结算后由交付门核验战果/
+      复验并决定结束；benchmark 平台协议关闭后勤与交付门，保持跑分语义。
+    - role_plan=True（legacy，仅 SECPT_ROLE_TEMPLATES=1）：旧角色骨架仍可用。
     """
     import asyncio
 
     from secpt.cli.engine_runner import resolve_models, run_engine
+
+    if profile == "benchmark":
+        enable_logistics = False
+        enable_delivery = False
+        enable_commander = False
+    if stages:
+        enable_commander = False  # 清单型链路保持逐段执行语义
 
     model, _fb = resolve_models(model, None)
 
@@ -1681,6 +2037,23 @@ async def run_frontier(
     # 互重置在途意图）。异常路径由文件对象回收自动释放 flock（CPython 语义）
     _lock = _acquire_task_lock(base)
     fr = frontier or Frontier(frontier_db_path(base))
+    # v4：Commander 双载体的第二载体——假设树（benchmark/stages 清单型不建）
+    tree = None
+    watch = None
+    if enable_commander:
+        try:
+            from secpt.core.orchestrator.hypothesis import HypothesisTree, hypothesis_db_path
+            from secpt.core.orchestrator.watch import Watch
+
+            tree = HypothesisTree(hypothesis_db_path(base))
+            watch = Watch(max_intents=max_intents)
+            from secpt.core.orchestrator.commander import strategy_path
+
+            _strategy_path = strategy_path(base)
+        except Exception as _e:  # 假设树故障不阻断任务（降级 v3 planner）
+            print(f"[frontier] 假设树初始化失败，降级 v3 planner: {_e}", flush=True)
+            tree = None
+            watch = None
 
     # 团队模式（role_plan）：折叠 Specialist 固定 DAG 为角色意图骨架——
     # recon 1 条（role=recon）+ 每资产 1 条 exploit（role=exploit, depends_on=recon）
@@ -1733,6 +2106,35 @@ async def run_frontier(
             max_workers = max(max_workers, min(len(team_assets), 4))  # exploit 并行认领
             stop_on_first_flag = False  # 团队模式：持续推进所有资产，不因单资产收敛
 
+    # S6 模式收敛——多阶段折叠：profile.stages → 线性 depends_on 意图链。
+    # 原 run_stages 编排器已退役（policy.DEPRECATED_MODULES），stages 是唯一执行
+    # 编排 frontier 的一种清单型调用：阶段间交接复用 M1 同资产 asset_state 搬运
+    # （全链共用同一 stage_key 作 asset_scope）；阶段预算/工具/收尾条件映射意图
+    # 字段；planner 由调用方以 max_intents=len(stages) 关闭（同 benchmark 语义）。
+    if stages:
+        stage_key = f"stages:{profile or 'task'}"
+        prev_id = ""
+        for _idx, _st in enumerate(stages):
+            _goal = (_st.role or "").strip() or f"执行阶段 {_st.name}"
+            if getattr(_st, "prior", ""):
+                _goal = f"【阶段先验】{_st.prior}\n{_goal}"
+            _iid = fr.add(
+                f"阶段 {_idx + 1}/{len(stages)}：{_st.name}",
+                goal=_goal,
+                done_criteria=(_st.stop_condition or "").strip()[:500],
+                priority=9 - _idx,  # 保证段序（同优先级下认领顺序不保证）
+                depth=_idx,
+                depends_on=prev_id,
+                role=_st.name[:20],
+                asset_scope=stage_key,
+                tools=",".join(_st.tools or []),
+                max_steps=int(_st.budget.steps or 0),  # 0 → default_max_steps/profile
+                max_wall_s=int(_st.budget.wall_s or 0),
+            )
+            prev_id = _iid
+        max_workers = 1  # depends_on 链已串行，多 worker 只会空等租约
+        stop_on_first_flag = False  # 阶段语义：全链跑完（中间阶段 ANSWER 是交付物）
+
     chains: list[dict] = []
     flags: list[str] = []
     chains_lock = asyncio.Lock()
@@ -1741,28 +2143,127 @@ async def run_frontier(
     sub_jobs: list[str] = []  # 子任务 job_id（父 job 事件流聚合用，P0-2）
     aggregated: set[str] = set()  # ④ 已增量聚合的子 job（幂等去重）
     idle_rounds = 0
+    # v4 值守层：待消费唤醒信号（FIFO，Commander 每次取一条）；tree/watch 在下方初始化
+    pending_signals: list = []
+    commander_decisions: list = []
+    stall_wake_budget = 2  # 停滞触发的额外唤醒上限（防无信念增量的无限重规划）
+    max_new_per_wake = 3  # Commander 每次唤醒派单上限
+    _strategy_path = None  # 战略文档路径（树建好后落位）
+    delivery_pending = False  # 有候选战果/队列将尽，等待交付门
+    delivery_wait = False  # 已派发交付复验任务，暂停规划直到复验结算
+    delivery_attempts = 0  # 已派发的交付 follow-up 次数
+    delivery_decision = None  # 最终交付判定（进 summary/retro）
     t0 = time.time()
     # 事件唤醒队列：外部传入则共用（D2.3 外部触发），否则本地队列——
     # worker 结算/心跳都会 put，主循环据此立即重估（不等 60s 心跳饿死）
     wake_q: asyncio.Queue = wake_queue if wake_queue is not None else asyncio.Queue()
 
+    def _stall_signal_now(detail: str):
+        from secpt.core.orchestrator.watch import WakeSignal
+
+        return WakeSignal(kind="stall", detail=detail, priority=6)
+
+    def _prune_dead_tasks() -> int:
+        """内务修剪：挂靠假设已 dead/refuted 的未开始任务直接取消（防死节点残留）。"""
+        if tree is None:
+            return 0
+        n = 0
+        try:
+            for row in fr.list_all(status="open", limit=200):
+                hid = str(row.get("hypothesis") or "")
+                if not hid:
+                    continue
+                node = tree.get(hid)
+                if node is not None and node.state in ("dead", "refuted"):
+                    fr.settle(
+                        row["id"],
+                        status="exhausted",
+                        result="",
+                        fail_reason=f"挂靠假设 {hid} 已 {node.state}，任务随之取消（值守层修剪）",
+                    )
+                    n += 1
+        except Exception:
+            pass
+        return n
+
     async def _maybe_plan() -> int:
-        """规划者轮：人工接管（direct 未完成）时暂停；否则产意图。"""
-        nonlocal idle_rounds
+        """规划者轮（v4）：值守层信号驱动 Commander；无树/降级时走 v3 planner。
+
+        人工接管（direct 未完成）/等待交付复验时暂停。
+        """
+        nonlocal idle_rounds, stall_wake_budget, delivery_pending
+        signal = None  # 本轮唤醒信号（Commander 分支赋值；legacy planner 兜底 None）
         if fr.has_open_direct():
             return 0  # 模式②：规划者暂停
+        if delivery_pending or delivery_wait:
+            return 0  # 交付门未收口：暂停产新意图，等复验结算
         if fr.total() >= max_intents or idle_rounds >= 2:
             return 0
         with fr._conn() as c:
             row = c.execute("SELECT MAX(depth) d FROM intents").fetchone()
             max_depth = int(row["d"] or 0)
+        next_depth = max_depth + (1 if fr.total() else 0)
+        if tree is not None and watch is not None:
+            from secpt.core.orchestrator.commander import commander_round
+
+            signal = pending_signals.pop(0) if pending_signals else None
+            outcome = await commander_round(
+                objective,
+                fr,
+                tree,
+                planner_llm,
+                model=model,
+                signal=signal.as_dict() if signal is not None else None,
+                path=_strategy_path,
+                max_new=max_new_per_wake,
+                next_depth=next_depth,
+                asset_pool=list(default_assets or []),
+            )
+            commander_decisions.append(outcome)
+            _parent_event(
+                base,
+                "plan_event",
+                {
+                    "decision": outcome.decision,
+                    "tasks": outcome.n_tasks,
+                    "beliefs": outcome.beliefs_applied,
+                    "hypotheses": outcome.hypotheses_added,
+                    "drift_rejected": outcome.drift_rejected,
+                    "planned": outcome.tasks_detail[:8],
+                    "wake": (signal.as_dict() if signal else {"kind": "plan"}),
+                },
+            )
+            if outcome.decision == "deliver":
+                # Commander 请求交付：交给交付门裁决（不直接结束）
+                delivery_pending = True
+            if outcome.beliefs_applied or outcome.hypotheses_added:
+                watch.reset_stall()  # 有信念增量 → 停滞计数清零
+            idle_rounds = 0 if outcome.n_tasks else idle_rounds + 1
+            return outcome.n_tasks
+        _before = {r["id"] for r in fr.list_all(status="open", limit=300)}
         n_new = await plan_round(
             objective,
             fr,
             planner_llm,
             model=model,
-            next_depth=max_depth + (1 if fr.total() else 0),
+            next_depth=next_depth,
         )
+        if n_new:
+            _planned = [
+                {"title": r["title"][:80], "lane": r.get("lane", "main")}
+                for r in fr.list_all(status="open", limit=300)
+                if r["id"] not in _before
+            ]
+            _parent_event(
+                base,
+                "plan_event",
+                {
+                    "decision": "continue",
+                    "tasks": n_new,
+                    "planned": _planned[:8],
+                    "wake": (signal.as_dict() if signal else {"kind": "plan"}),
+                },
+            )
         idle_rounds = 0 if n_new else idle_rounds + 1
         return n_new
 
@@ -1790,6 +2291,7 @@ async def run_frontier(
                         steps=0,
                         depth=intent.depth,
                         source=intent.source,
+                        lane=getattr(intent, "lane", "main") or "main",
                     )
                 )
             with contextlib.suppress(Exception):
@@ -1816,6 +2318,7 @@ async def run_frontier(
                         steps=0,
                         depth=intent.depth,
                         source=intent.source,
+                        lane=getattr(intent, "lane", "main") or "main",
                     )
                 )
                 done_events.append(
@@ -1869,13 +2372,30 @@ async def run_frontier(
                     "优先复用已验证的入口/脚本/凭据，不要从零重探；旧结论只作线索，需自行验证。"
                 )
         _obj = build_intent_objective(
-            objective, intent, fr.recent_results(4), base=base, handoff=_asset_handoff
+            objective,
+            intent,
+            fr.recent_results(4),
+            base=base,
+            handoff=_asset_handoff,
+            allow_logistics=bool(enable_logistics and getattr(intent, "lane", "main") == "main"),
+        )
+        # 教练介入：重试/RESET 前注入确定性纠偏，避免同一路线反复烧预算
+        if int(getattr(intent, "attempts", 1) or 1) > 1:
+            with contextlib.suppress(Exception):
+                from secpt.core.orchestrator.coach import coach_for_retry
+
+                _obj += "\n\n" + coach_for_retry(intent, fr.recent_results(4))
+        _runtime_tools = (
+            _make_delegate_logistics_tool(fr, base, intent)
+            if enable_logistics and getattr(intent, "lane", "main") == "main"
+            else None
         )
 
         def _exec(
             obj: str = _obj, job: str = _job, budget: int = _budget, wall: int = _wall_budget
         ) -> object:
-            kw = {"max_steps": budget} if budget > 0 else {}
+            _steps = budget or default_max_steps  # S6：solve --steps 全局透传
+            kw = {"max_steps": _steps} if _steps > 0 else {}
             if wall > 0:
                 kw["max_wall_s"] = wall
             _tools_extra = [t for t in (intent.tools or "").split(",") if t.strip()]
@@ -1893,6 +2413,7 @@ async def run_frontier(
                 scope_entries=_intent_scope_entries(intent),
                 # C2：意图级工具覆盖（按题族动态启用，如 web 族的 http_request/session）
                 tools_extra=_tools_extra or None,
+                runtime_tools=_runtime_tools,
                 **kw,
             )
 
@@ -1961,6 +2482,22 @@ async def run_frontier(
             _manifest = _carry_ws_artifacts(result.job_id or "", _job_rs)
             _handoff = await _reset_handoff_summary(result, _obj, llm)
             _negs = _reset_negative_list(fr, intent)
+            _coach = ""
+            with contextlib.suppress(Exception):
+                from secpt.core.orchestrator.coach import coach_advice
+
+                _coach = (
+                    "\n\n"
+                    + coach_advice(
+                        intent.title,
+                        status="stalled",
+                        fail_reason=getattr(result, "status", "") or "stalled",
+                        attempts=int(getattr(intent, "attempts", 1) or 1),
+                        max_steps=int(getattr(intent, "max_steps", 0) or 0),
+                        recent=fr.recent_results(4),
+                        done_criteria=getattr(intent, "done_criteria", "") or "",
+                    ).note
+                )
             _obj_rs = (
                 _obj + "\n\n【RESET 重建（编排层注入）】上一会话已策略级卡死（stalled），"
                 "本会话从外部状态重建上下文，严禁原样重跑旧路线：\n"
@@ -1968,6 +2505,7 @@ async def run_frontier(
                 f"2. 已复制工作区产物（继续用，不要推倒重来）：\n{_manifest}\n"
                 f"3. 已验证否定的路线（勿重复踩坑）：\n{_negs}\n"
                 "基于以上状态选一条与上轮不同的路线推进，尽快以 ANSWER: 收尾。"
+                f"{_coach}"
             )
             result_rs = await asyncio.to_thread(_exec, _obj_rs, _job_rs, _budget)
             if result_rs.job_id:
@@ -2071,6 +2609,100 @@ async def run_frontier(
         fr.settle(
             intent.id, status=status, result=answer or f"steps={result.steps}", fail_reason=why
         )
+        # v4.2 轨迹层：结算事件入父流（哪个执行体做完了什么，对话面板可见）
+        _parent_event(
+            base,
+            "intent_event",
+            {
+                "iid": intent.id,
+                "title": intent.title,
+                "status": status,
+                "reason": (why or "")[:140],
+                "lane": getattr(intent, "lane", "main"),
+            },
+        )
+        # ── v4 值守层结算：失败类型化 + 确定性信念增量（Commander 唤醒时精结算）──
+        if tree is not None:
+            with contextlib.suppress(Exception):
+                from secpt.core.orchestrator.watch import (
+                    BUDGET_EXHAUSTED,
+                    CAPABILITY_GAP,
+                    NEGATIVE,
+                    STUCK,
+                    SUCCESS,
+                    capability_gap,
+                    classify_failure,
+                    detect_capability_gaps,
+                    detect_defensive_signals,
+                )
+
+                _kind = classify_failure(result.status, why)
+                _hid = getattr(intent, "hypothesis", "") or ""
+                _tail_outputs = [
+                    str(m.get("content") or "")
+                    for m in (getattr(result, "messages", None) or [])[-12:]
+                    if m.get("role") == "tool"
+                ]
+                # v4.1 能力缺口出口：工具/凭据缺失进需求清单（Commander 唤醒时裁决：
+                # 派安装任务 / request_tools / 放弃该路线），不再无声消失在输出里。
+                # 两个口径：结算级 fail_reason + 工具输出扫描（真实场景缺失在输出里）
+                _gap_hits = detect_capability_gaps(_tail_outputs) if _tail_outputs else []
+                if _kind == CAPABILITY_GAP or capability_gap(why) or _gap_hits:
+                    _snippet = next(
+                        (
+                            str(o)[:160]
+                            for o in _tail_outputs
+                            if any(
+                                pat in o.lower()
+                                for pat in (
+                                    "command not found",
+                                    "命令 '",
+                                    "不存在",
+                                    "未安装",
+                                    "no such file",
+                                    "permission denied",
+                                )
+                            )
+                        ),
+                        "",
+                    )
+                    _gap_txt = why[:120] or "（工具输出级缺口）"
+                    tree.record_evidence_event(
+                        _hid,
+                        _last_job or intent.id,
+                        f"[capability_gap] {intent.title}: {_gap_txt}｜输出：{_snippet}"
+                        "（Commander 裁决：安装/request_tools/放弃该路线）",
+                    )
+                # v4.1 作战地图：对方防御反应检测（对方状态是地图的一半——
+                # 反复 403/限流/WAF 说明打不动不是技术问题，Commander 应看到并改向）
+                _defensive = detect_defensive_signals(_tail_outputs)
+                if _defensive:
+                    tree.record_evidence_event(
+                        _hid,
+                        _last_job or intent.id,
+                        f"[defensive] 对方防御信号：{('、'.join(_defensive))[:160]}"
+                        "（打不动可能不是技术问题，考虑改向/降速/换出口）",
+                    )
+                if _hid and tree.get(_hid) is not None:
+                    if _kind == SUCCESS and status == "done":
+                        # 判定实验通过：proposed→testing→confirmed（证据=子 job 工作区）
+                        _node = tree.get(_hid)
+                        if _node.state == "proposed":
+                            tree.set_state(_hid, "testing")
+                        with contextlib.suppress(Exception):
+                            tree.set_state(_hid, "confirmed", evidence_ref=_last_job or "worker")
+                    elif _kind in (NEGATIVE, BUDGET_EXHAUSTED):
+                        # 负结果/预算耗尽：不迁移（Commander 裁决），落未消化证据
+                        tree.record_evidence_event(
+                            _hid,
+                            _last_job or intent.id,
+                            f"[{_kind}] {intent.title}: {why or '未达成'}",
+                        )
+                    elif _kind == STUCK:
+                        tree.record_evidence_event(_hid, intent.id, "[stuck] 止损三档走完")
+                elif _kind == STUCK:
+                    # 无挂靠假设的卡死也留给 Coach/Commander（无 hid 事件）
+                    tree.record_evidence_event("", intent.id, f"[stuck] {intent.title}")
         fr.reopen_ready()  # 本条结算后立即解锁依赖已满足的 blocked 意图（事件驱动，不等轮询）
         # 完成广播（双通道）：进程内 SharedStopper（快路径）+ 账本 scope_done
         # （③ 跨进程可见——其他 worker 进程轮询同一账本即可让出同资产在途意图）。
@@ -2112,6 +2744,7 @@ async def run_frontier(
                     steps=result.steps,
                     depth=intent.depth,
                     source=intent.source,
+                    lane=getattr(intent, "lane", "main") or "main",
                 )
             )
             if status == "done":
@@ -2170,6 +2803,7 @@ async def run_frontier(
                     steps=0,
                     depth=intent.depth,
                     source=intent.source,
+                    lane=getattr(intent, "lane", "main") or "main",
                 )
             )
             if status == "done":
@@ -2232,7 +2866,7 @@ async def run_frontier(
             # 在途链自然收尾（不再开新题，避免无意义烧步）
             if _drain_now():
                 break
-            intent = fr.claim_next()
+            intent = fr.claim_next(lane="main")
             if intent is None:
                 fr.reopen_ready()  # 无 open 可领 → 解锁依赖已满足的 blocked 意图
                 await asyncio.sleep(0.5)
@@ -2242,22 +2876,161 @@ async def run_frontier(
                 fr.refund_attempt(intent.id)
                 await asyncio.sleep(0.5)
                 continue
+            _parent_event(
+                base,
+                "intent_event",
+                {"iid": intent.id, "title": intent.title, "status": "claimed", "lane": "main"},
+            )
             ans = await _run_one(intent)
             if ans:
-                # 成果语义收窄（P0-1）：flags 只采信真实 flag 形态，ANSWER 全文（结论摘要/
-                # benchmark 结算串）不计入跑分，防 unique_code 前缀污染。
-                # stop_on_first_flag 的"收敛"语义仍以 ans 存在为准（pentest"确认漏洞"也要收敛），
-                # flags 数组本身只收 real flag——非 flag 形态的成果仍保留在 chains/result 可追溯。
-                from secpt.core.orchestrator.flagsem import extract_real_flags
+                _apply_answer(ans)
 
-                real = extract_real_flags(ans)
-                if real:
-                    flags.extend(v for v in real if v not in flags)
-                if stop_on_first_flag:
-                    stop = True
-                    stop_ev.set()  # 拿到成果即整体收敛（单题/狩猎模式）
+    async def _logistics_loop() -> None:
+        """后台后勤通道：只领 logistics 任务，不参与主路径收敛。"""
+        while not stop_ev.is_set():
+            if _drain_now():
+                break
+            intent = fr.claim_next(lane="logistics")
+            if intent is None:
+                await asyncio.sleep(0.5)
+                continue
+            if not fr.deps_satisfied(intent):
+                fr.settle(intent.id, status="blocked", fail_reason="依赖未满足")
+                fr.refund_attempt(intent.id)
+                await asyncio.sleep(0.5)
+                continue
+            _parent_event(
+                base,
+                "intent_event",
+                {"iid": intent.id, "title": intent.title, "status": "claimed", "lane": "logistics"},
+            )
+            ans = await _run_one(intent)
+            if ans:
+                _apply_answer(ans)
 
-    workers = [asyncio.create_task(_worker_loop()) for _ in range(max_workers)]
+    def _apply_answer(ans: str) -> None:
+        """记录真实 flag；单题模式进入交付门而不是立即硬停。"""
+        nonlocal stop, delivery_pending
+        # 成果语义收窄（P0-1）：flags 只采信真实 flag 形态，ANSWER 全文（结论摘要/
+        # benchmark 结算串）不计入跑分，防 unique_code 前缀污染。
+        from secpt.core.orchestrator.flagsem import extract_real_flags
+
+        real = extract_real_flags(ans)
+        if real:
+            flags.extend(v for v in real if v not in flags)
+        if stop_on_first_flag:
+            if enable_delivery:
+                # 交付体先核验，不直接结束主进程；规划暂停，等主路径排空后 gate。
+                delivery_pending = True
+                with contextlib.suppress(Exception):
+                    wake_q.put_nowait("delivery")
+            else:
+                stop = True
+                stop_ev.set()
+
+    def _drain_logistics_for_delivery() -> bool:
+        """收敛排空（v4 值守层语义）：取消未开始的后勤任务；返回是否仍有在途后勤。
+
+        解决收敛竞态：主路径排空时后勤可能还在飞——在途的等它回写（有界：
+        后勤自带步数/墙钟预算），没开始的直接取消，不让粗活拖住收口。
+        """
+        if not enable_logistics:
+            return False
+        try:
+            for row in fr.list_all(status="open", limit=200):
+                if (row.get("lane") or "main") == "logistics":
+                    fr.settle(
+                        row["id"],
+                        status="exhausted",
+                        result="",
+                        fail_reason="收敛排空：整体任务收口，未开始的后勤任务取消",
+                    )
+            return any(
+                (r.get("lane") or "main") == "logistics"
+                for r in fr.list_all(status="running", limit=200)
+            )
+        except Exception:
+            return False
+
+    async def _run_delivery_gate() -> bool:
+        """Run the delivery agent. Returns True when the run should end."""
+        nonlocal delivery_attempts, delivery_pending, delivery_wait, delivery_decision, idle_rounds
+        from secpt.core.orchestrator.delivery_gate import DeliveryDecision, review_delivery
+
+        if _drain_logistics_for_delivery():
+            delivery_decision = DeliveryDecision(
+                False, "收敛排空：等待在途后勤任务回写（有界，后勤自带预算）", waiting=True
+            )
+            await asyncio.sleep(1.0)
+            return False
+        decision = review_delivery(
+            fr,
+            base=base,
+            objective=objective,
+            flags=flags,
+            attempt=delivery_attempts,
+            max_attempts=max(0, int(delivery_max_attempts)),
+        )
+        delivery_decision = decision
+        # v4.1 信念回滚：复验尝试耗尽仍未通过 → 已 confirmed 的假设不可信度上调
+        # （确认偏误的结构性对冲——交付被拒时信念必须跟着降，不能只有交付层知道）
+        if tree is not None and flags and decision.accepted and "复验尝试已耗尽" in decision.reason:
+            with contextlib.suppress(Exception):
+                for _n in tree.nodes_by_state("confirmed"):
+                    tree.update_confidence(_n.id, _n.confidence * 0.6)
+                    tree.record_evidence_event(
+                        _n.id, "delivery-gate", "[rollback] 交付复验未通过，置信度下调"
+                    )
+        if decision.waiting:
+            # 主路径仍有在途/待执行任务；稍等，不要误收口也不要忙等。
+            await asyncio.sleep(0.5)
+            return False
+        if (
+            decision.accepted
+            or delivery_attempts >= delivery_max_attempts
+            or not decision.followups
+        ):
+            return True
+        added = 0
+        for followup in decision.followups:
+            try:
+                fr.add(
+                    str(followup.get("title") or "交付复核"),
+                    goal=str(followup.get("goal") or ""),
+                    done_criteria=str(followup.get("done_criteria") or ""),
+                    priority=int(followup.get("priority", 9)),
+                    depth=int(followup.get("depth", 0)),
+                    source=str(followup.get("source") or "delivery"),
+                    lane=str(followup.get("lane") or "main"),
+                    max_steps=int(followup.get("max_steps", 0) or 0),
+                    max_wall_s=int(followup.get("max_wall_s", 0) or 0),
+                )
+                added += 1
+            except Exception as e:
+                print(f"[frontier] 交付 follow-up 入队失败（忽略）: {e}", flush=True)
+        if added == 0:
+            return True
+        delivery_attempts += 1
+        delivery_pending = False
+        delivery_wait = True
+        idle_rounds = 0
+        with contextlib.suppress(Exception):
+            wake_q.put_nowait("delivery-followup")
+        return False
+
+    if tree is not None:
+        _n0 = _prune_dead_tasks()  # 启动修剪：resume 场景的死假设残留任务（先于 worker 认领）
+        if _n0:
+            print(f"[watch] 启动修剪：取消 {_n0} 条死假设挂靠任务", flush=True)
+
+    main_workers = [asyncio.create_task(_worker_loop()) for _ in range(max_workers)]
+    worker_tasks = list(main_workers)
+    if enable_logistics:
+        # 后勤并发（v4.1）：默认 2——下载与批量搜索常可并行；上限 4 防目标侧过载
+        with contextlib.suppress(ValueError):
+            _logi_workers = max(1, min(4, int(os.environ.get("SECPT_LOGISTICS_WORKERS", "2"))))
+        for _ in range(_logi_workers):
+            worker_tasks.append(asyncio.create_task(_logistics_loop()))
 
     # 事件驱动 planner：worker settle / 心跳 唤醒（对齐 ARTEX"数据库变化唤醒"）
     idle_rounds = 0
@@ -2268,37 +3041,115 @@ async def run_frontier(
             break
         if fr.has_open_direct():
             # 模式②：只执行 direct；队列清空且无 running → 结束
-            if fr.count_open() == 0:
+            if fr.count_open(lane="main") == 0:
+                if enable_delivery and flags and not delivery_decision:
+                    if await _run_delivery_gate():
+                        stop = True
+                        stop_ev.set()
+                        break
+                    continue
                 break
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(wake_q.get(), timeout=2.0)
             continue
-        starving = fr.count_open() < max_workers
-        # 是否还能产新意图（意图数达上限 / 规划连续两轮无产出 → 收敛点）
-        can_plan = fr.total() < max_intents and idle_rounds < 2
-        if can_plan and (starving or fr.count_open() == 0):
+        main_open = fr.count_open(lane="main")
+        starving = main_open < max_workers
+        # ── v4 值守层触发器评估（确定性，便宜→贵）──
+        if watch is not None:
+            _total_wall = 0.0
+            if _deadline:
+                _total_wall = max(0.0, float(_deadline) - t0)
+            for _sig in watch.budget_signals(
+                elapsed_s=time.time() - t0,
+                total_wall_s=_total_wall,
+                used_intents=fr.total(),
+            ):
+                pending_signals.append(_sig)
+            _pruned = _prune_dead_tasks()  # 死节点残留任务清理（确定性，逐轮）
+            if _pruned:
+                print(f"[watch] 内务修剪：取消 {_pruned} 条死假设挂靠任务", flush=True)
+            _cons = watch.consolidation_signal()
+            if _cons is not None:
+                pending_signals.append(_cons)
+            _stall = watch.stall_signal(
+                done_intents=sum(
+                    1
+                    for c in chains
+                    if (c.get("status") if isinstance(c, dict) else c.status) == "done"
+                ),
+                tree_transitions=sum(
+                    tree.counts().get(k, 0) for k in ("confirmed", "refuted", "dead")
+                )
+                if tree is not None
+                else 0,
+            )
+            if _stall is not None:
+                pending_signals.append(_stall)
+        # 是否还能产新意图（意图数达上限 / 规划连续两轮无产出 / 交付等待 → 收敛点）
+        can_plan = (
+            fr.total() < max_intents
+            and idle_rounds < 2
+            and not delivery_pending
+            and not delivery_wait
+        )
+        # 值守层信号插队：有信号时无视 idle_rounds（停滞/预算/内务必须被 Commander 处理）
+        _signal_plan = (
+            bool(pending_signals)
+            and fr.total() < max_intents
+            and not (delivery_pending or delivery_wait)
+        )
+        if _signal_plan or (can_plan and (starving or main_open == 0)):
             await _maybe_plan()
             rounds += 1
-        if fr.count_open() == 0:
+            main_open = fr.count_open(lane="main")
+        # 交付门：有候选成果/复验等待/自然收敛时，由交付体决定是否结束。
+        if enable_delivery and main_open == 0 and (delivery_pending or delivery_wait):
+            if await _run_delivery_gate():
+                stop = True
+                stop_ev.set()
+                break
+            continue
+        if main_open == 0:
             if fr.total() == 0 and rounds == 0:
                 continue  # 首盘：等 worker 空转也无妨，继续 plan
-            # 团队模式：verify（存在未确认 finding）优先于 report（exploit 有成果）
-            # 确定性触发；verify 完成前不派 report（报告只聚合 confirmed）
+            # 团队模式 legacy：verify/report 确定性补产（仅 role_plan 显式开启）
             if role_plan:
                 if _queue_verify_if_needed(fr, base):
                     continue  # worker 认领 verify 意图执行（独立 PoC 复验）
                 if _queue_report_if_needed(fr, objective):
                     continue  # worker 认领 report 意图执行；执行完再走收敛判定
             if fr.all_subgoals_settled():
+                # v4 信念性收敛：假设树还有活动高价值节点且还能规划 → 唤醒 Commander
+                # 处理"下一步打哪"，而不是因池空收口（受 stall_wake_budget 封顶）
+                if (
+                    tree is not None
+                    and tree.open_high_value()
+                    and stall_wake_budget > 0
+                    and fr.total() < max_intents
+                    and not (delivery_pending or delivery_wait)
+                ):
+                    stall_wake_budget -= 1
+                    idle_rounds = 0
+                    pending_signals.append(
+                        _stall_signal_now("假设树仍有高价值未决节点（池空触发信念收敛检查）")
+                    )
+                    continue
+                if enable_delivery and not delivery_decision:
+                    if await _run_delivery_gate():
+                        stop = True
+                        stop_ev.set()
+                        break
+                    continue
                 break  # Goals 覆盖度驱动收敛：所有子目标已结算（done/exhausted）
             # 复盘会 retro()（设计 §4.1）：空队列时先确定性路由——失败驱动局部递归
             # （§4.2）优先于"规划两轮无产出就收敛"。阶段由状态定：recurse 时编排层
             # 直接产结构化子意图（不经 planner LLM），防"planner 忘了展开"时系统卡死
             if (
-                retro(fr, base=base) == "recurse"
+                os.environ.get("SECPT_ROLE_TEMPLATES", "0") == "1"
+                and retro(fr, base=base) == "recurse"
                 and _expand_recurse(fr, base=base, max_intents=max_intents) > 0
             ):
-                continue  # 子意图已入队，worker 认领执行
+                continue  # 子意图已入队，worker 认领执行（legacy 角色递归）
             # 演化提案（§4.4）：题面外资产集中 → 受控改向通道。ask（默认）进
             # intercept pending 队列等人工审批；auto 只自动批准纯细化类；
             # off 关闭。扩 scope 永远 require 人工（ROE 边界不可自动化）
@@ -2310,6 +3161,24 @@ async def run_frontier(
                 ):
                     continue  # 提案意图已入队（确定性处置，blocked 等审批）
             if idle_rounds >= 2 or not can_plan:
+                # v4：无产出唤醒前给信念收敛检查一次机会（活动假设仍在 → 让 Commander 决定）
+                if (
+                    tree is not None
+                    and tree.open_high_value()
+                    and stall_wake_budget > 0
+                    and fr.total() < max_intents
+                    and not (delivery_pending or delivery_wait)
+                ):
+                    stall_wake_budget -= 1
+                    idle_rounds = 0
+                    pending_signals.append(_stall_signal_now("规划无产出，但假设树仍有未决方向"))
+                    continue
+                if enable_delivery and not delivery_decision:
+                    if await _run_delivery_gate():
+                        stop = True
+                        stop_ev.set()
+                        break
+                    continue
                 break  # 空队列 + 无法再规划（意图数达上限/规划两轮无产出）→ 收敛
             timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）
         else:
@@ -2318,7 +3187,7 @@ async def run_frontier(
             await asyncio.wait_for(wake_q.get(), timeout=timeout)
 
     stop_ev.set()
-    await asyncio.gather(*workers, return_exceptions=True)
+    await asyncio.gather(*worker_tasks, return_exceptions=True)
 
     # P0-2：子 job 事件流聚合到父 job（否则父 job 无 events.jsonl，
     # watch 导出 / 评判 evaluate_job 全部失效）。final=True 补漏未增量聚合的
@@ -2327,7 +3196,7 @@ async def run_frontier(
 
     _release_task_lock(_lock)  # 加强④：正常路径显式释放（异常路径 fd 回收兜底）
 
-    return RunSummary(
+    summary = RunSummary(
         job_id=base,
         mode="frontier",
         flags=flags,
@@ -2337,5 +3206,26 @@ async def run_frontier(
         extras={
             "done_events": done_events,  # 完成广播事件（含 report 聚合条目）
             "sub_jobs": sub_jobs,  # 子任务清单（父事件流聚合来源）
+            "delivery": delivery_decision.as_dict() if delivery_decision is not None else None,
+            "logistics_open": fr.count_open(lane="logistics"),
+            "logistics_enabled": bool(enable_logistics),
+            "commander_wakes": len(commander_decisions),
+            "commander_deliver_requested": any(
+                getattr(d, "decision", "") == "deliver" for d in commander_decisions
+            ),
+            "hypothesis_counts": tree.counts() if tree is not None else {},
         },
     ).to_dict()
+    # 主智能体收尾（经验蒸馏由 solve 的 learning 链路负责，这里落审计摘要）
+    retro_path = _write_retro(
+        base=base,
+        objective=objective,
+        flags=flags,
+        chains=chains,
+        delivery=delivery_decision,
+        fr=fr,
+        wall_s=summary.get("wall_s", 0.0),
+    )
+    if retro_path is not None:
+        summary["retro_path"] = str(retro_path)
+    return summary

@@ -270,23 +270,8 @@ def _feedback_experiences(job_id: str, outcome: bool) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 主流程
+# 主流程（S6 模式收敛：唯一执行编排 = frontier；benchmark → campaign）
 # ---------------------------------------------------------------------------
-
-
-def route_mode(prof, mode: str) -> str:
-    """执行模式自动路由（用户不需要知道单链/意图/多阶段）。
-
-    懒升级阶梯：最小充分打法——
-      profile 带 stages → stages（用户显式编排）
-      其余 → single（planner 无开销，短任务最优）
-      single 无成果 → 自动升级 frontier（solve 内失败升级，见 solve()）
-    """
-    if mode != "auto":
-        return mode
-    if getattr(prof, "stages", None):
-        return "stages"
-    return "single"
 
 
 def solve(
@@ -298,7 +283,6 @@ def solve(
     fallback: str | None = None,
     wall: int = -1,
     steps: int = 0,
-    mode: str = "auto",
     judge_enable: bool = True,
     learn_enable: bool = True,
     verbose: bool = False,
@@ -307,9 +291,9 @@ def solve(
 ) -> int:
     """一键解题（唯一用户入口）。返回退出码：0=完成，1=未完成，2=输入错误。
 
-    两个自动决策（用户无需判断任务类型）：
-    - profile 未指定 → 规则关键词 + LLM 兜底自动路由（route_objective）
-    - 执行模式 auto → stages(若编排) / single；single 无成果自动升级 frontier
+    S6 模式收敛：执行编排只有一条路——frontier 意图驱动（stages 折叠为
+    线性意图链，见 core/orchestrator/dag.py）；benchmark profile 走 campaign
+    （平台协议层）。profile 未指定 → 规则关键词 + LLM 兜底自动路由。
     """
     if vpn:
         # VPN 自举：拉起并验证；沙箱切 host 网络（容器才能走 VPN 路由网段）
@@ -318,7 +302,9 @@ def solve(
         ok, msg = _vpn.up()
         print(f"[vpn] {msg}")
         if not ok:
-            return 2
+            # VPN 未连通是瞬时/可恢复故障（网络抖动、建链慢）：返回 1 让 entrypoint
+            # 重启续跑；rc=2 是"平台终局"语义，会把 8h 任务永久停掉
+            return 1
         os.environ.setdefault("SECPT_SANDBOX_NETWORK", "host")
 
     target_p = Path(target)
@@ -465,7 +451,7 @@ def solve(
 
     from secpt.core.job.store import JobStore
     from secpt.core.orchestrator import dag as _dag
-    from secpt.core.orchestrator.benchmark import BenchmarkUnavailable
+    from secpt.core.orchestrator.benchmark import BenchmarkEnded, BenchmarkUnavailable
 
     prof = _load_profile(profile)
     if getattr(prof, "roe", None) is not None and prof.roe.mode == "authorized":
@@ -474,12 +460,12 @@ def solve(
             f"[ROE] 授权实战模式（authorized）{_throttle}——仅限授权目标，"
             f"全部操作落审计日志，遵守 profile.constraints 边界"
         )
-    run_mode = route_mode(prof, mode)
 
     async def _run() -> dict:
         store = JobStore()
-        # benchmark 评测：并行跑分器（3 题并发 × 意图级止损 × 自动多轮战役）
-        if prof.name == "benchmark" and run_mode in ("auto", "single"):
+        # benchmark 评测：并行跑分器（3 题并发 × 意图级止损 × 自动多轮战役）；
+        # 其余：统一走 dag.run_task → frontier 意图编排（唯一执行模式，S6）
+        if prof.name == "benchmark":
             from secpt.core.orchestrator.benchmark import (
                 BenchmarkUnavailable,
                 run_benchmark_campaign,
@@ -490,33 +476,11 @@ def solve(
                 return await run_benchmark_campaign(spec, llm=None, model=model)
             except BenchmarkUnavailable:
                 raise  # 平台级失败（任务结束/网络）：快速失败不降级，由 solve 顶层清晰提示
-            except RuntimeError as e:
-                print(f"[solve] 并行跑分器初始化失败（{e}），回退单链")
-        if run_mode == "stages":
-            from secpt.core.orchestrator.stages import run_stages
-
-            return await run_stages(
-                spec, prof, store=store, model_primary=model, model_fallback=fallback
-            )
-        if run_mode == "frontier":
-            # 团队模式：frontier 角色意图编排（recon→exploit×N 并行→verify→report），
-            # 多 worker 按角色认领互斥；entries 作为资产兜底（无 goal 拆解资产时用入口）
-            from secpt.core.orchestrator.frontier import run_frontier
-
-            summary = await run_frontier(
-                # 与 dag 单链同口径拼【目标入口】【附件源码】（否则 team 模式丢附件路径）
-                _dag.augment_objective(objective, list(entries), artifacts),
-                profile=profile,
-                base_job_id=job_id,
-                llm=None,
-                model=model,
-                role_plan=True,
-                default_assets=list(entries),
-            )
-            summary["mode"] = "team"
-            return summary
+            # 注意：不再兜底 RuntimeError 回退单链。战役内部任何异常都应向上抛，
+            # 由 entrypoint 重启续跑；静默降级到 DAG 会绕过平台协议，甚至把非平台
+            # flag 当成功（rc=0）导致任务提前结束。
         return await _dag.run_task(
-            spec, store=store, use_orchestrator=False, model_primary=model, model_fallback=fallback
+            spec, store=store, llm=None, model_primary=model, model_fallback=fallback
         )
 
     import threading
@@ -556,13 +520,27 @@ def solve(
 
     try:
         summary = asyncio.run(_run())
-    except BenchmarkUnavailable as e:
-        # 平台级失败（如任务已结束 409）：快速失败——跑分依赖平台协议，降级没意义
+    except BenchmarkEnded as e:
+        # 平台任务已结束（409/finished）：终局，entrypoint 见 rc=2 不再重启
         print(f"\n[solve] Error: {e}")
         return 2
+    except BenchmarkUnavailable as e:
+        # 瞬时不可达（网络/VPN 抖动、5xx）：不是终局——返回 1 让 entrypoint 重启续跑。
+        # 混用 rc=2 会让一次网络抖动把 8h 中的整场跑分永久停掉（OOM 重启同理）。
+        print(f"\n[solve] 平台暂时不可达: {e}")
+        return 1
     except KeyboardInterrupt:
-        # Ctrl-C：与信号处理器同口径（落盘 + 指引）
+        # Ctrl-C：与信号处理器同口径（落盘 + 指引）；_cancel 正常会 raise 130
         _cancel(2, None)
+        return 1
+    except Exception as e:
+        # 未分类异常（含战役内部 RuntimeError/编程错误）：落 traceback 并以 rc=1
+        # 退出，交给 entrypoint 重启续跑；绝不能裸穿成 typer traceback 或静默结束。
+        import traceback
+
+        print(f"\n[solve] 未处理异常: {e}")
+        traceback.print_exc()
+        return 1
     finally:
         _stop_watch.set()
         if watch_enable:
@@ -570,61 +548,15 @@ def solve(
     flags = summary.get("flags") or []
     flag = flags[0] if flags else None
     print(
-        f"\n[solve] 运行结束：mode={summary.get('mode', run_mode)} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
+        f"\n[solve] 运行结束：mode={summary.get('mode', 'frontier')} wall={summary.get('wall_s')}s flag={flag or '未拿到'}"
     )
+    if summary.get("all_completed"):
+        # 平台已无未完成题：正常终局，返回 0（entrypoint 不再重启空转）
+        print("[solve] 平台题目已全部完成，正常退出")
+        return 0
 
-    # 失败自动升级：single 无成果 → frontier 意图驱动继续（懒升级阶梯）。
-    # 升级不是重跑：带首轮否定路线（RESET 思路）+ 预算累计口径 + 附件/入口块。
-    if run_mode == "single" and not flag and mode == "auto":
-        _leg1_wall = float(summary.get("wall_s") or 0)
-        _negs = (
-            "\n".join(
-                f"- [{c.get('status')}] {c.get('role') or 'chain'} steps={c.get('steps', 0)}"
-                for c in (summary.get("chains") or [])
-            )
-            or "（首轮无链记录）"
-        )
-        _budget_note = ""
-        if wall > 0:
-            _remain = max(0.0, float(wall) - _leg1_wall)
-            _budget_note = (
-                f"\n总预算 {wall}s，首轮已用 {_leg1_wall:.0f}s，剩余约 {_remain:.0f}s"
-                "——优先验证高价值线索，控制探索广度。"
-            )
-            print(
-                f"[solve] 预算累计：--wall {wall}s，首轮已用 {_leg1_wall:.0f}s，"
-                f"剩余约 {_remain:.0f}s"
-            )
-        print("[solve] 单链未拿到成果，自动升级到意图驱动（frontier）继续...")
-        from secpt.core.orchestrator.frontier import run_frontier
-
-        retry_note = (
-            f"\n\n【首轮单链尝试未成功】已用 {_leg1_wall:.0f}s，未拿到成果。"
-            f"\n【首轮已验证否定的路线（不要重复踩坑）】\n{_negs}"
-            f"{_budget_note}\n"
-            "请换技术路线深入，不要原样重跑。"
-        )
-        summary2 = asyncio.run(
-            run_frontier(
-                _dag.augment_objective(objective, list(entries), artifacts) + retry_note,
-                profile=profile,
-                base_job_id=job_id,
-                llm=None,
-                model=model,
-                default_assets=list(entries),
-            )
-        )
-        flags2 = summary2.get("flags") or []
-        if flags2:
-            flag = flags2[0]
-            summary["flags"] = flags2
-            summary["wall_s"] = round(
-                float(summary.get("wall_s", 0)) + float(summary2.get("wall_s", 0)), 1
-            )
-        print(
-            f"[solve] frontier 续跑：flags={flags2 or '无'} "
-            f"chains={len(summary2.get('chains') or [])}"
-        )
+    # S6：失败升级路径已随单链模式退役——唯一编排 frontier 内部自带
+    # 意图复核/RESET/升级强模型，编排层不再做"单链→frontier"二次升级。
 
     # 自动导出可读日志（best-effort）：job 目录 run.log（归档副本）+ logs/<job_id>.log（集中存放）
     try:
@@ -705,11 +637,6 @@ def solve_cmd(
     ),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
-    mode: str = typer.Option(
-        "auto",
-        "--mode",
-        help="执行模式：auto（默认，自动选择+失败升级）/ single / frontier / stages",
-    ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
@@ -724,7 +651,8 @@ def solve_cmd(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """一键解题（唯一入口）：任务类型与打法自动选择，启动即自带实时交互日志。"""
+    """一键解题（唯一入口）：唯一执行编排 frontier（benchmark 走 campaign），
+    启动即自带实时交互日志。"""
     import os as _os
 
     _os.environ["SECPT_SANDBOX"] = "1" if sandbox else "0"
@@ -736,7 +664,6 @@ def solve_cmd(
         fallback=fallback,
         wall=wall,
         steps=steps,
-        mode=mode,
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,

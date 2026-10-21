@@ -98,6 +98,8 @@ def test_hooks_all_wired(tmp_path):
         "compaction_requested",
         "compaction_completed",
         "loop_phase",  # 三档止损状态机档位迁移（设计 §2）
+        "plan_event",  # v4 编排：Commander/规划轮结果（frontier 父流直写）
+        "intent_event",  # v4 编排：意图生命周期（领取/结算轨迹）
     } == EVENT_TYPES
 
 

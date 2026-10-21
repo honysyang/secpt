@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>secpt 指挥台</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="mark">▚</span>secpt<small>COMMAND CONSOLE</small></div>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-run" style="color:var(--ok)">1</div><div class="k">RUNNING</div></div>
+      <div class="kpi"><div class="v" id="k-flag" style="color:var(--flag)">3</div><div class="k">FLAGS</div></div>
+      <div class="kpi"><div class="v" id="k-cost">¥0.1842</div><div class="k">本任务成本</div></div>
+      <div class="kpi"><div class="v" style="font-size:12px" id="k-model">deepseek-v4-flash</div><div class="k">MODEL</div></div>
+    </div>
+    <button class="iconbtn" id="btn-k" title="命令面板 Ctrl+K">⌘</button>
+    <button class="iconbtn" id="btn-theme" title="切换主题">◐</button>
+    <span class="conn" title="实时连接正常"></span>
+  </header>
+  <div class="main">
+    <nav class="nav">
+      <div class="nav-cap">视图</div>
+      <div class="nav-btns" id="navbtns"></div>
+      <div class="spacer"></div>
+      <div class="nav-foot">secpt v2.0<br>local-first</div>
+    </nav>
+    <div class="body-main" id="body"></div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="detail" id="fdetail">
+  <header style="display:flex;flex-direction:column"><div style="font-size:15px;font-weight:600;line-height:1.5" id="fd-title"></div><div class="muted mono" style="font-size:11px;margin-top:6px" id="fd-meta"></div><button class="btn" id="fd-exp" style="display:none;margin-top:12px;font-size:12px;align-self:flex-start">❄ 沉淀为经验</button></header>
+  <div class="dbody" id="fd-body"></div>
+</aside>
+<div class="dock" id="dock"></div>
+<div class="palette" id="palette"><input id="p-input" placeholder="搜索任务、视图或动作…"><div class="p-list" id="p-list"></div></div>
+<div class="toast" id="toast"></div>
+
+
+<script src="/static/app.js"></script>
+</body>
+</html>

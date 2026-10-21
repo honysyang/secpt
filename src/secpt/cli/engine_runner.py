@@ -89,7 +89,7 @@ def _prod_llm():
     """生产 LLM 入口：SECPT_MODEL_POOL 设置时走多 provider 故障转移链。"""
     if os.environ.get("SECPT_FAKE_LLM"):
         # fake 环境（无 key 可测）：与 run_engine 的 worker 分支一致，统一 FakeLLM——
-        # 否则 run_frontier/planner 解析到真实客户端会 401 空烧（solve --mode frontier 冒烟即此）
+        # 否则 run_frontier/planner 解析到真实客户端会 401 空烧（frontier 冒烟即此）
         from secpt.core.job.fakellm import FakeLLM
 
         return FakeLLM(n_steps=1)
@@ -163,6 +163,7 @@ def run_engine(
     hook_factory=None,  # 外部包装层工厂：inner_hooks -> hooks（团队模式完成广播让出用）
     scope_entries: list[str] | None = None,  # G1 目标授权白名单来源（题面入口/意图资产）
     tools_extra: list[str] | None = None,  # C2：意图级工具补充（插件名，按题族动态启用）
+    runtime_tools: dict | None = None,  # 运行期注入 {name:(schema,fn)}（后勤委托等闭包工具）
 ) -> _engine.RunResult:
     """新建任务跑一次 Engine，全程落盘。profile 决定 tools/terminator/budget/先验。
 
@@ -238,6 +239,10 @@ def run_engine(
 
     extra_tools = maybe_attach_intel(extra_tools, stage_tools, job_id, box=_step_box)
     bash_extra = [t for t in bash_extra if t != "report_finding"]
+    # 编排层运行期工具（如 delegate_logistics）：闭包捕获任务上下文，不进快照；
+    # resume 时由编排层重新注入。与插件工具同名时以运行期注入为准。
+    if runtime_tools:
+        extra_tools.update(runtime_tools)
 
     store = job_store or JobStore()
 

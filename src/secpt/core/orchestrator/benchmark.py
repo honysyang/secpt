@@ -15,6 +15,7 @@ solve 在 benchmark profile 下自动走此路径（run_mode=single 且 profile=
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -33,10 +34,11 @@ from secpt.core.orchestrator.summary import ChainResult, RunSummary
 
 
 class BenchmarkUnavailable(RuntimeError):
-    """benchmark 平台不可用（任务已结束 / HTTP 错误 / 网络失败）。
+    """benchmark 平台暂时不可用（网络失败 / 5xx / 409 max-active 等）。
 
     快速失败而非降级：跑分依赖平台协议，回退单链只会对着死任务烧预算。
-    solve 顶层捕获本异常 → 清晰提示 + 退出码 2。
+    solve 顶层捕获本异常 → 退出码 1，由 entrypoint 重启续跑。
+    子类 BenchmarkEnded 才是终局（退出码 2）。
     """
 
 
@@ -258,6 +260,19 @@ def _platform_error(e: urllib.error.HTTPError) -> BenchmarkUnavailable:
     with contextlib.suppress(Exception):
         d = json.loads(body)
         detail = f"{d.get('code', '')}: {d.get('message', '')}".strip(": ")
+    low = body.lower()
+    # 409 invalid_state 既可能是"任务结束"，也可能是"max active challenge"（槽位满）。
+    # 后者是可恢复条件，必须先判——否则一次槽位冲突会把整场 8h 跑分当终局停掉。
+    if "max active challenge" in low or "max active" in low:
+        return BenchmarkUnavailable(
+            f"平台容器槽位已满（HTTP {e.code} {detail or body}）——可恢复：close 空闲题/换题重试"
+        )
+    # 鉴权失败是终局：坏 token 重试 8 小时也不会变好
+    if e.code in (401, 403):
+        return BenchmarkEnded(
+            f"平台鉴权失败（HTTP {e.code} {detail or body}）——BENCHMARK_TOKEN 无效/过期，"
+            "请更新平台运行时环境变量后重启任务"
+        )
     if "finished" in body or "invalid_state" in body or "task_not_found" in body:
         return BenchmarkEnded(
             f"平台任务已结束（HTTP {e.code} {detail}）——本次跑分无法继续（所有端点都会 409）。\n"
@@ -335,13 +350,22 @@ def _load_fail_digest(title: str) -> str:
         return ""
 
 
+def _is_challenge_done(c: dict) -> bool:
+    """平台口径的"本题已完成"：is_completed 或旗数已满。"""
+    return bool(c.get("is_completed")) or int(c.get("correct_flag_count") or 0) >= int(
+        c.get("flag_count") or 1
+    )
+
+
 def _sorted_open(challenges: list[dict], *, limit: int = 60) -> list[dict]:
-    """未完成题排序：level 升序 → 难度 easy→hard → 已得分多的先补完。"""
-    open_ = [
-        c
-        for c in challenges
-        if not c.get("is_completed") and c.get("container_status") != "available"
-    ]
+    """未完成题排序：level 升序 → 难度 easy→hard → 已得分多的先补完。
+
+    注意：container_status=available 表示容器已启动并有地址（不是"被占用"）——
+    必须纳入选题并复用地址。ledger.claim 会挡住其他活 worker 已认领的题；把
+    available 排除会让崩溃/close 失败遗留的容器对应题目被永久跳过（甚至被误判
+    全部通关）。
+    """
+    open_ = [c for c in challenges if not c.get("is_completed")]
     open_.sort(
         key=lambda c: (
             int(c.get("level") or 9),
@@ -355,7 +379,8 @@ def _sorted_open(challenges: list[dict], *, limit: int = 60) -> list[dict]:
 BENCH_WORKER_OBJECTIVE = """【评测跑分循环 · 你的当前任务】
 你在并行跑分队伍中（每 worker 一题，各自独立工作区；脚本文件名建议带本题 unique_code 前缀便于日志区分）。
 对分配给你的这一道题，严格执行：start → 探测解题 → submit 每个 flag → close。
-铁律（详见已注入的先验 benchmark.md）：只打 API 给的 container_addr；每题必 close；
+铁律（详见已注入的先验 benchmark.md）：只打 API 给的 container_addr；在途题不要手动 close
+（有租约会被 close_denied，编排层在结算时自动回收）；
 每题有硬步数预算（按难度 40/60/110 × 旗数放大），烧完系统强制换题——
 烧掉预算的 2/3 仍未出 flag 时你必须先做决策（hint 或主动收尾换题），不要等系统强停。
 开局规范（编排层预置，勿浪费步数）：
@@ -716,6 +741,8 @@ async def run_benchmark(
     ledger: ChallengeLedger | None = None,  # P1：跨进程互斥账本（防重复解题）
     deadline_ts: float | None = None,  # M1：本轮全局截止（epoch 秒；到点排空）
     reserve_s: float = 300.0,  # 截止前预留（收尾/关容器）
+    external_drain=None,  # R2：campaign 级排干信号（RSS 软着陆）——与 BenchmarkEnded 的
+    # 本地 drain 合并判定：停止认领新意图、在途链自然收尾、轮末确定性回收容器
 ) -> dict:
     """并行跑分主入口：选题入队（账本 claim 防跨进程重复）→ frontier 多 worker 并行。"""
     if max_parallel is None:
@@ -754,7 +781,7 @@ async def run_benchmark(
 
     if not claimed:
         led.dump_json(Path(os.environ.get("SECPT_VAR", "var")) / "benchmark_ledger.json")
-        return RunSummary(
+        _empty = RunSummary(
             job_id=spec.job_id,
             mode="benchmark",
             chains=[
@@ -766,6 +793,13 @@ async def run_benchmark(
             ],
             extras={"ledger": led.summary()},
         ).to_dict()
+        # 平台已无未完成题 = 正常终局：solve 据此返回 0，避免 entrypoint 反复重启空转。
+        # 必须按每题完成度判定，不能只看列表非空——available（容器在跑）但未通关的题
+        # 若被误判为"全部完成"，会让 solve 直接 rc=0 收工。题目列表为空同理不算终局。
+        _empty["all_completed"] = bool(challenges) and all(
+            _is_challenge_done(c) for c in challenges
+        )
+        return _empty
 
     fr = frontier or Frontier(frontier_db_path(spec.job_id))  # F1：意图库按任务隔离
     for rank, (c, flags_total) in enumerate(claimed):
@@ -783,8 +817,9 @@ async def run_benchmark(
         tools = tools_for_challenge(desc)  # C2：按题族动态启用插件工具
         playbook = _playbook_section(uc)[:600]  # B2：族级打法（自动蒸馏）
         # M1-B：意图级墙钟安全网（步数 × 每步墙钟估计，防单次网络挂死吃掉整轮）；
-        # 0=关闭。默认 10s/步（1323 实测均值 7s/步 + 余量）
-        _wall_mult = float(os.environ.get("SECPT_BENCH_STEP_WALL_S", "10") or 0)
+        # 0=关闭。默认 15s/步：本地实测 GLM 长工具下约 15-20s/步，10s 会让 60 步
+        # 预算在 ~40 步就被墙钟截断（a-03/c-03 复盘）。平台可用同名 env 覆盖。
+        _wall_mult = float(os.environ.get("SECPT_BENCH_STEP_WALL_S", "15") or 0)
         for ci, (start, end) in enumerate(chunks, 1):
             if end <= flags_done:
                 continue  # A2：本段旗数已在平台到账——重试轮不重复跑（省整段预算）
@@ -796,11 +831,14 @@ async def run_benchmark(
             title = f"通关 {uc}（{c.get('difficulty')} L{level}）{seg}"
             goal = (
                 f"unique_code={uc}；description={desc}；\n"
-                f"本题共 {flags_total} 旗，平台当前已得 {flags_done} 旗。"
+                f"本题共 {flags_total} 旗。平台进度以 `python3 api.py list` 的实时 "
+                f"correct_flag_count 为准（本段出队时记录 {flags_done} 旗，可能已变化；"
+                f"已计数的旗不要重复提交，duplicate 409 只会白烧步数）。"
                 f"本段目标：第 {start}~{end} 旗中至少拿到 1 个新 flag 并立即 submit"
                 f"（每拿一旗就交一旗，不要攒）。\n"
                 f"先用 api.py start {uc} 拿 container_addr（已开则直接复用 list 里的地址），"
-                f"解题后 submit，最后务必 close。脚本命名带 {uc} 前缀。"
+                f"解题后立即 submit；不要手动 close（在途题由编排层 settle 自动回收）。"
+                f"脚本命名带 {uc} 前缀。"
                 f"{playbook}"
                 f"{_load_fail_digest(title)}"
             )
@@ -838,7 +876,9 @@ async def run_benchmark(
                 depth=0,
                 source="planner",
                 max_steps=20,
-                max_wall_s=300,
+                # 5min 对 6 旗 hard 的复验不够（b-02 实测撞 300s 硬止损）；放到 10min，
+                # 步数预算仍 20，正常复验会提前收尾，不会拖满
+                max_wall_s=600,
                 role="verify",
                 asset_scope=uc,
                 tools=tools,
@@ -865,6 +905,9 @@ async def run_benchmark(
     # 备选工具池默认开（战役内 worker 同进程）：agent 意图内发现新攻击面时用
     # request_tools 运行时启用池内工具，不再受"题面关键词一次性装配"限制
     os.environ.setdefault("SECPT_TOOL_POOL", "1")
+    # benchmark 允许整条命令自动 bash -c：管道/重定向/变量展开不再被拒（模型
+    # 不必为每个管道写临时 .py）；bash 已加入 benchmark profile 白名单。
+    os.environ.setdefault("SECPT_BASH_AUTO_SHELL", "1")
     objective += (
         "\n\n【共享账本（状态同步真相源，api.py holders/close 已内置读取，勿自行翻库）】\n"
         f"SECPT_LEDGER_DB={os.environ['SECPT_LEDGER_DB']}\n"
@@ -992,7 +1035,9 @@ async def run_benchmark(
             on_started=_on_started,  # P0-2：意图真正开跑时才置 running
             on_settled=_on_settled,  # ② 结算收尾：确定性 close 本题容器
             scope_ledger=led,  # ③ 广播载体（benchmark 意图无 asset_scope，仅统一实例）
-            should_drain=drain_ev.is_set,  # A3：平台结束后停止认领新意图
+            should_drain=lambda: (
+                drain_ev.is_set() or (external_drain is not None and external_drain.is_set())
+            ),  # A3+R2 合并
             deadline_ts=deadline_ts,  # M1：本轮全局截止（campaign 可传）
             reserve_s=reserve_s,
         )
@@ -1102,12 +1147,56 @@ def _campaign_round_model(model: str | None, n: int) -> str | None:
 
     第 1 轮已带 digest 记忆换路线，但同源模型盲区相同；第 2 轮起切
     SECPT_ESCALATE_MODEL（跨厂商第二脑）给出异源视角。SECPT_CAMPAIGN_ROTATE_MODEL=0 关。
+    n 由调用方决定：默认传本段轮次（每次进程启动第 1 轮=主脑）；
+    设 SECPT_ROTATE_BY_CUMULATIVE=1 时传跨重启累计轮次。
     """
     if n > 1 and os.environ.get("SECPT_CAMPAIGN_ROTATE_MODEL", "1") != "0":
         alt = os.environ.get("SECPT_ESCALATE_MODEL", "").strip()
         if alt and alt != model:
             return alt
     return model
+
+
+def _newest_event_mtime(jobs_root: Path, base_job_id: str) -> float:
+    """进度看门狗：本战役所有 worker 的 events.jsonl 最近 mtime（无文件=0）。
+
+    benchmark worker job 名为 <base>-iXXXX，前缀 glob 即可覆盖。调用方以
+    首次扫描值为基线，因此历史轮次的旧文件不会被误当成新进度。
+    """
+    try:
+        return max(
+            (p.stat().st_mtime for p in jobs_root.glob(f"{base_job_id}*/events.jsonl")),
+            default=0.0,
+        )
+    except Exception:
+        return 0.0
+
+
+def _effective_soft_mb(
+    soft_mb: int,
+    base_mb: int,
+    last_recycle_ts: float,
+    now: float,
+    cooldown_s: float,
+    bump_mb: int,
+) -> int:
+    """软着陆防抖阈值（纯函数，便于单测）。
+
+    两种"重启后立刻再次触顶"的死循环在这里被抬高阈值：
+    ① 冷却窗口内刚软着陆过（可疑的快速循环）；
+    ② 本进程启动基线已高于软限（上一段遗留的孤儿工具进程/页缓存把 cgroup
+       基线撑高——不抬高的话，新进程 60s 内就会再次触发，999 次重试全部空转）。
+    """
+    if soft_mb <= 0:
+        return 0
+    eff = soft_mb
+    if cooldown_s > 0 and last_recycle_ts > 0 and (now - last_recycle_ts) < cooldown_s:
+        eff += bump_mb
+    # 只有此前确实软着陆过才做基线抬升：首启（无时间戳）不干预，避免把
+    # "阈值配得偏低"的正常配置误判成需要防抖。
+    if last_recycle_ts > 0 and base_mb >= eff:
+        eff = base_mb + bump_mb
+    return eff
 
 
 async def run_benchmark_campaign(
@@ -1120,13 +1209,15 @@ async def run_benchmark_campaign(
     """A2：自动多轮跑分——每轮结束以平台实况为准，未完成题释放租约后重试。
 
     1323 的教训：digest 里写满了第二轮该打哪，但一轮 4.7h 后任务到时限，
-    17 道失败题一次重试都没有。轮次预算（SECPT_CAMPAIGN_ROUNDS，默认 3）与
-    总墙钟（SECPT_CAMPAIGN_WALL_S，默认 0=不限）由 env 控制；平台任务结束时
-    （BenchmarkEnded）立即停止，不再空转。
+    17 道失败题一次重试都没有。轮次预算（SECPT_CAMPAIGN_ROUNDS，默认 0=不限轮）
+    与总墙钟（SECPT_CAMPAIGN_WALL_S，默认 0=不限）由 env 控制；平台任务结束时
+    （BenchmarkEnded）或全部通关立即停止，不再空转。
     """
     if rounds is None:
-        rounds = int(os.environ.get("SECPT_CAMPAIGN_ROUNDS", "3"))
-    rounds = max(1, rounds)
+        rounds = int(os.environ.get("SECPT_CAMPAIGN_ROUNDS", "0"))
+    if rounds <= 0:
+        rounds = 1 << 30  # 0=不限轮：退出完全交给轮间实况判定（平台结束/通关）
+    rounds_disp = str(rounds) if rounds < (1 << 30) else "∞"
     wall_s = float(os.environ.get("SECPT_CAMPAIGN_WALL_S", "0") or 0)
     t0 = time.time()
     sp = campaign_state_path(spec)
@@ -1159,6 +1250,196 @@ async def run_benchmark_campaign(
         for _sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(_sig, _on_signal)
 
+    # R1（2.8h 夭折复盘）：启动自愈——上次进程 OOM/SIGKILL 无收尾时 PID 已变，
+    # release_own_claims 匹配不到旧 worker_id，残留租约要白等 900s TTL。改为按
+    # pid@host 判活回收死进程租约，并尽力关闭其遗留平台容器（腾出 3 槽上限）。
+    with contextlib.suppress(Exception):
+        _dead = ChallengeLedger().release_dead_claims(reason="campaign 启动回收死进程残留")
+        for _uc in _dead:
+            _close_challenge(_uc)
+        if _dead:
+            print(
+                f"[campaign] 启动回收 {len(_dead)} 个死进程残留租约"
+                f"（并关闭其容器）: {', '.join(_dead[:5])}{'…' if len(_dead) > 5 else ''}",
+                flush=True,
+            )
+
+    # 换脑计划开局即打印：容器日志一眼可核实多模型配置是否生效（上次 100% flash
+    # 的疑点之一：死在第 1 轮，轮间换脑根本没机会触发，配置是否正确从未被验证）
+    print(
+        f"[campaign] 换脑计划：第1轮={(model or 'primary').split('/')[-1]}；"
+        f"第2+轮(本段)={os.environ.get('SECPT_ESCALATE_MODEL') or '(未配置，不换)'}；"
+        f"累计换脑={os.environ.get('SECPT_ROTATE_BY_CUMULATIVE') == '1'}；"
+        f"glm_base={os.environ.get('SECPT_MODEL_BASE_GLM') or '默认'}；"
+        f"池=[{os.environ.get('SECPT_MODEL_POOL') or '无'}]",
+        flush=True,
+    )
+
+    # R2：长跑存活双保险——① 每 5 分钟可见心跳（rss/轮次）：日志停更 = 进程死亡，
+    # 不再靠事后猜；② 内存软着陆：超 SECPT_RSS_SOFT_MB（0=关）时先排干本轮（停止
+    # 认领新意图、在途自然收尾、容器 deterministic 回收），再 SystemExit(3) 交由
+    # entrypoint 重启续跑——campaign 状态/账本均已持久化，把 OOM 硬杀变成软重启。
+    # 口径：max(本进程峰值 RSS, cgroup 工作集)。OOM 按整个 cgroup 计，只盯 Python
+    # RSS 会漏掉 nmap/浏览器/脚本等子进程；cgroup 工作集 = memory.current -
+    # inactive_file（扣除可回收页缓存，避免缓存高就误判 OOM 风险）。
+    rss_soft_mb = int(os.environ.get("SECPT_RSS_SOFT_MB", "0") or 0)
+    # 软着陆后的排干上限：在途链迟迟不收尾时不能无限等（内存还在涨，可能再次
+    # OOM）。超时强制 rc=3 重启；0=不限。默认 15 分钟，覆盖 3 worker 的在途预算。
+    drain_max_s = float(os.environ.get("SECPT_DRAIN_MAX_S", "900") or 0)
+    # 防抖：刚回收过/启动基线已高于软限时抬高本段阈值，避免"重启→立即再次
+    # 触顶→再重启"的死循环（999 次重试会在几小时内空转完）。
+    cooldown_s = float(os.environ.get("SECPT_RECYCLE_COOLDOWN_S", "600") or 0)
+    bump_mb = int(os.environ.get("SECPT_RECYCLE_BUMP_MB", "1536") or 0)
+    # 进度看门狗：非 OOM 的"活着但卡死"（事件循环死锁/线程挂死）既没有退出码，
+    # 内存也可能平稳。events.jsonl 是所有 worker 的步进落盘，连续 N 秒无新事件
+    # = 实质停滞 → 强制 rc=3 重启。阈值须远大于单步最长耗时（LLM 重试链≈13min、
+    # 插件 300s、bash 60s），默认 30 分钟；0=关闭。
+    stall_s = float(os.environ.get("SECPT_STALL_S", "1800") or 0)
+    recycle_stamp = sp.with_suffix(".recycle")
+    last_recycle = 0.0
+    with contextlib.suppress(Exception):
+        last_recycle = float(recycle_stamp.read_text(encoding="utf-8").strip() or 0)
+
+    def _mem_mb() -> tuple[int, str]:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+        cg = 0
+        try:
+            # 仅 cgroup 设了硬限（容器内 memory.max 有限值）才采信：裸机本地
+            # 跑时该路径是宿主机根 cgroup，用量不代表本进程风险
+            if Path("/sys/fs/cgroup/memory.max").read_text().strip() != "max":
+                cur = int(Path("/sys/fs/cgroup/memory.current").read_text().strip())
+                inact = 0
+                try:
+                    for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines():
+                        if line.startswith("inactive_file "):
+                            inact = int(line.split()[1])
+                            break
+                except Exception:
+                    pass
+                cg = max(0, cur - inact) // (1024 * 1024)
+        except Exception:
+            pass  # cgroup v1/无 procfs：只看本进程 RSS
+        return max(rss, cg), f"rss={rss} cg={cg}"
+
+    try:
+        base_mb, _ = _mem_mb()
+    except Exception:
+        base_mb = 0
+    soft_eff_mb = _effective_soft_mb(
+        rss_soft_mb, base_mb, last_recycle, time.time(), cooldown_s, bump_mb
+    )
+    if rss_soft_mb > 0 and soft_eff_mb != rss_soft_mb:
+        _why = (
+            f"上次软着陆在 {time.time() - last_recycle:.0f}s 前（冷却 {cooldown_s:.0f}s）"
+            if cooldown_s > 0 and last_recycle > 0 and time.time() - last_recycle < cooldown_s
+            else f"启动基线 {base_mb}MB 已高于软限"
+        )
+        print(
+            f"[campaign] 软着陆防抖：{_why} → 本段软限 {rss_soft_mb}→{soft_eff_mb}MB",
+            flush=True,
+        )
+    if stall_s > 0:
+        print(
+            f"[campaign] 进度看门狗：{stall_s:.0f}s 无新事件 → 强制重启"
+            f"（覆盖死锁/挂死等非 OOM 故障）",
+            flush=True,
+        )
+
+    stop_hb = threading.Event()
+    recycle_ev = threading.Event()
+
+    def _hb_loop() -> None:
+        jobs_root = Path(os.environ.get("SECPT_VAR", "var")) / "jobs"
+        last_event_mtime = _newest_event_mtime(jobs_root, spec.job_id)
+        last_progress = time.time()
+        n = 0
+        recycle_started = 0.0
+        while not stop_hb.is_set():
+            try:
+                used_mb, mem_txt = _mem_mb()
+                if n % 5 == 0:
+                    print(
+                        f"[campaign] hb {mem_txt}MB round={len(state['rounds']) + 1}"
+                        f" soft={'on:' + str(soft_eff_mb) if rss_soft_mb > 0 else 'off'}",
+                        flush=True,
+                    )
+                if rss_soft_mb > 0 and used_mb >= soft_eff_mb and not recycle_ev.is_set():
+                    recycle_ev.set()
+                    # 落盘回收时间戳：下一进程据此进入防抖窗口，避免快速循环
+                    with contextlib.suppress(Exception):
+                        _tmp = recycle_stamp.with_suffix(".tmp")
+                        _tmp.write_text(str(time.time()), encoding="utf-8")
+                        _tmp.replace(recycle_stamp)
+                    print(
+                        f"[campaign] 内存 {mem_txt}MB 触及软限 {soft_eff_mb}MB：本轮排干后"
+                        f"软着陆退出（entrypoint 将重启续跑）",
+                        flush=True,
+                    )
+                if recycle_ev.is_set() and drain_max_s > 0:
+                    if recycle_started == 0.0:
+                        recycle_started = time.time()
+                    elif time.time() - recycle_started > drain_max_s:
+                        # 排干兜底：在途链未在期限内收尾，继续等只会把内存推向硬顶。
+                        # 账本/事件已落盘，直接强制 rc=3；os._exit 跳过清理是刻意的。
+                        print(
+                            f"[campaign] 软着陆排干超过 {drain_max_s:.0f}s 仍未收尾："
+                            f"强制退出 rc=3（entrypoint 重启续跑）",
+                            flush=True,
+                        )
+                        os._exit(3)
+                # 非 OOM 停滞看门狗：进程活着但事件流不再推进（死锁/线程挂死）
+                if stall_s > 0 and not recycle_ev.is_set():
+                    newest = _newest_event_mtime(jobs_root, spec.job_id)
+                    if newest > last_event_mtime:
+                        last_event_mtime = newest
+                        last_progress = time.time()
+                    elif time.time() - last_progress > stall_s:
+                        print(
+                            f"[campaign] 进度停滞：{stall_s:.0f}s 无新事件（非 OOM 故障"
+                            f"同样覆盖）→ 强制 rc=3 重启续跑",
+                            flush=True,
+                        )
+                        os._exit(3)
+            except Exception as e:
+                # 看门狗自身绝不能被单次异常带走（否则软着陆/停滞检测失效）
+                print(f"[campaign] hb 周期异常（忽略，下周期继续）: {e}", flush=True)
+            n += 1
+            stop_hb.wait(60.0)
+
+    threading.Thread(target=_hb_loop, daemon=True, name="campaign-hb").start()
+
+    async def _round_snapshot(stage: str) -> dict | None:
+        """轮间实况：None=平台已结束（终局）。
+
+        瞬时不可达（URLError/HTTP 5xx）≠ 任务结束：8h 长跑里网络抖一下就把整场
+        战役收工是致命误判——退避重试约 5 分钟，仍失败则上抛 BenchmarkUnavailable，
+        由 entrypoint 重启续跑（内存清零比带伤硬跑稳）。
+        """
+        delay = 10.0
+        for attempt in range(1, 6):
+            try:
+                live = _platform_snapshot(force=True, ttl=0)
+                if not live:
+                    # 200 空列表 ≠ 全部通关：任务重置/平台未就绪时若当作终局，
+                    # 会直接 rc=0 收工。按不可达处理，退避后重启重试。
+                    raise BenchmarkUnavailable("平台返回空题目列表（任务重置/未就绪）")
+                return live
+            except BenchmarkEnded:
+                return None
+            except BenchmarkUnavailable as e:
+                if attempt >= 5:
+                    raise
+                print(
+                    f"[campaign] {stage}平台暂不可达（{str(e).splitlines()[0]}），"
+                    f"{delay:.0f}s 后重试（{attempt}/5）",
+                    flush=True,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 160)
+        return None
+
     for n in range(1, rounds + 1):
         if n > 1:
             # 轮间：释放上一轮本进程租约（claimed/running → exhausted 可重领，solved 不动）
@@ -1167,15 +1448,9 @@ async def run_benchmark_campaign(
                 released = ChallengeLedger().release_own_claims(
                     reason=f"campaign 第 {n - 1} 轮结束"
                 )
-            try:
-                live = _platform_snapshot(force=True, ttl=0)
-            except BenchmarkEnded as e:
-                print(
-                    f"[campaign] 平台任务已结束，停止后续轮次: {str(e).splitlines()[0]}", flush=True
-                )
-                break
-            except BenchmarkUnavailable as e:
-                print(f"[campaign] 平台不可达，停止后续轮次: {str(e).splitlines()[0]}", flush=True)
+            live = await _round_snapshot(f"第 {n} 轮前")
+            if live is None:
+                print("[campaign] 平台任务已结束，停止后续轮次", flush=True)
                 break
             pending = [
                 uc
@@ -1196,17 +1471,43 @@ async def run_benchmark_campaign(
                 f"（释放 {released} 个上一轮租约）",
                 flush=True,
             )
-        print(f"[campaign] ===== 第 {n}/{rounds} 轮开始 =====", flush=True)
+        # 换脑轮次：默认按"本段"轮次（每次进程启动第 1 轮=主脑；第 2 轮起换脑）。
+        # 如需跨重启累计（重启后的第一段也直接换脑），设
+        # SECPT_ROTATE_BY_CUMULATIVE=1。累计轮号仅用于展示/可选策略。
+        _cum_round = len(state.get("rounds") or []) + 1
+        _rotate_cum = os.environ.get("SECPT_ROTATE_BY_CUMULATIVE", "0") == "1"
+        _round_no = _cum_round if _rotate_cum else n
+        print(
+            f"[campaign] ===== 第 {n}/{rounds_disp} 轮开始（累计第 {_cum_round} 轮；"
+            f"换脑按{'累计' if _rotate_cum else '本段'}轮次）=====",
+            flush=True,
+        )
         _round_t0 = time.time()
         _deadline = (t0 + wall_s) if wall_s > 0 else None
-        _round_model = _campaign_round_model(model, n)
+        _round_model = _campaign_round_model(model, _round_no)
         if _round_model != model:
             print(
                 f"[campaign] 第 {n} 轮换脑：{_round_model.split('/')[-1]}"
-                f"（第 1 轮: {(model or 'primary').split('/')[-1]}）",
+                f"（{'累计' if _rotate_cum else '本段'}第 {_round_no} 轮；"
+                f"主脑: {(model or 'primary').split('/')[-1]}）",
                 flush=True,
             )
-        summary = await run_benchmark(spec, llm=llm, model=_round_model, deadline_ts=_deadline)
+        try:
+            summary = await run_benchmark(
+                spec,
+                llm=llm,
+                model=_round_model,
+                deadline_ts=_deadline,
+                external_drain=recycle_ev,
+            )
+        except Exception:
+            # 单轮异常（平台抖动/frontier 内部错误等）：状态先落盘，非零退出交给
+            # entrypoint 重启续跑——重启内存清零，比带伤继续跑稳得多
+            _save_campaign_state(sp, state)
+            print(f"[campaign] 第 {n} 轮异常中断，状态已保存，交由 entrypoint 重启", flush=True)
+            raise
+        if recycle_ev.is_set():
+            break  # 软着陆：本轮已排干收尾，直接跳出轮循环（退出码处理在循环外）
         last = summary
         _fam = summary.get("families") or {}
         _flags_found = sum(
@@ -1247,12 +1548,9 @@ async def run_benchmark_campaign(
 
             build_playbooks()
             distill_experiences()
-        # 轮后判定：平台实况决定是否继续
-        try:
-            live = _platform_snapshot(force=True, ttl=0)
-        except BenchmarkEnded:
-            break
-        except BenchmarkUnavailable:
+        # 轮后判定：平台实况决定是否继续（瞬时不可达退避重试，不提前收工）
+        live = await _round_snapshot(f"第 {n} 轮后")
+        if live is None:
             break
         pending = [
             uc
@@ -1268,6 +1566,13 @@ async def run_benchmark_campaign(
         if wall_s > 0 and time.time() - t0 > wall_s:
             print(f"[campaign] 战役墙钟 {wall_s:.0f}s 已用尽，停止", flush=True)
             break
+
+    stop_hb.set()
+    if recycle_ev.is_set():
+        # RSS 软着陆：campaign 状态与账本早已逐轮持久化，这里直接干净退出，
+        # entrypoint 依据退出码 3 重启后续跑（rc=0 会被当作正常完成不再重启）
+        print("[campaign] 软着陆退出（rc=3）：entrypoint 将重启续跑", flush=True)
+        raise SystemExit(3)
 
     if last is None:  # 一轮都没跑（理论上不出现）：退回单轮
         last = await run_benchmark(spec, llm=llm, model=model)

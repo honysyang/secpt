@@ -1,12 +1,12 @@
-"""S5 Specialist 编排（团队模式）单测。
+"""S6 统一执行路由单测：run_task 唯一入口（benchmark → campaign；其余 → frontier）。
 
-覆盖验收判据的核心：
-- 单入口（N==1）→ 编排层休眠，直连单链（红线 2，无 recon / 无 warroom）
-- 多入口（N>=2）→ 团队模式（frontier 角色意图编排，折叠 Specialist DAG）：
-    - recon 意图先行 → exploit×N 意图依赖解锁并行认领
-    - 角色意图挂靠资产（role/asset_scope），多 worker 认领互斥
-- --no-orchestrator 对照 → 强制单链（红线 2）
-- TaskSpec.entries 字段解析
+覆盖验收判据：
+- 单入口 → frontier planner 驱动（stop_on_first_flag，拿到首个 flag 即收敛）
+- 多入口 → frontier role_plan 角色骨架（recon 先行 → exploit×N 依赖解锁并行认领）
+- profile.stages 非空 → 折叠为线性 depends_on 意图链（清单型，关闭 planner）
+- spec.budget 透传：steps → default_max_steps；wall_s>0 → deadline_ts
+- benchmark → campaign（不经 frontier）
+- augment_objective 拼接与 entries 维度补齐
 
 RoleAwareFakeLLM：按 system 内容区分角色（recon / exploit），全程不碰真实 API；
 flag 样式刻意用非固定格式（RCTF{...}），验证"AI 自评估、样式不固定"。
@@ -17,14 +17,12 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from typing import ClassVar
 
 import pytest
-import yaml as _yaml
 
-from secpt.core.job.models import TaskSpec
+from secpt.core.job.models import TaskBudget, TaskSpec
 from secpt.core.job.store import JobStore
-from secpt.core.orchestrator.dag import entries_of, needs_orchestrator, run_task
+from secpt.core.orchestrator.dag import run_task
 
 # 从 system 的工具说明里提取 work_dir（write_file 落盘目录）
 _WORKDIR_RE = re.compile(r"写文件到 (.+?)/ 下")
@@ -75,7 +73,7 @@ class RoleAwareFakeLLM:
             )
         return _resp_assistant(content="ANSWER: RECON_DONE")
 
-    # ---------------- exploit / 通用单链：bash → 自宣告 flag ----------------
+    # ---------------- exploit / 通用链：bash → 自宣告 flag ----------------
     def _exploit_step(self, messages):
         used_bash = sum(1 for m in messages if m.get("role") == "tool")
         if used_bash < self.n_bash:
@@ -88,8 +86,7 @@ class RoleAwareFakeLLM:
 
 class _Fn:
     def __init__(self, name, arguments):
-        self.name = name
-        self.arguments = arguments
+        self.name, self.arguments = name, arguments
 
 
 class _TC:
@@ -134,231 +131,195 @@ def env(tmp_path, monkeypatch):
     """隔离 jobs 目录 + 注入假 LLM 环境（不碰真实 API）。"""
     monkeypatch.setenv("SECPT_VAR", str(tmp_path / "var"))
     monkeypatch.setenv("SECPT_FAKE_LLM", "1")
-    # run_engine 的 _api_key() 检查必须（单链分支），值本身不被使用
+    # engine 的 _api_key() 检查必须，值本身不被使用
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     return tmp_path
 
 
-def _spec(job_id: str, entries: list[str], task_type: str = "ctf") -> TaskSpec:
+def _spec(
+    job_id: str, entries: list[str], task_type: str = "ctf", budget: TaskBudget | None = None
+) -> TaskSpec:
     return TaskSpec(
         job_id=job_id,
         task_type=task_type,
         objective="对给定入口做渗透测试，拿到目标证明（flag 样式不固定，由你评估）。",
         entries=list(entries),
+        budget=budget or TaskBudget(),
     )
 
 
+def _capture_frontier(monkeypatch) -> dict:
+    """拦截 run_frontier，记录调用参数（路由判定的确定性测试用具）。"""
+
+    captured: dict = {}
+
+    async def fake_run_frontier(objective, **kw):
+        captured["objective"] = objective
+        captured.update(kw)
+        return {"mode": "frontier", "flags": [], "chains": [], "wall_s": 0.0}
+
+    monkeypatch.setattr("secpt.core.orchestrator.frontier.run_frontier", fake_run_frontier)
+    return captured
+
+
 # ---------------------------------------------------------------------------
-# 判据 4/5：单入口直连（编排层休眠）
+# 路由判定（frontier 调用参数）
 # ---------------------------------------------------------------------------
 
 
-async def test_single_entry_runs_single_chain(env) -> None:
-    """N==1 → mode=single：无 recon、无 warroom 数据、无 finding 登记。"""
+@pytest.mark.asyncio
+async def test_single_entry_planner_driven(env, monkeypatch) -> None:
+    """N==1 → frontier planner 驱动：stop_on_first_flag，workers=profile 默认。"""
+    captured = _capture_frontier(monkeypatch)
+    spec = _spec("r-single", ["http://127.0.0.1:8001"])
+    await run_task(spec, llm=RoleAwareFakeLLM())
+
+    assert captured["role_plan"] is False
+    assert captured["stop_on_first_flag"] is True
+    assert captured["max_workers"] == 1  # ctf profile 未声明 workers
+    assert "【目标入口】" in captured["objective"]  # augment_objective 拼接
+    assert captured["default_assets"] == ["http://127.0.0.1:8001"]
+
+
+@pytest.mark.asyncio
+async def test_multi_entry_generic_plan(env, monkeypatch) -> None:
+    """N==2 → 通用独立任务（v3：不再预置角色骨架，交付/后勤通道开启）。"""
+    captured = _capture_frontier(monkeypatch)
+    spec = _spec("r-multi", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
+    await run_task(spec, llm=RoleAwareFakeLLM())
+
+    assert captured["role_plan"] is False
+    assert captured["stop_on_first_flag"] is False
+    assert captured["enable_delivery"] is True
+    assert captured["enable_logistics"] is True
+
+
+@pytest.mark.asyncio
+async def test_stages_profile_folds_to_intent_chain(env, monkeypatch) -> None:
+    """profile.stages 非空（multistage）→ 折叠参数：stages + 关闭 planner + 串行。"""
+    captured = _capture_frontier(monkeypatch)
+    spec = _spec("r-stages", [], task_type="multistage")
+    await run_task(spec, llm=RoleAwareFakeLLM())
+
+    stages = captured.get("stages") or []
+    assert len(stages) == 3  # recon / getshell / privesc
+    assert captured["max_intents"] == 3  # planner 关闭（清单型语义）
+    assert captured["stop_on_first_flag"] is False  # 全阶段跑完
+    assert captured["max_workers"] == 1  # depends_on 链串行
+
+
+@pytest.mark.asyncio
+async def test_budget_steps_and_wall_passed(env, monkeypatch) -> None:
+    """spec.budget 透传：steps → default_max_steps；wall_s>0 → deadline_ts。"""
+    captured = _capture_frontier(monkeypatch)
+    spec = _spec("r-budget", ["http://127.0.0.1:8001"], budget=TaskBudget(steps=42, wall_s=600.0))
+    await run_task(spec, llm=RoleAwareFakeLLM())
+
+    assert captured["default_max_steps"] == 42
+    assert captured["deadline_ts"] is not None
+
+
+@pytest.mark.asyncio
+async def test_benchmark_routes_to_campaign(env, monkeypatch) -> None:
+    """benchmark → campaign（不经 frontier）；entries 维度补齐。"""
+    calls: list[str] = []
+
+    async def fake_campaign(spec, **kw):
+        calls.append(spec.job_id)
+        return {"mode": "benchmark(parallel)", "flags": [], "chains": [], "wall_s": 0.0}
+
+    monkeypatch.setattr("secpt.core.orchestrator.benchmark.run_benchmark_campaign", fake_campaign)
+    _capture_frontier(monkeypatch)  # frontier 不应被调用
+
+    spec = _spec("r-bench", ["http://x"], task_type="benchmark")
+    summary = await run_task(spec, llm=RoleAwareFakeLLM())
+
+    assert calls == ["r-bench"]
+    assert summary["entries"] == ["http://x"]
+
+
+# ---------------------------------------------------------------------------
+# 集成：单入口 frontier 全环（planner 产意图 → worker 执行 → 收敛）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_single_entry_full_frontier_loop(env, monkeypatch) -> None:
+    """N==1 集成：planner 产任务 → 执行 → 首个 flag 收敛（交付门关闭，专测主循环）。"""
+    from secpt.core.orchestrator import frontier as _fr
+
+    async def fake_plan_round(objective, fr, planner_llm, **kw):
+        fr.add(
+            "利用 http://127.0.0.1:8001",
+            goal="针对 http://127.0.0.1:8001 做定向利用",
+            done_criteria="拿到 flag 或确认漏洞",
+            asset_scope="http://127.0.0.1:8001",
+        )
+        return 1
+
+    monkeypatch.setattr(_fr, "plan_round", fake_plan_round)
+    monkeypatch.setenv("SECPT_ORCH_DELIVERY", "0")
+    monkeypatch.setenv("SECPT_ORCH_LOGISTICS", "0")
+    monkeypatch.setenv("SECPT_ORCH_COMMANDER", "0")  # 本测专测 v3 planner 路径
+
     spec = _spec("test-single", ["http://127.0.0.1:8001"])
     store = JobStore(str(env / "secpt.sqlite"))
     summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM())
 
-    assert summary["mode"] == "single(+retry)"  # 单链路径恒标重试装配
-    assert summary["recon_assets"] == 0  # 没跑 recon
-    assert summary["warroom_assets"] == 0  # 没建 warroom
-    assert summary["warroom_attempts"] == 0
-    assert summary["verified"] == 0
+    assert summary["mode"] == "frontier"
     assert len(summary["chains"]) == 1
-    assert summary["chains"][0]["role"] == "exploit"
-    assert len(summary["flags"]) == 1  # 单链自宣告一个 flag
+    assert len(summary["flags"]) == 1  # 首个 flag 即收敛（stop_on_first_flag）
 
 
 # ---------------------------------------------------------------------------
-# 判据 6：单链失败自动重试一次（新 job_id -r2 + retry_note，不复用 workspace）
+# 集成：多入口通用任务（v3：独立任务并行/顺序执行，无角色依赖）
 # ---------------------------------------------------------------------------
 
 
-async def test_single_chain_retries_on_failure(env, monkeypatch) -> None:
-    """首轮 budget_exceeded 无 flag → 自动重试一次：新 job_id(-r2)、retry_note 追加、
-    chains==2（attempt-1/attempt-2）、flags 来自第二轮、mode 仍 single(+retry)。"""
-    from secpt.cli import engine_runner
-    from secpt.runtime.engine import RunResult
+@pytest.mark.asyncio
+async def test_multi_entry_runs_generic_tasks(env, monkeypatch) -> None:
+    """N==2：planner 产两条独立通用任务（无 role/depends_on），各自执行。"""
+    from secpt.core.orchestrator import frontier as _fr
 
-    calls = {"n": 0}
+    added = False
 
-    def fake_run_engine(**kwargs):  # run_single_chain 经 asyncio.to_thread 调用（同步函数）
-        calls["n"] += 1
-        objective = kwargs["objective"]
-        if calls["n"] == 1:
-            assert kwargs["job_id"] == "test-retry"
-            assert "【上一次尝试未成功】" not in objective
-            return RunResult(
-                flag=None, steps=100, wall_s=50.0, status="budget_exceeded", messages=[]
+    async def fake_plan_round(objective, fr, planner_llm, **kw):
+        nonlocal added
+        if added:
+            return 0
+        added = True
+        for asset in ("http://127.0.0.1:8001", "http://127.0.0.1:8002"):
+            fr.add(
+                f"测试 {asset}",
+                goal=f"针对 {asset} 找可验证成果",
+                done_criteria="拿到 flag 或确认漏洞",
+                asset_scope=asset,
             )
-        # 第二次：必须换新 job_id（防污染 workspace）+ 追加 retry_note
-        assert kwargs["job_id"] == "test-retry-r2"
-        assert "【上一次尝试未成功】" in objective
-        assert "不要把上次的步骤原样重跑一遍" in objective
-        return RunResult(
-            flag="RCTF{retry_got_it}", steps=10, wall_s=20.0, status="success", messages=[]
-        )
+        return 2
 
-    monkeypatch.setattr(engine_runner, "run_engine", fake_run_engine)
+    monkeypatch.setattr(_fr, "plan_round", fake_plan_round)
+    monkeypatch.setenv("SECPT_ORCH_DELIVERY", "0")
+    monkeypatch.setenv("SECPT_ORCH_LOGISTICS", "0")
+    monkeypatch.setenv("SECPT_ORCH_COMMANDER", "0")  # 本测专测 v3 planner 路径
 
-    spec = _spec("test-retry", ["http://127.0.0.1:8001"])
+    spec = _spec("test-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
     store = JobStore(str(env / "secpt.sqlite"))
     summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM())
 
-    assert summary["mode"] == "single(+retry)"
-    assert len(summary["chains"]) == 2  # attempt-1 / attempt-2
-    assert summary["chains"][0]["status"] == "budget_exceeded"
-    assert summary["chains"][0]["steps"] == 100
-    assert summary["chains"][1]["status"] == "success"
-    assert summary["chains"][1]["steps"] == 10
-    assert summary["flags"] == ["RCTF{retry_got_it}"]  # 只有第二轮产出 flag
-    assert summary["wall_s"] == 70.0  # 50.0 + 20.0 累加
-    assert calls["n"] == 2
-
-
-# ---------------------------------------------------------------------------
-# 判据 1/2/3：多入口并行 DAG
-# ---------------------------------------------------------------------------
-
-
-async def test_multi_entry_runs_team_mode(env) -> None:
-    """N==2 → mode=team：recon 意图先行，exploit×N 依赖解锁并行认领，每资产挂靠。"""
-    spec = _spec("test-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
-    store = JobStore(str(env / "secpt.sqlite"))
-    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM(), use_orchestrator=True)
-
-    assert summary["mode"] == "team"
+    assert summary["mode"] == "frontier"
     chains = summary["chains"]
-    assert len(chains) >= 3  # recon 1 + exploit×2
-    roles = [c["role"] for c in chains]
-    assert roles.count("recon") == 1
-    assert roles.count("exploit") == 2
-    # recon 意图先结算为 done（侦察完成即解锁 exploit），exploit 挂靠各自资产
-    recon = next(c for c in chains if c["role"] == "recon")
-    assert recon["status"] == "done"
-    assert {c["asset_scope"] for c in chains if c["role"] == "exploit"} == {
+    assert len(chains) == 2
+    assert all(c["role"] == "" for c in chains)  # 不再有角色模板
+    assert {c["asset_scope"] for c in chains} == {
         "http://127.0.0.1:8001",
         "http://127.0.0.1:8002",
     }
+    assert len(summary["flags"]) == 2  # 多资产持续跑完，不因首个 flag 收敛
     assert all(c["status"] == "done" for c in chains if c["role"] == "exploit")
     assert len(summary["flags"]) == 2  # 每条 exploit 各自宣告一个 flag
 
     # F3 回归：summary 契约完整（cmd_run 直接/防御读取这些键；此前缺键
-    # 导致 `secpt run --mode dag` 跑完成功后报告路径 KeyError: 'entries' 崩溃）
+    # 导致 `secpt run` 跑完成功后报告路径 KeyError: 'entries' 崩溃）
     assert summary["entries"] == ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]
     for k in ("warroom_assets", "warroom_attempts", "findings", "verified"):
         assert k in summary, k
-
-
-# ---------------------------------------------------------------------------
-# 判据 5：--no-orchestrator 对照
-# ---------------------------------------------------------------------------
-
-
-async def test_no_orchestrator_falls_back_to_single(env) -> None:
-    """多入口 + use_orchestrator=False → 强制单链（对照分支）。"""
-    spec = _spec("test-noorch", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"])
-    store = JobStore(str(env / "secpt.sqlite"))
-    summary = await run_task(spec, store=store, llm=RoleAwareFakeLLM(), use_orchestrator=False)
-
-    assert summary["mode"] == "single(+retry)"  # 非 dag 一律标 single(+retry)
-    assert summary["verified"] == 0
-    assert summary["warroom_assets"] == 0
-    assert len(summary["flags"]) <= 1  # 单链只出一个 flag
-    assert len(summary["chains"]) == 1
-
-
-async def test_team_discovers_more_than_single(env) -> None:
-    """红线 2 对照：同样多入口，团队模式 exploit×N 发现 >= 单链。"""
-    store = JobStore(str(env / "secpt.sqlite"))
-    team = await run_task(
-        _spec("test-contrast-dag", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]),
-        store=store,
-        llm=RoleAwareFakeLLM(),
-        use_orchestrator=True,
-    )
-    single = await run_task(
-        _spec("test-contrast-single", ["http://127.0.0.1:8001", "http://127.0.0.1:8002"]),
-        store=store,
-        llm=RoleAwareFakeLLM(),
-        use_orchestrator=False,
-    )
-
-    assert team["mode"] == "team" and single["mode"] == "single(+retry)"
-    assert len(team["flags"]) >= len(single["flags"])  # 双资产并行 exploit ≥ 单链
-    assert len([c for c in team["chains"] if c["role"] == "exploit"]) >= 2
-
-
-# ---------------------------------------------------------------------------
-# TaskSpec.entries 字段解析
-# ---------------------------------------------------------------------------
-
-
-def test_taskspec_entries_parsing() -> None:
-    """entries >= 2 → 需要编排；空 / 单入口 → 直连单链。"""
-    doc = _yaml.safe_load(
-        "job_id: spec-test\n"
-        "task_type: ctf\n"
-        "objective: 测试多入口\n"
-        "entries:\n"
-        "  - http://10.0.0.1:8000\n"
-        "  - http://10.0.0.2:9000\n"
-    )
-    spec = TaskSpec.model_validate(doc)
-    assert entries_of(spec) == ["http://10.0.0.1:8000", "http://10.0.0.2:9000"]
-    # 对照组结论：编排层默认关闭，仅显式开启才启用
-    assert needs_orchestrator(spec) is False
-    assert needs_orchestrator(spec, use_dag=True) is True
-
-    single = _spec("spec-single", ["http://10.0.0.1:8000"])
-    assert needs_orchestrator(single) is False
-    assert needs_orchestrator(single, use_dag=True) is False  # 单入口永远不编排
-
-    empty = _spec("spec-empty", [])
-    assert needs_orchestrator(empty) is False
-
-
-class TestRetryInheritsAnswers:
-    def test_retry_note_carries_previous_answers(self, tmp_path, monkeypatch):
-        """懒升级 r2 必须继承 r1 已产出的 ANSWER（benchmark 续跑不重打已通题）。"""
-        import asyncio as _a
-
-        monkeypatch.setenv("SECPT_VAR", str(tmp_path))
-        from secpt.core.job.models import TaskBudget, TaskSpec
-        from secpt.core.orchestrator.dag import run_single_chain
-
-        class _R1:
-            flag = None
-            steps = 100
-            wall_s = 600.0
-            status = "step_exceeded"
-            messages: ClassVar[list] = [
-                {"role": "assistant", "content": "ANSWER: 已通关 xben-005/006，flag{a} flag{b}"},
-            ]
-
-        class _R2:
-            flag = None
-            steps = 1
-            wall_s = 1.0
-            status = "failed"
-            messages: ClassVar[list] = []
-
-        calls = []
-
-        def fake_run_engine(**kw):
-            calls.append(kw)
-            return _R1() if len(calls) == 1 else _R2()
-
-        import secpt.cli.engine_runner as er
-
-        orig = er.run_engine
-        er.run_engine = fake_run_engine
-        try:
-            spec = TaskSpec(job_id="rt1", objective="跑分", budget=TaskBudget(steps=1))
-            _a.new_event_loop().run_until_complete(run_single_chain(spec, llm=object()))
-        finally:
-            er.run_engine = orig
-        # r2 的 objective 必须包含 r1 的成果
-        assert len(calls) == 2
-        assert "flag{a}" in calls[1]["objective"]
-        assert "上一轮已产出的成果" in calls[1]["objective"]

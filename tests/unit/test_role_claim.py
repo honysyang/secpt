@@ -94,6 +94,7 @@ class TestRoleClaim:
         assert fr.find_duplicate("", "http://t:1") is False
 
     def test_plan_round_drops_unbound_role_intents(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_ROLE_TEMPLATES", "1")
         """资产挂靠强制：声明角色的意图 asset_scope 不在已有实体集 → 丢弃不派发。"""
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         # 种子资产：仅 http://seed:8000 在实体集内
@@ -132,6 +133,7 @@ class TestRoleClaim:
         assert rows[0]["role"] == "exploit"
 
     def test_plan_round_dedup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_ROLE_TEMPLATES", "1")
         """去重：同 asset_scope+role 已存在（open）→ 不再派（防多轮重复派同一资产）。"""
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
         st = IntelStore(tmp_path / "intel.sqlite")
@@ -165,7 +167,8 @@ class TestRoleStage:
         """五角色闭环齐备：recon/exploit/lateral/verify/report。"""
         assert set(ROLE_MAP) == {"recon", "exploit", "lateral", "verify", "report"}
 
-    def test_build_intent_objective_injects_role_stage(self, tmp_path):
+    def test_build_intent_objective_injects_role_stage(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_ROLE_TEMPLATES", "1")
         """角色意图的 objective 追加角色化阶段提示；普通意图不追加。"""
         fr = Frontier(tmp_path / "f.db")
         fr.add("利用 http://t:1", role="exploit", asset_scope="http://t:1")

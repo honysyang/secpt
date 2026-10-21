@@ -1,4 +1,4 @@
-"""S5 编排策略声明（policy）——明确"不做的事"。
+"""S5/S6 编排策略声明（policy）——明确"不做的事"。
 
 新编排模型是**并行专业链**，不是树搜索。以下概念在本阶段正式退役，
 任何新代码不得重新引入：
@@ -8,15 +8,15 @@
 - 不做 DeathCertificate 降级（death / degradation / exhaustion）
 
 现有 core/evaluator/ 与 core/node/ 已在此阶段正式删除。
-编排只做三件事：
-    recon  → 并行 exploit ×N → verify
+S6 模式收敛（2026-10-19）：单一执行编排 = frontier 意图驱动；
+route_policy/direct-vs-team 路由与 SINGLE_ENTRY_MAX 随单链模式一并退役
+（路由已内聚到 dag.run_task：benchmark → campaign，其余 → frontier）。
+
+编排只做一件事：frontier 意图循环（claim → run_engine → settle），
 每一步都是一个完整不可断裂的 Engine 链（单链语义 S0 红线原样保留）。
 
-P2 统一编排（跑关 + 渗透一套入口）：
-- route_policy：按 TaskSpec 分流执行策略（direct / team / benchmark），
-  跑关（benchmark）与渗透（pentest team / single）共用一个 frontier 主循环
-- prove_goal：量化验收——settle 前核对 done_criteria 的可实测判据，
-  不达标不置 done（杜绝"自宣告即完成"的假成功）
+prove_goal：量化验收——settle 前核对 done_criteria 的可实测判据，
+不达标不置 done（杜绝"自宣告即完成"的假成功）
 """
 
 from __future__ import annotations
@@ -32,27 +32,13 @@ DEPRECATED_MODULES = (
     # 固定 DAG 编排器：team 路径已由 frontier 角色意图折叠（E 清理；
     # WarroomHooks 迁至 core/memory/warroom.py，勿在新代码引用旧路径）
     "secpt.core.orchestrator.specialist",
+    # S6 模式收敛：多阶段编排器已折叠为 frontier stages= 意图链
+    # （Stage 数据模型保留在 core/profile/loader.py，勿复活执行器）
+    "secpt.core.orchestrator.stages",
+    # S6 模式收敛：单链编排（attempt-2/r2/RESET 固定重试）已退役——
+    # 失败恢复由 frontier 意图复核/RESET/升级强模型承担（更细粒度、更完整）
+    "secpt.core.orchestrator.dag.run_single_chain",
 )
-
-# 编排允许的唯一结构（常量文档化）
-DAG_STAGES = ("recon", "exploit", "verify")
-
-# 单入口阈值：入口数 <= 1 时编排层休眠，直连单链
-SINGLE_ENTRY_MAX = 1
-
-
-def route_policy(task_type: str, entries: list[str]) -> str:
-    """P2 执行策略路由：TaskSpec → direct / team / benchmark。
-
-    - benchmark：程序化跑分协议（不拆解、角色意图不适用）→ direct + 并行跑分器
-    - team：多入口渗透（recon→exploit×N 并行）→ frontier 角色编排
-    - direct：单入口 / 无入口 → 一次 Engine 单链
-    """
-    if task_type == "benchmark":
-        return "benchmark"
-    if len(entries) > SINGLE_ENTRY_MAX:
-        return "team"
-    return "direct"
 
 
 # done_criteria 中的可实测判据：文件落盘类（"xxx.json 落盘" / "report.md 落盘"）

@@ -1,9 +1,10 @@
 """``secpt run`` / ``secpt resume`` 命令实现（命令注册在 cli/app.py）。
 
 入口策略（solve 为唯一用户入口）：
-- ``--task <TaskSpec.yaml>``：机器/编排入口，直转 DAG 分流（保留，脚本/平台用）
-- ``--mode direct`` / ``tree``（旧）：**已废弃**——自动转发 ``secpt solve`` 单链模式，
-  获得完整能力链（理解→拆解→治理→止损→评判→学习）；不再维护裸 Engine 旁路
+- ``--task <TaskSpec.yaml>``：机器/编排入口，直转统一路由 dag.run_task
+  （benchmark → campaign；其余 → frontier 意图编排，S6 模式收敛后唯一执行模式）
+- ``--mode direct`` / ``tree``（旧）：**已废弃**——自动转发 ``secpt solve``，
+  获得完整能力链（理解→拆解→治理→止损→评判→学习）
 - ``secpt resume``：断点恢复不变
 """
 
@@ -55,7 +56,7 @@ def run_cmd(
     mode: str = typer.Option(
         "direct",
         "--mode",
-        help="执行模式：direct/tree 已废弃（自动转发 solve）；dag=显式启用编排（需 --task yaml）",
+        help="执行模式：direct/tree 已废弃（自动转发 solve）；dag 已随单链模式退役（S6）",
     ),
     model: str = typer.Option(
         "deepseek-chat",
@@ -69,22 +70,17 @@ def run_cmd(
         "--wall",
         help="墙钟上限秒数：-1=用 profile 默认（缺省），0=不限（7×24 长任务），>0=该秒数",
     ),
-    orchestrator: bool = typer.Option(
-        False,
-        "--orchestrator/--no-orchestrator",
-        help="多入口任务是否启用 DAG 编排（默认关闭；--orchestrator 或 --mode dag 显式开启）",
-    ),
 ) -> None:
     """对 ``target`` 执行一次渗透任务（solve 唯一入口的兼容 shim）。
 
-    旧 direct/tree 参数自动转发 ``secpt solve``（单链模式 + 完整评判/学习链）；
-    机器编排入口保留：``--task <TaskSpec.yaml>`` 直转 DAG 分流。
+    旧 direct/tree 参数自动转发 ``secpt solve``（完整评判/学习链）；
+    机器编排入口保留：``--task <TaskSpec.yaml>`` 直转统一路由（frontier 意图编排）。
     """
-    if mode not in ("direct", "tree", "dag"):
-        typer.echo(f"Error: --mode 只支持 direct / tree / dag，收到 {mode!r}")
+    if mode not in ("direct", "tree"):
+        typer.echo(f"Error: --mode 只支持 direct / tree（dag 已随单链模式退役），收到 {mode!r}")
         raise typer.Exit(2)
 
-    # ---- 机器编排入口：--task 指向 TaskSpec yaml → orchestrator（DAG / 单链分流）----
+    # ---- 机器编排入口：--task 指向 TaskSpec yaml → 统一路由（frontier / campaign）----
     from pathlib import Path as _P
 
     if task and _P(task).is_file() and _P(task).suffix.lower() in (".yaml", ".yml"):
@@ -94,8 +90,7 @@ def run_cmd(
         from secpt.core.orchestrator.dag import run_task
 
         spec = _TaskSpec.model_validate(_yaml.safe_load(_P(task).read_text(encoding="utf-8")))
-        use_dag = orchestrator or (mode == "dag")
-        summary = asyncio.run(run_task(spec, use_orchestrator=use_dag))
+        summary = asyncio.run(run_task(spec))
         typer.echo("")
         typer.echo(f"job_id:    {summary['job_id']}")
         typer.echo(f"mode:      {summary['mode']}")
@@ -127,17 +122,14 @@ def run_cmd(
             raise typer.Exit(1)
         return
 
-    # ---- direct / tree / dag（无 yaml）：统一转发 secpt solve（唯一用户入口）----
-    if mode == "dag":
-        typer.echo("Error: --mode dag 需要 --task <TaskSpec.yaml>（编排为机器入口）")
-        raise typer.Exit(2)
+    # ---- direct / tree（无 yaml）：统一转发 secpt solve（唯一用户入口）----
     if attach_dir:
         typer.echo(
             "注意: --attach-dir 已忽略（solve 自动发现 challenge 目录下的 attachments/附件/）"
         )
 
     typer.echo(
-        f"--mode {mode} 已废弃：自动转发 secpt solve（单链模式，含理解/拆解/止损/评判/学习全链）。"
+        f"--mode {mode} 已废弃：自动转发 secpt solve（frontier 意图编排，含理解/拆解/止损/评判/学习全链）。"
         " 新用法: secpt solve <题面文件>"
     )
     ofile = objective_file or file
@@ -174,7 +166,6 @@ def run_cmd(
         fallback=fallback,
         wall=wall,
         steps=max_steps or 0,
-        mode="single",
         judge_enable=not fake,
         learn_enable=not fake,
         watch_enable=False,

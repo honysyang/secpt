@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -24,6 +27,28 @@ except ImportError:  # pragma: no cover - Windows 分支
     fcntl = None
 
 from secpt.core.job.store import JobStore
+
+
+def _flock_wait(fd: int, timeout_s: float = 2.0) -> bool:
+    """限时排他锁：拿到锁返回 True（调用方负责解锁）；超时返回 False。
+
+    R3 加固：emit 在事件循环里被同步调用，阻塞式 flock 是少数能把整个循环
+    冻死且零日志的等待点（持锁进程僵死时尤甚）。O_APPEND 下单行 write 内核
+    原子，flock 只为 seq 尾读同步服务——超时降级无锁直写，代价至多 seq 跳号，
+    绝不能冻结主循环。默认 2 秒（10 秒会在僵死锁上每步拖住事件循环）。
+    """
+    if fcntl is None:
+        return True
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
 
 EVENT_TYPES = {
     "assistant",
@@ -44,6 +69,8 @@ EVENT_TYPES = {
     "compaction_requested",  # 主循环已删组+插占位（非阻塞 compaction 的请求入队）
     "compaction_completed",  # 后台摘要完成、<k>.summary.md 已落盘
     "loop_phase",  # 三档止损状态机档位迁移（nudged/wrapping/stalled，见 runtime/engine.py）
+    "plan_event",  # v4 编排：Commander/规划轮结果（信念结算/决策/派单数）
+    "intent_event",  # v4 编排：意图生命周期（领取/结算），任务池流转的轨迹层
 }
 
 # 事件 payload 结构目录（结构化加固轮）：类型 → 必备 payload 键。
@@ -72,6 +99,9 @@ EVENT_CATALOG: dict[str, frozenset[str]] = {
     "verdict": frozenset({"complete"}),
     # 三档止损状态机（docs/设计-工作循环形态.md §2）：phase ∈ nudged/wrapping/stalled
     "loop_phase": frozenset({"phase"}),
+    # 编排层事件（frontier 直写父流，非 EventSink 通道；catalog 登记保契约一致）
+    "plan_event": frozenset({"decision"}),
+    "intent_event": frozenset({"iid", "title", "status"}),
 }
 
 
@@ -119,7 +149,19 @@ class EventSink:
     def _count_lines(self) -> int:
         if not self.events_path.exists():
             return 0
-        with open(self.events_path, encoding="utf-8") as f:
+        # 硬杀/断电可能留下无换行的半行：先补一个换行，避免新事件粘在半行后
+        # 永久损坏（读取方永远解析失败）；errors=replace 防半个 UTF-8 字符崩初始化。
+        try:
+            with open(self.events_path, "rb+") as bf:
+                bf.seek(0, os.SEEK_END)
+                if bf.tell() > 0:
+                    bf.seek(-1, os.SEEK_END)
+                    if bf.read(1) != b"\n":
+                        bf.seek(0, os.SEEK_END)
+                        bf.write(b"\n")
+        except OSError:
+            pass
+        with open(self.events_path, encoding="utf-8", errors="replace") as f:
             return sum(1 for _ in f)
 
     def _tail_seq(self) -> int:
@@ -177,7 +219,13 @@ class EventSink:
             # 本进程与其他进程（secpt worker summarize 等）写同一文件时单行不交错
             with open(self.events_path, "a", encoding="utf-8") as f:
                 if fcntl is not None:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    _lock_timeout = float(os.environ.get("SECPT_EVENT_FLOCK_TIMEOUT_S", "2") or 2)
+                    locked = _flock_wait(f.fileno(), timeout_s=_lock_timeout)
+                    if not locked:
+                        print(
+                            f"[sink] flock 超时（{_lock_timeout:.0f}s），降级无锁写入",
+                            file=sys.stderr,
+                        )
                     try:
                         # 其他进程可能已追加：尾读同步 seq，保证全局单调
                         tail = self._tail_seq()
@@ -186,10 +234,15 @@ class EventSink:
                             line["seq"] = self._seq
                             data = json.dumps(line, ensure_ascii=False) + "\n"
                         f.write(data)
+                        # 必须在解锁前 flush：Python 文本写默认块缓冲，若先 LOCK_UN
+                        # 再 close，下一进程的 tail 读不到这一行 → 分配重复 seq。
+                        f.flush()
                     finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                        if locked:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 else:
                     f.write(data)
+                    f.flush()
             # 次写：SQLite（失败不阻断）
             if self.store is not None:
                 try:

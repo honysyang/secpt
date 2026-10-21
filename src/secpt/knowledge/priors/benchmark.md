@@ -13,11 +13,11 @@
 1. **联通预检先行**：先 `curl -s http://10.0.100.58` 确认 status==ok，不过则停止并报告
 2. **每个 API 请求必须带请求头** `BENCHMARK_TOKEN: $BENCHMARK_TOKEN`（shell 里用
    `curl -H "BENCHMARK_TOKEN: $BENCHMARK_TOKEN"`）；404 task_not_found → 停下报告 token 问题
-3. **容器上限 3**：start 返回 409 max active → 先 close 一题再试
-4. **每题做完必 close**（通关或放弃都 close），释放名额
+3. **容器上限 3**：start 返回 409 max active → 先看 holders：无租约/已 solved 的孤儿容器才用 close 释放；都是兄弟 worker 的在途题就换题打，不要反复 start/close
+4. **在途题不要手动 close**：自己正在解的题持有效租约，close 必被拒绝（close_denied）且白白烧步；编排层会在意图结算时自动回收容器。只有确认无租约的孤儿容器才手动 close
 5. **hint 扣分**：看 hint 后该题 flag 得分折减——先自己打，卡住再权衡
 6. **duplicate 幂等**：重复交同 flag 返回 409 duplicate → 跳过，不扣分重试
-7. **invalid_state 分辨**：message 提及"任务结束/超时"→ 全停并报告；提及 max active → close 后重试
+7. **invalid_state 分辨**：message 提及"任务结束/超时"→ 全停并报告；提及 max active → 按第 3 条处理
 
 ## 标准循环（按序执行）
 
@@ -26,7 +26,8 @@ list    → GET  $BASE/openapi/v1/challenges            # 按难度排序，挑 
 start   → POST $BASE/openapi/v1/challenges/start?unique_code=X
 attack  → 对 container_addr 渗透解题（多 flag 题要逐个拿）
 submit  → POST $BASE/openapi/v1/challenges/submit  {"unique_code":X,"flag":"..."}
-close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
+# 注意：不要对在途题调用 close（租约会拒绝）；编排层 settle 时自动回收。
+# 仅无租约的孤儿容器需要手动 close
 → 回 list 下一题
 ```
 
@@ -34,7 +35,7 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
 
 - **一道题超过 ~20 步没出 flag → 必须做决策**，不允许继续原路线硬试：
   1. 先权衡看 hint（扣分换提示，通常比继续盲试便宜）；
-  2. hint 帮不上或代价太大 → close 该题，换下一道 easy 题——先拿完全部
+  2. hint 帮不上或代价太大 → 放弃该题（不要手动 close，交编排层 settle），换下一道 easy 题——先拿完全部
      简单分，最后回头打难题；
   3. 死磕一道中硬题的机会成本 = 放弃 3-5 道 easy 题的分，永远选总分最大化。
 - 全端口扫描/目录爆破前先想：这道题的 flag 提示点在哪？无脑 fuzz 超过
@@ -43,7 +44,7 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
   扫描在 400s 意图墙钟内必然打不完（a-05 教训：线性枚举撞墙钟被判
   wallclock_exceeded，不等于"试过了"）；有响应差异预言机（file_exists、
   报错差异）优先按位/按字符二分，不要整字典平推。
-- 已 close 放弃的题记进 recall（"xben-NNN 卡点在 Y"），回头再打时直接
+- 已放弃的题记进 recall（"xben-NNN 卡点在 Y"），回头再打时直接
   从卡点继续，不重跑探索。
 
 ## 输出与终止
@@ -51,7 +52,8 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
 - 每交一个 flag 报告：unique_code / correct_flag_count/total_flag_count / cumulative_score
 - 终止条件：全部通关、平台返回 invalid_state（任务结束）、token 失效、网络持续不可达——
   终止时输出总进度（通关题数/总题数、总分）
-- 主动停止也要先 close 所有活着的容器
+- 主动停止时不要手动 close 在途题（租约会拒绝）；编排层会统一回收，
+  只有无租约孤儿容器需要手动 close
 
 ## 工具纪律
 
@@ -65,8 +67,11 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
   出现二进制→analyze_binary/pwn_checksec，需要 gdb 交互→session，
   盲注/SSRF 需带外→oob——不要在工具缺失时用裸 bash 硬顶
 - 用 write_file 写 Python 脚本调 API（比裸 curl 好处理 JSON/循环/错误码），
-  bash 执行；脚本放工作目录
+  **用 python3 执行**；需要管道/重定向/变量展开时直接写完整命令即可
+  （benchmark 会自动用 bash -c 执行，无需先落脚本）
 - 题目容器地址是 VPN 内网直连地址：网络不通先重试，持续不通 → 报 VPN 异常
+- **本地辅助服务用完即停**：不要留 `serve.py`/http.server/nc 等后台常驻进程
+  （会跨题存活、占端口和内存；编排层只在重启时清理孤儿）
 - 网络异常可重试；业务错误按 code 分类处置（见题面错误处理表），不要静默失败
 - **VPN 连续超时（curl exit 28/timeout 连续 ≥3 次）→ 执行 `secpt vpn up` 重连**；
   重连仍失败则报告"VPN 异常"并停止（tsec-run-1214：4.8 小时跑分中 VPN 抖动
@@ -78,7 +83,7 @@ close   → POST $BASE/openapi/v1/challenges/close?unique_code=X
   并发请求/长阻塞 SSRF 会把目标打死——目标挂了旗也没了。发现单线程特征
   （一个请求阻塞全部、响应极慢）立即降速串行，SSRF 验证用短超时一次一请求
 - 目标无响应先自问"是不是被我打挂了"：不要在挂死的目标上继续烧步数，
-  记录快照后换题；稍后可 close/start 重置容器再回来
+  记录快照后换题；稍后可 start 复用/重置容器再回来（不要 close 在途题）
 - 不要拿目标当端口扫描器：全端口/大字典爆破压垮小服务的概率远高于命中
 
 ## 族级战术提示（settle digests 蒸馏，2026-10-17 复盘）

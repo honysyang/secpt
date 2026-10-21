@@ -15,7 +15,9 @@ from secpt.runtime.engine import RunConfig, make_tool_fns
 
 
 @pytest.fixture()
-def tools(tmp_path):
+def tools(tmp_path, monkeypatch):
+    # 默认关闭 auto-shell：注入面测试必须验证"未显式放行 bash 时拒绝"
+    monkeypatch.delenv("SECPT_BASH_AUTO_SHELL", raising=False)
     cfg = RunConfig(job_id="t", objective="o", system_extra="", workspace=tmp_path)
     cfg.work_dir.mkdir(parents=True, exist_ok=True)
     return make_tool_fns(cfg)
@@ -182,3 +184,51 @@ class TestShellExeRequiresExplicitWhitelist:
         tools = make_tool_fns(cfg)
         out = _run(tools["bash"]({"command": "echo hello_from_shell"}))
         assert "hello_from_shell" in out
+
+
+class TestAutoShell:
+    """benchmark 自动 shell：SECPT_BASH_AUTO_SHELL=1 + bash 在白名单时整条命令 bash -c。"""
+
+    @staticmethod
+    def _tools(tmp_path, whitelist):
+        cfg = RunConfig(
+            job_id="t",
+            objective="o",
+            system_extra="",
+            workspace=tmp_path,
+            bash_whitelist=frozenset(whitelist),
+        )
+        cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        return make_tool_fns(cfg)
+
+    def test_pipe_auto_wrapped_when_enabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_BASH_AUTO_SHELL", "1")
+        tools = self._tools(tmp_path, {"bash", "echo"})
+        out = _run(tools["bash"]({"command": "echo hi | cat"}))
+        assert not out.startswith("Error:"), out
+        assert "hi" in out  # 管道内 cat 未在白名单，但整条命令经 bash -c 正常执行
+
+    def test_redirect_and_chain_auto_wrapped(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_BASH_AUTO_SHELL", "1")
+        tools = self._tools(tmp_path, {"bash", "echo"})
+        out = _run(tools["bash"]({"command": "echo abc > out.txt && cat out.txt"}))
+        assert not out.startswith("Error:"), out
+        assert "abc" in out
+        assert (tmp_path / "ws" / "out.txt").is_file()
+
+    def test_auto_shell_off_still_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SECPT_BASH_AUTO_SHELL", raising=False)
+        tools = self._tools(tmp_path, {"bash", "echo"})
+        out = _run(tools["bash"]({"command": "echo hi | cat"}))
+        assert out.startswith("Error:")
+
+    def test_auto_shell_requires_bash_in_whitelist(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECPT_BASH_AUTO_SHELL", "1")
+        tools = self._tools(tmp_path, {"echo"})
+        out = _run(tools["bash"]({"command": "echo hi | cat"}))
+        assert out.startswith("Error:")
+
+    def test_benchmark_profile_allows_bash(self):
+        from secpt.core.profile.loader import load_profile
+
+        assert "bash" in load_profile("benchmark").bash_whitelist_extra

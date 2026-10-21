@@ -25,7 +25,7 @@ class TestRunSummaryContract:
     def test_defaults_cover_contract(self):
         from secpt.core.orchestrator.summary import RunSummary
 
-        d = RunSummary(job_id="j1", mode="single(+retry)").to_dict()
+        d = RunSummary(job_id="j1", mode="frontier").to_dict()
         assert set(d) >= self.CONTRACT_KEYS  # 缺省即"无此口径"，键从不缺席
         assert d["entries"] == [] and d["chains"] == [] and d["verified"] == 0
 

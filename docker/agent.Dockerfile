@@ -8,6 +8,9 @@
 # - 启动后自动跑 benchmark（ENTRYPOINT 无参）
 # - BENCHMARK_TOKEN / BENCHMARK_BASE_URL 由平台运行时注入
 # - DEEPSEEK_API_KEY 需在平台「运行时环境变量」手动添加（绝不打进镜像）
+# - 需要第 2+ 轮换脑/故障转移时再注入 ZHIPU_API_KEY（GLM Coding Plan 还需
+#   SECPT_MODEL_BASE_GLM=https://open.bigmodel.cn/api/coding/paas/v4）；
+#   entrypoint 检测到 GLM 凭证才启用第二脑，无 key 不会把第 2 轮跑废
 # - 内网场景：运行时注入 SECPT_VPN_TYPE=openvpn + SECPT_VPN_CONFIG（容器内路径）
 #   + SECPT_VPN_PROBE_URL，并 --cap-add NET_ADMIN --device /dev/net/tun；
 #   镜像已含 openvpn 二进制，但绝不内置任何 VPN 配置/凭证
@@ -111,8 +114,8 @@ ENV PATH=/opt/venv/bin:$PATH \
     SECPT_TECHNIQUES=1 \
     SECPT_BENCH_BROWSER=0 \
     SECPT_BENCHMARK_WORKERS=3 \
-    SECPT_CAMPAIGN_ROUNDS=3 \
-    SECPT_BENCH_STEP_WALL_S=10 \
+    SECPT_CAMPAIGN_ROUNDS=0 \
+    SECPT_BENCH_STEP_WALL_S=15 \
     SECPT_BROWSER_NO_SANDBOX=1 \
     SECPT_ENABLE_CRYPTO_HELPERS=1 \
     SECPT_VAR=/app/var

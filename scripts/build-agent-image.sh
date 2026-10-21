@@ -88,4 +88,5 @@ if [ "${KEEP_BUILDER:-1}" = "0" ]; then
 fi
 
 echo "[build] 上传件: $(pwd)/$OUT"
-echo "[build] 平台运行时环境变量至少设置: DEEPSEEK_API_KEY（BENCHMARK_* 平台自动注入）"
+echo "[build] 平台运行时环境变量至少设置: DEEPSEEK_API_KEY（BENCHMARK_* 平台自动注入）；"
+echo "[build] 需要第 2+ 轮换脑/故障转移再设 ZHIPU_API_KEY 与 SECPT_MODEL_BASE_GLM（可选）"

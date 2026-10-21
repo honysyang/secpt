@@ -1,28 +1,10 @@
-"""P2 统一编排策略：route_policy 路由 + prove_goal 量化验收。"""
+"""P2 统一编排策略：prove_goal 量化验收（route_policy 已随单链模式退役，S6）。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from secpt.core.orchestrator.policy import prove_goal, route_policy
-
-
-class TestRoutePolicy:
-    def test_benchmark_routes_to_benchmark(self):
-        """跑关：benchmark → 直接走并行跑分器。"""
-        assert route_policy("benchmark", ["http://a"]) == "benchmark"
-        assert route_policy("benchmark", []) == "benchmark"
-
-    def test_multi_entry_routes_to_team(self):
-        """渗透：多入口 → frontier 角色编排（recon→exploit×N 并行）。"""
-        assert route_policy("ctf", ["http://a", "http://b"]) == "team"
-        assert route_policy("pentest", ["http://a", "http://b", "http://c"]) == "team"
-
-    def test_single_entry_routes_to_direct(self):
-        """单入口/无入口 → 直连单链（编排层休眠）。"""
-        assert route_policy("ctf", ["http://a"]) == "direct"
-        assert route_policy("ctf", []) == "direct"
-        assert route_policy("pentest", ["http://a"]) == "direct"
+from secpt.core.orchestrator.policy import prove_goal
 
 
 class TestProveGoal:

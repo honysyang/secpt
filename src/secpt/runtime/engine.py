@@ -809,16 +809,29 @@ def _governed_plugin_fn(cfg: RunConfig, tool_name: str, fn):
 
 
 def build_tools_doc(cfg: RunConfig) -> str:
+    _auto_shell = os.environ.get("SECPT_BASH_AUTO_SHELL", "0") == "1"
+    if _auto_shell:
+        _bash_desc = (
+            "含未引用管道 |、重定向 >、分号 ;、后台 &、命令替换 $( )/反引号时，"
+            "整条命令自动交给 bash -c 执行（引号内元字符仍是参数内容；$VAR 会展开）。"
+        )
+        _shell_note = ""
+    else:
+        _bash_desc = (
+            "不支持未引用的管道 |、重定向 >、分号 ;、后台/串联 &、命令替换 $( ) 与反引号。"
+            "引号内的元字符只是参数内容、可以直接用；裸 $VAR 与通配符 * 会按字面传给命令"
+            "（argv 直传不展开）。"
+        )
+        _shell_note = (
+            "确需组合逻辑/变量展开时，先用 write_file 写 Python 脚本到工作目录，"
+            "再用 python3 执行（bash/sh 仅在其被加入白名单时可用）。"
+        )
     return (
         f"- bash(command)  白名单命令：{', '.join(sorted(cfg.bash_whitelist))}，"
         f"超时{cfg.bash_timeout_s}s。command 必须是字符串（不支持数组），"
-        "内部按空格拆成参数直接执行（不经 shell）："
-        "不支持未引用的管道 |、重定向 >、分号 ;、后台/串联 &、命令替换 $( ) 与反引号。"
-        "引号内的元字符只是参数内容、可以直接用；裸 $VAR 与通配符 * 会按字面传给命令"
-        "（argv 直传不展开）。确需组合逻辑/变量展开时，"
-        "先用 write_file 写 Python/Shell 脚本到工作目录，再 bash 执行该脚本。"
+        f"内部按空格拆成参数直接执行（不经 shell）：{_bash_desc}{_shell_note}"
         "宿主机绝对路径（如 /home/kali/...）在沙箱容器内不可见，一律用相对路径。"
-        "工作目录：{cfg.work_dir}，所有相对路径都自动落到它下面\n"
+        f"工作目录：{cfg.work_dir}，所有相对路径都自动落到它下面\n"
         f"- read_file(path, offset?, limit?)  读文件（相对路径=工作目录下）；"
         f"分页读：offset 字符偏移、limit 字符数（缺省 {BASH_MAX_OUT}，上限 {READ_SLICE_MAX}），"
         f"未读完会提示续读 offset；文件上限 {READ_HARD_CAP // (1024 * 1024)}MB\n"
@@ -961,16 +974,26 @@ def make_tool_fns(cfg: RunConfig) -> dict:
             return "Error: empty command"
         exe = parts[0]
         # P0-3：元字符扫描先于白名单检查——否则 "pwd;" 会报"pwd 不在白名单"，
-        # 错误提示与真实原因（shell 组合构造）不符，模型反复重试烧步数
+        # 错误提示与真实原因（shell 组合构造）不符，模型反复重试烧步数。
+        # benchmark 例外：SECPT_BASH_AUTO_SHELL=1 且 bash/sh 在白名单时，整条命令
+        # 自动交给 bash -c（模型不必为每个管道写临时脚本）；scope/intercept 仍按
+        # 原始 command 校验。
         uses_shell = exe in _SHELL_EXES
         if not uses_shell and _has_unquoted_shell_chain(command):
-            return (
-                "Error: 命令含未引用的 shell 组合构造（| ; & > < 或 $( ) / 反引号），"
-                "当前按参数直传执行、不经 shell 解释。引号内的元字符只是参数内容、"
-                "可以直接用；裸 $VAR 与通配符 * 会按字面传给命令（argv 不展开）。\n"
-                "改写示例：① 分号串联 → 拆成多条独立 bash 调用（'a; b' 改为先跑 a 再跑 b）；"
-                "② 管道/重定向/循环/变量展开 → 用 write_file 写脚本（如 run.sh）再 bash 执行该脚本文件。"
-            )
+            _auto_shell = os.environ.get("SECPT_BASH_AUTO_SHELL", "0") == "1"
+            _shell_exe = next((s for s in _SHELL_EXES if s in cfg.bash_whitelist), "")
+            if _auto_shell and _shell_exe:
+                exe = _shell_exe
+                uses_shell = True
+            else:
+                return (
+                    "Error: 命令含未引用的 shell 组合构造（| ; & > < 或 $( ) / 反引号），"
+                    "当前按参数直传执行、不经 shell 解释。引号内的元字符只是参数内容、"
+                    "可以直接用；裸 $VAR 与通配符 * 会按字面传给命令（argv 不展开）。\n"
+                    "改写示例：① 分号串联 → 拆成多条独立 bash 调用（'a; b' 改为先跑 a 再跑 b）；"
+                    "② 管道/重定向/循环/变量展开 → 用 write_file 写 Python 脚本，"
+                    "再用 python3 执行（bash/sh 不在当前白名单时不能用 bash 跑脚本）。"
+                )
         if exe not in cfg.bash_whitelist:
             # 常见摩擦命令：不裸拒，给可行动的替代用法
             if exe == "cd":
@@ -1613,6 +1636,30 @@ class Engine:
             while (cfg.max_steps <= 0 or steps < cfg.max_steps) and (
                 cfg.max_wall_s <= 0 or (time.time() - t0) < cfg.max_wall_s
             ):
+                # 协作式取消（Web 控制台/外部管理）：jobs/<job_id>/cancel 标记文件
+                # 存在 → 每步优雅退出（status=cancelled，落 transcript，释放容器）。
+                # 检查含父任务链（-iXXXX/-r2/-rs 剥后缀）——取消沿任务树传播，
+                # 后续派生的续段/重建引擎同样立即退出。O(1) stat，每步一次可忽略。
+                with contextlib.suppress(Exception):
+                    from secpt.core.job.resume import jobs_dir as _jd
+
+                    _jid = cfg.job_id
+                    _cancelled = False
+                    while _jid:
+                        if (_jd() / _jid / "cancel").is_file():
+                            _cancelled = True
+                            break
+                        _prev = _jid
+                        import re as _re
+
+                        _jid = _re.sub(r"-(?:i[0-9a-fA-F]{4,8}|r\d+|rs)$", "", _jid)
+                        if _jid == _prev:
+                            break
+                    if _cancelled:
+                        status = "cancelled"
+                        log.info("engine.cancelled", job_id=cfg.job_id, step=steps)
+                        print("\n[engine] CANCELLED（协作式取消，优雅退出）", file=sys.stderr)
+                        break
                 steps += 1
                 session_steps += 1
                 # ROE 节速（authorized 实战模式）：step 之间 sleep，避免对目标造成突发压力

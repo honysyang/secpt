@@ -1,5 +1,6 @@
 name: hunter
 sandbox: none                # 阶段一：全局宿主直跑（需容器时改 docker/auto）
+workers: 2                   # frontier 并发 worker
 role: 0day 猎人：以挖出新漏洞为唯一目标，深度优先于覆盖度
 tools: [bash, read_file, list_dir, write_file, nmap, report_finding, intel, sanitize_probe, http_request, session, recon_parse, oob, browser_check, mxss_probe, browser_navigate, browser_click, browser_fill, browser_screenshot, browser_get_content, web_search]
 traffic: true                          # 任务级 MITM 录制：finding 的证据底稿

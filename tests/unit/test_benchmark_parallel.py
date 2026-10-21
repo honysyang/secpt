@@ -364,6 +364,60 @@ class TestPlatformErrors:
             msg = str(e)
             assert "任务已结束" in msg and "新任务" in msg and "BENCHMARK_TASK_ID" in msg
 
+    def test_max_active_409_is_recoverable(self, monkeypatch):
+        """409 invalid_state + max active 是槽位满（可恢复），不能当任务结束。"""
+        import json as _json
+        import urllib.error
+
+        from secpt.core.orchestrator import benchmark as B
+
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "https://tsec.invalid")
+        monkeypatch.setenv("BENCHMARK_TOKEN", "tk")
+
+        class _FP:
+            def read(self):
+                return _json.dumps(
+                    {
+                        "code": "invalid_state",
+                        "message": "max active challenge instances reached (3)",
+                    }
+                ).encode()
+
+        def _raise(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, _FP())
+
+        monkeypatch.setattr("urllib.request.urlopen", _raise)
+        try:
+            B.fetch_challenges()
+            raise AssertionError("必须抛 BenchmarkUnavailable")
+        except B.BenchmarkEnded:
+            raise AssertionError("槽位满不是终局，不应抛 BenchmarkEnded") from None
+        except B.BenchmarkUnavailable as e:
+            assert "槽位" in str(e)
+
+    def test_auth_401_is_terminal(self, monkeypatch):
+        """401/403 是终局：坏 token 重试 8h 不会变好。"""
+        import urllib.error
+
+        from secpt.core.orchestrator import benchmark as B
+
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "https://tsec.invalid")
+        monkeypatch.setenv("BENCHMARK_TOKEN", "bad")
+
+        class _FP:
+            def read(self):
+                return b'{"error":"unauthorized"}'
+
+        def _raise(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, _FP())
+
+        monkeypatch.setattr("urllib.request.urlopen", _raise)
+        try:
+            B.fetch_challenges()
+            raise AssertionError("必须抛 BenchmarkEnded")
+        except B.BenchmarkEnded as e:
+            assert "鉴权" in str(e)
+
     def test_network_error_hint_vpn(self, monkeypatch):
         import urllib.error
 

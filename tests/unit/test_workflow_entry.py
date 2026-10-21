@@ -1,9 +1,10 @@
-"""工作流入口修复回归测试（2026-10-16 批次）。
+"""工作流入口修复回归测试（2026-10-16 批次；S6 更新：单链 RESET 用例随
+run_single_chain 退役移除——RESET 重建语义由 frontier 覆盖，见
+tests/unit/test_frontier_reset.py）。
 
 覆盖：CLI 命令注册唯一性（doctor 去重）、dag.augment_objective 共享拼接、
-单链 stalled → RESET 重建（设计 §3 接入 direct/单链路径）、anticheat 跨子 job
-降级复核（frontier 聚合流防串味）、distill 从聚合 events.jsonl 重建轨迹、
-SECPT_JUDGE_MODEL 终裁模型覆盖。
+anticheat 跨子 job 降级复核（frontier 聚合流防串味）、distill 从聚合
+events.jsonl 重建轨迹、SECPT_JUDGE_MODEL 终裁模型覆盖。
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ def test_cli_commands_unique() -> None:
 
 
 # ---------------------------------------------------------------------------
-# augment_objective：solve 各模式与 dag 单链共用同一拼接口径
+# augment_objective：solve 与 dag.run_task 共用同一拼接口径
 # ---------------------------------------------------------------------------
 
 
@@ -38,113 +39,6 @@ def test_augment_objective_appends_entries_and_artifacts() -> None:
     assert "【附件源码" in out and "/abs/attachments/src" in out
     # 空输入零拼接（幂等，防重复 augment）
     assert augment_objective("目标", [], []) == "目标"
-
-
-# ---------------------------------------------------------------------------
-# 单链 stalled → RESET 重建（direct 路径接 RESET）
-# ---------------------------------------------------------------------------
-
-
-class _FakeResult:
-    def __init__(self, flag, steps, wall_s, status, messages=None):
-        self.flag = flag
-        self.steps = steps
-        self.wall_s = wall_s
-        self.status = status
-        self.messages = messages or []
-        self.job_id = ""
-
-
-def _run_single(spec, fake_run_engine, monkeypatch, tmp_path):
-    import asyncio as _a
-
-    monkeypatch.setenv("SECPT_VAR", str(tmp_path))
-    import secpt.cli.engine_runner as er
-
-    orig = er.run_engine
-    er.run_engine = fake_run_engine
-    try:
-        from secpt.core.orchestrator.dag import run_single_chain
-
-        return _a.new_event_loop().run_until_complete(run_single_chain(spec, llm=object()))
-    finally:
-        er.run_engine = orig
-
-
-class TestSingleChainReset:
-    def test_stalled_with_ws_output_triggers_reset(self, tmp_path, monkeypatch):
-        from secpt.core.job.models import TaskBudget, TaskSpec
-
-        ws = tmp_path / "jobs" / "rt1" / "ws"
-        ws.mkdir(parents=True)
-        (ws / "probe.txt").write_text("v=1.0", encoding="utf-8")
-
-        r1 = _FakeResult(
-            flag=None,
-            steps=80,
-            wall_s=500.0,
-            status="stalled",
-            messages=[{"role": "assistant", "content": "试了很多路线没有进展"}],
-        )
-        r2 = _FakeResult(flag="FLAG{recovered}", steps=10, wall_s=60.0, status="success")
-        calls: list[dict] = []
-
-        def fake_run_engine(**kw):
-            calls.append(kw)
-            return r1 if len(calls) == 1 else r2
-
-        spec = TaskSpec(job_id="rt1", objective="渗透目标", budget=TaskBudget(steps=100))
-        summary = _run_single(spec, fake_run_engine, monkeypatch, tmp_path)
-
-        assert len(calls) == 2
-        assert calls[1]["job_id"] == "rt1-rs"  # RESET 换会话（新 job_id，非 -r2 续步）
-        assert "【RESET 重建" in calls[1]["objective"]
-        assert "probe.txt" in calls[1]["objective"]  # ws 产物清单已注入
-        assert "试了很多路线" in calls[1]["objective"]  # handoff 摘要已注入
-        assert summary["flags"] == ["FLAG{recovered}"]
-        assert summary.get("reset") is True  # extras 展平到顶层（RunSummary.to_dict 口径）
-
-    def test_stalled_without_ws_output_falls_back_to_r2(self, tmp_path, monkeypatch):
-        """空转不重建（ws 无产出 → 原 r2 换路线重试路径）。"""
-        from secpt.core.job.models import TaskBudget, TaskSpec
-
-        (tmp_path / "jobs" / "rt2" / "ws").mkdir(parents=True)  # 空 ws
-
-        r1 = _FakeResult(flag=None, steps=80, wall_s=500.0, status="stalled")
-        r2 = _FakeResult(flag=None, steps=5, wall_s=30.0, status="failed")
-        calls: list[dict] = []
-
-        def fake_run_engine(**kw):
-            calls.append(kw)
-            return r1 if len(calls) == 1 else r2
-
-        spec = TaskSpec(job_id="rt2", objective="渗透目标", budget=TaskBudget(steps=100))
-        _run_single(spec, fake_run_engine, monkeypatch, tmp_path)
-
-        assert len(calls) == 2
-        assert calls[1]["job_id"] == "rt2-r2"  # 非 RESET 命名
-        assert "【上一次尝试未成功】" in calls[1]["objective"]
-
-    def test_reset_disabled_by_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SECPT_DIRECT_RESET", "0")
-        from secpt.core.job.models import TaskBudget, TaskSpec
-
-        ws = tmp_path / "jobs" / "rt3" / "ws"
-        ws.mkdir(parents=True)
-        (ws / "probe.txt").write_text("v=1.0", encoding="utf-8")
-
-        r1 = _FakeResult(flag=None, steps=80, wall_s=500.0, status="stalled")
-        r2 = _FakeResult(flag=None, steps=5, wall_s=30.0, status="failed")
-        calls: list[dict] = []
-
-        def fake_run_engine(**kw):
-            calls.append(kw)
-            return r1 if len(calls) == 1 else r2
-
-        spec = TaskSpec(job_id="rt3", objective="渗透目标", budget=TaskBudget(steps=100))
-        _run_single(spec, fake_run_engine, monkeypatch, tmp_path)
-
-        assert calls[1]["job_id"] == "rt3-r2"  # SECPT_DIRECT_RESET=0 时走原 r2
 
 
 # ---------------------------------------------------------------------------

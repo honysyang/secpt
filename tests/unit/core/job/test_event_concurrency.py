@@ -14,6 +14,8 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from secpt.core.job.event import EventSink
 from secpt.core.memory.warroom import Warroom, WarroomHooks
 
@@ -188,3 +190,83 @@ def test_event_lines_carry_agent_and_chain_trace(tmp_path: Path) -> None:
     assert events[0]["chain_id"] == "parent-1"
     assert "agent_id" not in events[1]
     assert "chain_id" not in events[1]
+
+
+def test_sink_repairs_partial_tail(tmp_path):
+    """硬杀留下的无换行半行：初始化补换行，新事件不粘行、后续可正常解析。"""
+    job_dir = tmp_path / "j"
+    job_dir.mkdir()
+    p = job_dir / "events.jsonl"
+    p.write_text('{"seq": 1, "partial"', encoding="utf-8")  # 模拟半行
+    sink = EventSink("j", tmp_path, store=None)
+    sink.write("step", {"n": 2})
+    raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    assert len(raw) == 2
+    assert raw[0] == '{"seq": 1, "partial"'  # 半行保留但被换行隔离
+    assert json.loads(raw[1])["type"] == "step"
+
+
+# ---------------- R3：flock 限时取锁 ----------------
+
+
+def test_flock_wait_acquires_and_times_out(tmp_path):
+    """_flock_wait：空闲时拿到锁返回 True；被持有时超时返回 False（不冻结）。"""
+    fcntl = pytest.importorskip("fcntl")
+    from secpt.core.job.event import _flock_wait
+
+    p = tmp_path / "ev.jsonl"
+    f1 = open(p, "a", encoding="utf-8")  # noqa: SIM115
+    f2 = open(p, "a", encoding="utf-8")  # noqa: SIM115
+    try:
+        assert _flock_wait(f1.fileno(), timeout_s=2.0) is True  # 空闲：拿到
+        import time as _t
+
+        _t0 = _t.monotonic()
+        assert _flock_wait(f2.fileno(), timeout_s=0.3) is False  # 被持：超时降级
+        assert _t.monotonic() - _t0 < 2.0  # 真的没阻塞
+        fcntl.flock(f1.fileno(), fcntl.LOCK_UN)
+        assert _flock_wait(f2.fileno(), timeout_s=2.0) is True  # 释放后：拿到
+        fcntl.flock(f2.fileno(), fcntl.LOCK_UN)
+    finally:
+        f1.close()
+        f2.close()
+
+
+def test_sink_write_survives_stale_lock(tmp_path, monkeypatch):
+    """持锁方僵死（锁不释放）：EventSink 降级无锁写入，事件不丢。"""
+    fcntl = pytest.importorskip("fcntl")
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("SECPT_EVENT_FLOCK_TIMEOUT_S", "0.3")  # 降级等待缩短，测试提速
+    p = tmp_path / "ev.jsonl"
+    holder = tmp_path / "holder.py"
+    holder.write_text(
+        "import fcntl, sys, time\n"
+        "f = open(sys.argv[1], 'a')\n"
+        "fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(holder), str(p)])
+    try:
+        import time as _t
+
+        holder_ready = False
+        for _ in range(50):  # 等子进程把锁拿上
+            probe = open(p, "a", encoding="utf-8")  # noqa: SIM115
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                holder_ready = True
+                break
+            finally:
+                probe.close()
+            _t.sleep(0.1)
+        assert holder_ready, "子进程未持有锁，测试前提不成立（旧实现这里会因 EBADF 误判）"
+        sink = EventSink("stale", tmp_path, store=None)
+        seq = sink.write("step", {"n": 1})
+        assert seq >= 1
+        lines = _read_lines(sink.events_path)
+        assert lines[-1]["type"] == "step"
+    finally:
+        proc.kill()

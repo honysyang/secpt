@@ -146,6 +146,7 @@ class _FailThenWinLLM:
 class TestRecurseIntegration:
     def test_main_loop_expands_and_wins_on_sub_intent(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECPT_VAR", str(tmp_path))
+        monkeypatch.setenv("SECPT_ROLE_TEMPLATES", "1")  # 递归展开是 legacy 角色路径
         monkeypatch.setenv("SECPT_LOOP_STOP", "0")  # 本测只验递归路由，关掉止损状态机
         fr = Frontier(tmp_path / "fr.db")
         fr.add(
