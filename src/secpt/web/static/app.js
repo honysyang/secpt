@@ -15,7 +15,7 @@ const fmtCny=n=>"¥"+(n||0).toFixed(4);
 
 const M={jobs:[],events:[],workspace:{},findings:[],assets:[],
   tools:{builtin:[],plugins:[],skills:[]},experiences:[],config:{saved:{},effective:{}}};
-const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"new",taskFilter:"all",
+const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"followup",taskFilter:"all",
   labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
   assetTypes:[],assetQ:"",findSev:["critical","high","medium","low"],findQ:"",
   expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false};
@@ -32,7 +32,12 @@ async function loadJobs(){
   const d=await api("/api/jobs");
   M.jobs=(d.jobs||[]).map(j=>({job_id:j.job_id,status:j.status,task_type:j.task_type||"",
     objective:j.objective||"",created_at:j.created_at?new Date(j.created_at).getTime()/1000:0}));
-  if(!state.jobId&&M.jobs.length)state.jobId=M.jobs[0].job_id;
+  if(!state.jobId&&M.jobs.length){
+    // 默认选中"对话根任务"：子任务（-iXXXX 意图段/-r2 续段/-rs）与父任务共享同一张
+    // 作战地图，选中子任务会让地图/成果面板变空——对话视角应落在父任务上
+    const root=M.jobs.find(j=>!_CHILD_RE.test(j.job_id));
+    state.jobId=(root||M.jobs[0]).job_id;
+  }
 }
 async function loadEvents(full){
   const jid=state.jobId;if(!jid)return;
@@ -149,9 +154,9 @@ function renderFeed(){
         html+=`<div class="msg-agent"><div class="a-head"><span class="abadge" style="--ac:${acolor("commander")}">${AGENT_IC} commander</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
       }else if(e.type==="intent_event"){
         const st=e.payload.status;
-        const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消"}[st]||"✗ 结算";
+        const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
         const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
-        html+=`<div class="sysnote"><b>${verb}</b>「${esc(e.payload.title)}」→ ${esc(st)}${laneTxt}${e.payload.reason?` · ${esc(e.payload.reason)}`:""}</div>`;
+        html+=`<div class="msg-agent act"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor||"sentinel")}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
       }
     }
   }
@@ -410,13 +415,13 @@ function workspaceHTML(){
       <div class="composer-float">
         <div class="composer">
           <div class="attach-strip" id="attach-strip"></div>
-          <textarea id="c-in" rows="2" placeholder="${state.mode==="followup"?"注入指令 / 追问当前任务（人工直投，规划让路）…":"目标 / 范围 / 约束 / 交付要求…"}"></textarea>
+          <textarea id="c-in" rows="2" placeholder="${state.mode==="followup"?(taskRunning(j.job_id)?"追问当前任务：发送即入作战地图（人工直投，规划让路）…":"任务已收敛 · 发送将以同一张作战地图续接编排（不新开任务）…"):"目标 / 范围 / 约束 / 交付要求…（将新建独立任务）"}"></textarea>
           <div class="composer-foot">
             <button class="cbtn" id="btn-attach" title="附件（下达新任务时随任务上传）">＋</button>
             <input type="file" id="c-files" multiple hidden>
             <div class="mode-switch">
-              <button data-m="followup" class="${state.mode==="followup"?"on":""}">追问当前任务</button>
-              <button data-m="new" class="${state.mode==="new"?"on":""}">下达新任务</button>
+              <button data-m="followup" class="${state.mode==="followup"?"on":""}" title="消息进入当前任务的作战地图：运行中=人工直探；已收敛=自动续接编排">对话中发布</button>
+              <button data-m="new" class="${state.mode==="new"?"on":""}" title="新建独立任务（新对话、新地图）">下达新任务</button>
             </div>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
             <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
@@ -525,7 +530,12 @@ async function sendComposer(){
       const r=await api(`/api/jobs/${state.jobId}/message`,{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({content:text})});
-      toast(`已注入任务池（${r.intent_id||"direct"}）· 规划让路，执行体接单`);
+      if(r.resumed){
+        toast(`已发布并续接编排（同一作战地图）· ${r.intent_id||"direct"}`);
+        await loadJobs();
+      }else{
+        toast(`已注入任务池（${r.intent_id||"direct"}）· 规划让路，执行体接单`);
+      }
       refreshJobData(true);
     }else{
       const r=await api("/api/jobs",{
@@ -546,34 +556,50 @@ function closeDock(){if(dockOpen){dockOpen="";renderDock()}}
 function renderDock(){
   const dock=$("#dock");if(!dock)return;
   const w=M.workspace||{},intents=w.intents||[];
-  const running=intents.filter(i=>i.status==="running").length;
+  const hyps=w.hypotheses||[],hc=w.hypothesis_counts||{};
+  const now=Date.now()/1000;
+  const done=intents.filter(i=>i.status==="done").length;
+  const running=intents.filter(i=>i.status==="running");
+  const open=intents.filter(i=>i.status==="open");
+  const settledN=intents.length-done-running.length-open.length;
   const flags=(M.events||[]).filter(e=>e.type==="finding"&&e.payload.kind==="flag");
-  const finds=M.findings||[];
+  const finds=(M.findings||[]).filter(f=>f.job_id===state.jobId||String(f.job_id||"").startsWith((state.jobId||"⌂")+"-"));
   const stColor={open:"var(--info)",running:"var(--ok)",done:"var(--fg3)",exhausted:"var(--bad)"};
+  const hypColor={confirmed:"var(--ok)",refuted:"var(--fg3)",dead:"var(--fg3)",testing:"var(--info)",proposed:"var(--warn)"};
+  const hypLbl={confirmed:"已证实",refuted:"已证伪",dead:"已放弃",testing:"验证中",proposed:"新提出"};
   let html="";
-  if(intents.length){
+  if(intents.length||hyps.length||w.focus){
+    const intentRow=i=>{
+      const elapsed=i.status==="running"?fmtDur(Math.max(0,now-(i.updated_at||now))):"";
+      return `<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
+        <span class="dot" style="margin-top:5px;${i.status==="running"?"animation:pulse 1.8s infinite;":""}background:${stColor[i.status]||"var(--fg3)"}"></span>
+        <div class="kmain">${i.source==="direct"?'<span class="badge b-type">人工</span>':""}${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
+        <div class="ksub"><span>${esc(i.status)}${elapsed?` · ${elapsed}`:""}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`;
+    };
     html+=`<div class="dock-item ${dockOpen==="tasks"?"open":""}" data-d="tasks">
-      <div class="dock-panel">
-        <h5>TASK POOL · ${intents.length}</h5>
-        <div class="dockstat">${["running","open","done","exhausted"].map(k=>{
-          const n=intents.filter(i=>i.status===k).length;
-          return n?`<span class="ds-${k}">${n} ${k==="running"?"执行中":k==="open"?"待执行":k==="done"?"完成":"失败"}</span>`:"";
-        }).join("")}${(w.hypotheses||[]).length?`<span>假设 ${(w.hypotheses||[]).filter(h=>h.state==="testing"||h.state==="proposed").length} 未决/${(w.hypotheses||[]).length}</span>`:""}</div>
-        ${intents.map(i=>`<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
-          <span class="dot" style="margin-top:5px;${i.status==="running"?"animation:pulse 1.8s infinite;":""}background:${stColor[i.status]||"var(--fg3)"}"></span>
-          <div class="kmain">${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
-          <div class="ksub"><span>${esc(i.status)}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`).join("")}
+      <div class="dock-panel map">
+        <h5>作战地图 · ${state.jobId||"—"}</h5>
+        ${w.focus?`<div class="mapsec focus"><span class="mlbl">主攻方向</span>${esc(w.focus)}</div>`:""}
+        ${w.goal?`<div class="mapsec"><span class="mlbl">总目标</span>${esc((w.goal.objective||"").slice(0,90))}${(w.goal.asset_scope||[]).length?`<span class="sub">${esc(w.goal.asset_scope.slice(0,4).join("、"))}</span>`:""}</div>`:""}
+        <div class="mapbar"><i style="width:${intents.length?done/intents.length*100:0}%"></i></div>
+        <div class="dockstat"><span class="ds-running">${running.length} 执行中</span><span class="ds-open">${open.length} 待执行</span><span class="ds-done">${done} 完成</span>${settledN?`<span class="ds-exhausted">${settledN} 结算</span>`:""}<span>${intents.length} 项</span></div>
+        ${Object.keys(hc).filter(k=>hc[k]>0&&hypLbl[k]).map(k=>`<span class="hpchip" style="color:${hypColor[k]};border-color:${hypColor[k]}">${hypLbl[k]} ${hc[k]}</span>`).join("")}
+        ${hyps.filter(h=>h.state==="testing"||h.state==="proposed").slice(0,4).map(h=>`<div class="hypline"><span class="hpchip sm" style="color:${hypColor[h.state]};border-color:${hypColor[h.state]}">${hypLbl[h.state]||h.state}</span><span class="htxt" title="${esc(h.test||"")}">${esc(h.title)}</span><span class="conf">${Math.round((h.confidence||0)*100)}%</span></div>`).join("")}
+        <div class="mapsec-cap">执行中</div>
+        ${running.map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
+        <div class="mapsec-cap">待执行</div>
+        ${open.slice(0,6).map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
       </div>
-      <button class="dock-pill" data-act="dock"><span class="dot ${running?"running":""}" style="${running?"":"background:var(--fg3)"}"></span>任务状态<span class="pv">${running?running+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
+      <button class="dock-pill" data-act="dock"><span class="dot ${running.length?"running":""}" style="${running.length?"":"background:var(--fg3)"}"></span>作战地图<span class="pv">${running.length?running.length+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
     </div>`;
   }
-  if(flags.length||finds.length){
+  if(flags.length||finds.length||w.delivery){
     html+=`<div class="dock-item ${dockOpen==="outcome"?"open":""}" data-d="outcome">
       <div class="dock-panel">
         ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
         ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
-        <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · ${finds.length}</h5>
-        ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无发现</div>'}
+        <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
+        ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">本任务暂无发现</div>'}
       </div>
       <button class="dock-pill" data-act="dock">🏁 产出成果<span class="pv">${(flags.length?flags.length+" 旗":"")+(flags.length&&finds.length?" · ":"")+(finds.length?finds.length+" 发现":"")}</span><span class="caret-ic">▼</span></button>
     </div>`;

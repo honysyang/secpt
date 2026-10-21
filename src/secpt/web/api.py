@@ -270,6 +270,8 @@ def workspace_payload(job_id: str) -> dict:
         "hypotheses": [],
         "hypothesis_counts": {},
         "strategy": "",
+        "focus": "",
+        "goal": None,
         "flags": [],
         "findings": [],
         "delivery": None,
@@ -294,6 +296,11 @@ def workspace_payload(job_id: str) -> dict:
                 "status": r["status"],
                 "lane": r.get("lane", "main"),
                 "hypothesis": r.get("hypothesis", ""),
+                "source": r.get("source", ""),
+                "priority": int(r.get("priority") or 5),
+                "attempts": int(r.get("attempts") or 1),
+                "created_at": float(r.get("created_at") or 0),
+                "updated_at": float(r.get("updated_at") or 0),
                 "fail_reason": (r.get("fail_reason") or "")[:120],
             }
             for r in rows
@@ -305,13 +312,28 @@ def workspace_payload(job_id: str) -> dict:
         tree = HypothesisTree(hypothesis_db_path(job_id))
         out["hypotheses"] = tree.digest()
         out["hypothesis_counts"] = tree.counts()
-    # 战略文档（截断）
+    # 战略文档（截断）+ 主攻方向摘录（作战地图头部：当前打哪）
     with contextlib.suppress(Exception):
         from secpt.core.job.resume import jobs_dir
 
         spath = jobs_dir() / job_id / "strategy.md"
         if spath.is_file():
             out["strategy"] = spath.read_text(encoding="utf-8")[:1800]
+    with contextlib.suppress(Exception):
+        from secpt.core.orchestrator.frontier import _strategy_focus
+
+        out["focus"] = _strategy_focus(jobs_dir() / job_id / "strategy.md")
+    # 结构化目标（指挥官首轮理解产物；resume 复用同一份）
+    with contextlib.suppress(Exception):
+        from secpt.core.orchestrator.goals import load_goal
+
+        _g = load_goal(job_id)
+        if _g is not None:
+            out["goal"] = {
+                "objective": _g.objective,
+                "asset_scope": list(_g.asset_scope or []),
+                "attack_steps": list(_g.attack_steps or []),
+            }
     # 阶段性成果：flag / finding 事件
     with contextlib.suppress(Exception):
         payload = events_payload(job_id, after=0, limit=100000)
@@ -395,6 +417,58 @@ def _run_job(job_id: str, spec, llm) -> None:  # pragma: no cover - 线程体，
                 JobStore().upsert_job(rec)
 
 
+def job_active(job_id: str) -> bool:
+    """该任务的编排线程是否仍在运行（JOBS 注册表 + 线程存活）。"""
+    with _JOBS_LOCK:
+        rec = JOBS.get(job_id)
+    return bool(rec and rec.get("thread") and rec["thread"].is_alive())
+
+
+def resume_task(job_id: str) -> dict:
+    """对话续接：同一作战地图再跑一轮编排。
+
+    前端对话中发布任务的承载体——任务收敛后用户继续发消息，direct 意图已入池，
+    这里用原 job_id 重启编排：frontier/hypothesis/goal.json/role.json 全部沿用
+    （v5/v6 的 resume 语义），不新建任务、对话历史与作战地图保持同一张。
+    """
+    import os
+
+    from secpt.core.job.store import JobStore
+
+    store = JobStore()
+    rec = store.get_job(job_id)
+    if rec is None or getattr(rec, "spec", None) is None:
+        return {"error": "任务不存在或无 spec，无法自动续接"}
+    if job_active(job_id):
+        return {"ok": True, "resumed": False}
+    rec.status = "running"
+    store.upsert_job(rec)
+    llm = None
+    if os.environ.get("SECPT_FAKE_LLM") == "1":
+        from secpt.core.job.fakellm import FakeLLM
+
+        llm = FakeLLM(n_steps=12)
+    thread = threading.Thread(
+        target=_run_job, args=(job_id, rec.spec, llm), name=f"web-job-{job_id}", daemon=True
+    )
+    with _JOBS_LOCK:
+        JOBS[job_id] = {
+            "thread": thread,
+            "started_at": time.time(),
+            "mode": "fake" if llm else "prod",
+            "resume": True,
+        }
+    thread.start()
+    with contextlib.suppress(Exception):
+        from secpt.core.job.event import EventSink
+        from secpt.core.job.resume import jobs_dir
+
+        EventSink(job_id, jobs_dir()).write(
+            "loop_phase", {"phase": "resume", "reason": "对话追问续接编排（同一作战地图）"}
+        )
+    return {"ok": True, "resumed": True}
+
+
 def delete_job(job_id: str) -> dict:
     """删除任务：运行中先协作式取消，再从任务列表移除（目录留存可归档）。"""
     from secpt.core.job.store import JobStore
@@ -473,10 +547,14 @@ def cancel_task(job_id: str) -> dict:
 
 
 def inject_message(job_id: str, content: str) -> dict:
-    """追问当前任务：用户消息转人工直投意图（source=direct）注入任务池。
+    """对话中发布任务：用户消息转人工直投意图（source=direct）注入任务池。
 
     语义与 `secpt intent add` 一致：planner 看到 direct 未完成即暂停自动探索，
-    执行体领取执行（人点单、AI 干活）。任务不存在/无编排 → 报错。
+    执行体领取执行（人点单、AI 干活）。对话即任务流——一次对话可先后发布
+    多个任务（每条消息一条 direct 意图），共用同一张作战地图。
+
+    任务已收敛时自动续接编排（resume_task）：同 job_id 重启编排，
+    frontier/hypothesis/goal/role 全部沿用，不新建任务、不换对话。
     """
     content = (content or "").strip()
     if not content:
@@ -496,11 +574,13 @@ def inject_message(job_id: str, content: str) -> dict:
             break
         candidates.append(jid)
     fr = None
+    owner = job_id
     for cand in candidates:
         try:
             f = Frontier(frontier_db_path(cand))
             if f.total():
                 fr = f
+                owner = cand
                 break
         except Exception:
             continue
@@ -522,7 +602,12 @@ def inject_message(job_id: str, content: str) -> dict:
         EventSink(job_id, jobs_dir()).write(
             "user_msg", {"kind": "direct", "content": content[:800]}
         )
-    return {"ok": True, "intent_id": iid}
+    resumed = False
+    if not job_active(owner):
+        # 池归父任务但注册表可能只认得父 id；owner 即持有该池的编排任务
+        res = resume_task(owner)
+        resumed = bool(res.get("resumed"))
+    return {"ok": True, "intent_id": iid, "resumed": resumed}
 
 
 def create_task(

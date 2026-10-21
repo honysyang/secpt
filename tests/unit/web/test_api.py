@@ -204,3 +204,67 @@ def test_http_jobs_rejects_empty(server) -> None:
 def test_http_404(server) -> None:
     r = httpx.get(f"{server}/api/nope", timeout=5)
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 对话中发布任务：direct 注入 + 收敛后自动续接（同一作战地图）
+# ---------------------------------------------------------------------------
+
+
+def _mk_record(job_id: str, objective: str = "拿下目标"):
+    from secpt.core.job.models import JobRecord, TaskSpec
+    from secpt.core.job.store import JobStore
+
+    spec = TaskSpec(job_id=job_id, task_type="ctf", objective=objective)
+    JobStore().upsert_job(JobRecord(job_id=job_id, spec=spec, status="succeeded"))
+
+
+def _mk_pool(job_id: str) -> None:
+    from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
+
+    fr = Frontier(frontier_db_path(job_id))
+    fr.add("初始任务", goal="侦察", done_criteria="有结论", priority=5)
+
+
+def test_inject_resumes_converged_task(env, monkeypatch) -> None:
+    """任务收敛后对话追问：direct 意图入池 + 同 job_id 自动续接编排。"""
+    seen: dict = {}
+
+    def fake_run(job_id, spec, llm):
+        seen["job_id"] = job_id
+
+    monkeypatch.setattr(api, "_run_job", fake_run)
+    _mk_record("conv-1")
+    _mk_pool("conv-1")
+    result = api.inject_message("conv-1", "再看看 8080 端口")
+    assert result.get("ok") and result.get("resumed") is True
+    assert seen.get("job_id") == "conv-1"  # 同一作战地图，不新建任务
+    # direct 意图确实入池
+    from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
+
+    fr = Frontier(frontier_db_path("conv-1"))
+    directs = [r for r in fr.list_all(limit=50) if r.get("source") == "direct"]
+    assert len(directs) == 1 and "8080" in directs[0]["goal"]
+
+
+def test_inject_no_resume_while_active(env, monkeypatch) -> None:
+    """任务运行中追问：只入池不重启（避免双编排撞同一张地图）。"""
+    called: list[str] = []
+
+    def fake_run(job_id, spec, llm):
+        called.append(job_id)
+
+    monkeypatch.setattr(api, "_run_job", fake_run)
+    _mk_record("act-1")
+    _mk_pool("act-1")
+    api.JOBS["act-1"] = {"thread": threading.current_thread(), "started_at": time.time()}
+    try:
+        result = api.inject_message("act-1", "补充：注意边界")
+        assert result.get("ok") and result.get("resumed") is False
+        assert called == []
+    finally:
+        api.JOBS.pop("act-1", None)
+
+
+def test_inject_no_pool_errors(env) -> None:
+    assert "error" in api.inject_message("ghost-9", "你好")

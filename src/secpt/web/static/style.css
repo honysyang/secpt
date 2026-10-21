@@ -339,3 +339,21 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:var(--bg3);border:1px solid var(--line2);color:var(--fg);border-radius:var(--rs);padding:10px 19px;font-size:13px;z-index:120;opacity:0;pointer-events:none;transition:.18s}
 .toast.show{opacity:1}
 @media (max-width:1100px){.kpis .kpi:nth-child(n+3){display:none}.main{grid-template-columns:200px 1fr}.dock-panel{width:320px}.feed{padding:10px 24px 26px}.composer-zone,.filters{padding-left:24px;padding-right:24px}.crumb-bar,.anchor-bar{padding-left:24px;padding-right:24px}}
+
+/* ── v9 对话即任务流：OpenAI 式对话 + 作战地图面板 ── */
+.msg-user .bub{background:var(--bg3);border:1px solid var(--line2)}
+.msg-agent.act{margin:8px 0}
+.msg-agent.act .a-body.actline{font-size:12.5px;color:var(--fg2)}
+.msg-agent.act .a-body.actline .sub{color:var(--fg3);font-size:11px}
+.dock-panel.map .mapsec{font-size:12px;line-height:1.55;margin-bottom:8px;color:var(--fg)}
+.dock-panel.map .mapsec .mlbl{display:block;font:9.5px var(--mono);color:var(--fg3);letter-spacing:.12em;margin-bottom:2px}
+.dock-panel.map .mapsec .sub{display:block;font-size:11px;color:var(--fg3);margin-top:2px}
+.dock-panel.map .mapsec.focus{border-left:2px solid var(--agent);padding-left:9px}
+.dock-panel.map .mapbar{height:4px;border-radius:2px;background:var(--bg3);overflow:hidden;margin:4px 0 8px}
+.dock-panel.map .mapbar i{display:block;height:100%;background:var(--ok);border-radius:2px;transition:width .3s}
+.hpchip{display:inline-flex;align-items:center;font:10px var(--mono);border:1px solid;border-radius:99px;padding:0 8px;margin:0 5px 6px 0;opacity:.9}
+.hpchip.sm{padding:0 6px;font-size:9.5px;flex:none}
+.hypline{display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:5px}
+.hypline .htxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hypline .conf{font:10px var(--mono);color:var(--fg3);flex:none}
+.mapsec-cap{font:9.5px var(--mono);color:var(--fg3);letter-spacing:.12em;margin:10px 0 6px;text-transform:uppercase}
