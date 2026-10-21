@@ -111,8 +111,12 @@ class TestParallelRun:
         # worker 纪律"不自 close"条款治理，不用降并发换；留槽跑 SECPT_BENCHMARK_WORKERS=2）
         # 清单型任务关 planner（复评修复）：max_intents 钉死为预置数——防队列排空后
         # 规划层给已完成题产"幽灵意图"（容器全关任务还在跑的直接原因）
-        assert captured.get("max_intents") == 4
+        # v4.2 去协议降级：预置题 + Commander 余量（默认 8）——规划层可补产任务
+        assert captured.get("max_intents") == 4 + 8
         assert captured["profile"] == "benchmark"
+        assert captured.get("enable_commander") is True
+        assert captured.get("enable_delivery") is True
+        assert captured.get("enable_logistics") is True
         # ②/③ 接线：settle 回收容器回调 + 账本广播载体已传入 frontier
         assert callable(captured.get("on_settled"))
         # P0-2 接线：意图「真正开跑」回调（claim 只置 claimed，running 推迟到此）

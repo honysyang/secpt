@@ -215,8 +215,15 @@ class TestCampaign:
                 }
             ],
         ]
-        seq = iter(rows)
-        monkeypatch.setattr(bm, "fetch_challenges", lambda: next(seq))
+        # v4.2：轮前对账也是平台快照消费者。按调用序返回：前 3 次=进行中
+        # （对账1/轮1后判定/对账2），第 4 次起=已通关（轮 2 后判定）
+        fetch_n = [0]
+
+        def fake_fetch():
+            fetch_n[0] += 1
+            return rows[0 if fetch_n[0] <= 3 else 2]
+
+        monkeypatch.setattr(bm, "fetch_challenges", fake_fetch)
         monkeypatch.setattr(
             bm,
             "_platform_snapshot",
@@ -308,8 +315,15 @@ class TestCampaign:
             ],
             [],
         ]
-        seq = iter(rows)
-        monkeypatch.setattr(bm, "fetch_challenges", lambda: next(seq))
+        fetch_n = [0]
+
+        def fake_fetch():
+            fetch_n[0] += 1
+            # 消费方三个：轮前对账 + 轮后判定 + 轮入口快照。前 3 次=进行中，
+            # 第 4 次起=平台结束（空列表）
+            return rows[0] if fetch_n[0] <= 3 else rows[2]
+
+        monkeypatch.setattr(bm, "fetch_challenges", fake_fetch)
         snap_calls = {"n": 0}
 
         def _snap(force=False, ttl=5):

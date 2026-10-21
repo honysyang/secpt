@@ -1,4 +1,6 @@
-"""Delivery gate: the agent that decides whether the overall run should end.
+"""Verifier 核验官（职名 VRF）：交付判定——证据核验/独立复现/结束裁决。
+
+Delivery gate: decides whether the overall run should end.
 
 The main agent calls this gate when the main lane has drained.  It checks:
 - whether a claimed flag has an independent verification result;
@@ -93,7 +95,7 @@ def _confirmed_findings(base: str) -> int:
 def _platform_confirmed_flags(base: str, flags: list[str]) -> list[str]:
     """平台实况已确认的旗子（correct_flag_count>0）→ 传入的旗子视为已验证。
 
-    仅 benchmark 环境（BENCHMARK_BASE_URL 已配置）尝试；非跑分/平台不可达
+    仅在 platform_verify=True（调用方按 profile 判定）时尝试；平台不可达
     返回空（走正常复验通路）。旗子归属由平台判分，此处不猜。
     """
     import os
@@ -132,6 +134,7 @@ def review_delivery(
     attempt: int = 0,
     max_attempts: int = 1,
     main_lane: str = "main",
+    platform_verify: bool = False,
 ) -> DeliveryDecision:
     """Decide whether to end the run, or enqueue one bounded follow-up.
 
@@ -155,7 +158,7 @@ def review_delivery(
 
     # 平台已确认的旗子（benchmark 跑分协议：submit 成功即平台验证，无需复验）——
     # 台账 flags_found > 0 的记录视为已验证，避免对平台判分过的旗子再烧复验步数
-    platform_confirmed = _platform_confirmed_flags(base, flags)
+    platform_confirmed = _platform_confirmed_flags(base, flags) if platform_verify else []
     if platform_confirmed:
         return DeliveryDecision(
             True,

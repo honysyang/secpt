@@ -1,4 +1,6 @@
-"""Coach: deterministic stuck-point intervention for the orchestrator.
+"""Coach 教练（职名 COH）：卡壳介入，要求重写战略文档而非塞建议。
+
+Coach: deterministic stuck-point intervention for the orchestrator.
 
 The engine already has a stuck detector and optional mentor/LLM advice.  This
 module adds a *coach* at the orchestration layer: before a failed intent is

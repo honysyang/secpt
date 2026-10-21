@@ -90,7 +90,17 @@ function buildRounds(events){
   return [...rounds.values()].sort((a,b)=>a.round-b.round||a.t0-b.t0);
 }
 function tryFmt(s){try{return JSON.stringify(JSON.parse(s),null,1)}catch{return s}}
-function actorOf(e){return esc(e.actor||"agent")}
+function actorOf(e){return esc(actorName(e.actor||"agent"))}
+/* 职名映射（ARCHITECTURE.md 规范）：actor 原始串 → 职名·说明；未知 actor 视为作业实例 */
+function actorName(raw){
+  const r=String(raw).toLowerCase();
+  if(r.includes("commander"))return "CDR 指挥官";
+  if(r.includes("sentinel")||r==="orchestrator")return "SNT 值守";
+  if(r.includes("logistics")||r.includes("quartermaster"))return "QM 军需";
+  if(r.includes("coach"))return "COH 教练";
+  if(r.includes("verifier")||r.includes("delivery")||r.includes("gate"))return "VRF 核验";
+  return "OPT " + String(raw).slice(0,12);  // 作业实例（job_id 班次）
+}
 
 /* ── 对话流渲染 ── */
 function renderFeed(){

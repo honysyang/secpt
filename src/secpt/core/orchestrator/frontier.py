@@ -716,7 +716,10 @@ def _parent_event(base: str, etype: str, payload: dict) -> None:
                         "round": 0,
                         "type": etype,
                         "payload": payload,
-                        "actor": "commander" if etype == "plan_event" else "orchestrator",
+                        "actor": {
+                            "plan_event": "commander",
+                            "intent_event": "sentinel",
+                        }.get(etype, "sentinel"),
                     },
                     ensure_ascii=False,
                 )
@@ -2969,6 +2972,7 @@ async def run_frontier(
             flags=flags,
             attempt=delivery_attempts,
             max_attempts=max(0, int(delivery_max_attempts)),
+            platform_verify=(profile == "benchmark"),
         )
         delivery_decision = decision
         # v4.1 信念回滚：复验尝试耗尽仍未通过 → 已 confirmed 的假设不可信度上调

@@ -1,4 +1,6 @@
-"""Orchestration triage: the fast "JEV" judgment layer for tasks and results.
+"""Gate 门控（职名 GATE）：任务/结果的快速判定与分流层。
+
+Orchestration triage: the fast judgment layer for tasks and results.
 
 Two jobs, both deliberately cheap and deterministic by default:
 

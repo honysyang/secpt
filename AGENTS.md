@@ -62,6 +62,9 @@ src/secpt/
                  / cmd_ops(intent/steer/审批/worker) / cmd_doctor(预检) / tui_app+tui_data(面板)
   runtime/       engine.py(★主循环) / llm/client(多模型路由+池) / sandbox(Docker沙箱) / stuck(卡死检测)
                  / notify(通知通道)
+  ── 命名规范（权威）：见根目录 ARCHITECTURE.md——四层 L0 Gateway/L1 Command/
+  L2 Field/L3 Sustainment；智能体职名 CDR 指挥官/SNT 值守/OPT 作业/QM 军需/
+  VRF 核验/COH 教练；代码、文档、日志 actor、Web 面板一律使用规范名 ──
   core/
     job/         作业层：TaskSpec/JobRecord/store/event/resume/rounds/manager/worker
     orchestrator/ dag 统一路由(benchmark→campaign；其余→frontier) / frontier 意图调度
