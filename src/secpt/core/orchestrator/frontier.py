@@ -234,6 +234,8 @@ CREATE TABLE IF NOT EXISTS intents (
     lane TEXT DEFAULT 'main',           -- 执行通道：main（主路径）| logistics（后台后勤）
     hypothesis TEXT DEFAULT '',         -- 挂靠假设（v4 假设树节点 id；空=无信念挂钩）
     notes TEXT DEFAULT '',              -- 指挥官派单时的注意事项（边界/风险/禁止动作）
+    profile TEXT DEFAULT '',            -- 意图级角色（指挥官赋予；空=沿用任务级角色）
+    prior TEXT DEFAULT '',              -- 意图级经验文件（knowledge/priors/<name>；空=任务级）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -277,6 +279,8 @@ class Intent:
     lane: str = "main"  # 执行通道：main 主路径 / logistics 后台后勤
     hypothesis: str = ""  # 挂靠假设 id（v4 假设树；空=无信念挂钩）
     notes: str = ""  # 指挥官派单时的注意事项（边界/风险/禁止动作）
+    profile: str = ""  # 意图级角色（指挥官赋予；空=沿用任务级角色）
+    prior: str = ""  # 意图级经验文件（knowledge/priors/<name>；空=任务级）
     fail_reason: str = ""
 
 
@@ -1098,6 +1102,12 @@ class Frontier:
         if "notes" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN notes TEXT DEFAULT ''")
+        if "profile" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN profile TEXT DEFAULT ''")
+        if "prior" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN prior TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         # 多 worker 线程会并发认领/结算；给足锁等待（默认 5s 太短：一次长写事务
@@ -1127,6 +1137,8 @@ class Frontier:
         lane: str = "main",  # 执行通道：main 主路径 / logistics 后台后勤
         hypothesis: str = "",  # 挂靠假设（v4 假设树节点 id）
         notes: str = "",  # 指挥官派单时的注意事项（边界/风险/禁止动作）
+        profile: str = "",  # 意图级角色（指挥官赋予；空=沿用任务级角色）
+        prior: str = "",  # 意图级经验文件（knowledge/priors/<name>；空=任务级）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
@@ -1134,8 +1146,9 @@ class Frontier:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
                                         source,depends_on,subgoal,max_steps,max_wall_s,
-                                        role,asset_scope,lane,hypothesis,notes,tools,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                        role,asset_scope,lane,hypothesis,notes,profile,prior,
+                                        tools,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -1153,6 +1166,8 @@ class Frontier:
                     lane[:20],
                     hypothesis[:40],
                     notes[:500],
+                    profile[:40],
+                    prior[:80],
                     tools[:300],
                     now,
                     now,
@@ -1352,6 +1367,8 @@ class Frontier:
             lane=d.get("lane", "main") or "main",
             hypothesis=d.get("hypothesis", "") or "",
             notes=d.get("notes", "") or "",
+            profile=d.get("profile", "") or "",
+            prior=d.get("prior", "") or "",
             fail_reason=d.get("fail_reason", "") or "",
         )
 
@@ -1923,6 +1940,14 @@ def build_intent_objective(
     _mws = int(getattr(intent, "max_wall_s", 0) or 0)
     if _mws > 0:
         dispatch_meta += f"\n时限：本任务预计 {_mws} 秒内完成（到点即结算，不要恋战）"
+    _ip = (getattr(intent, "profile", "") or "").strip()
+    if _ip:
+        # 指挥官赋予的本任务角色（与任务级角色不同才标注；含经验文件）
+        dispatch_meta += f"\n角色：{_ip}" + (
+            f"（经验：{(getattr(intent, 'prior', '') or '').strip()}）"
+            if (getattr(intent, "prior", "") or "").strip()
+            else ""
+        )
     return f"""【总目标】
 {global_objective}
 
@@ -2037,6 +2062,7 @@ async def run_frontier(
     delivery_max_attempts: int = 1,  # 交付门最多补几次验证任务（防无限追加）
     enable_commander: bool = True,  # v4 Commander（假设树+战略文档+事件唤醒；benchmark/stages 强制关）
     scope_allow: list[str] | None = None,  # goal asset_scope 白名单（entries+SECPT_SCOPE_ALLOW；空=跳过校验）
+    prior: str | None = None,  # 经验文件覆盖（--prior 显式）；auto 模式下可被指挥官选择覆盖
 ) -> dict:
     """意图驱动主循环。返回汇总（chains/flags/wall）。
 
@@ -2107,6 +2133,24 @@ async def run_frontier(
             print(f"[frontier] 假设树初始化失败，降级 v3 planner: {_e}", flush=True)
             tree = None
             watch = None
+
+    # 角色/经验选择归指挥官（与任务理解同在首轮唤醒）。profile="auto"（入口未指定）
+    # 时：resume 读 role.json 复用；否则首轮唤醒由指挥官从角色目录选并赋予操作员。
+    # 用户显式 --profile 时尊重用户选择，指挥官不再改。
+    _run_priors: list[str] = [prior] if prior else []
+    _role_auto = profile == "auto"
+    if _role_auto and enable_commander and tree is not None and stages is None:
+        from secpt.core.orchestrator.commander import load_role
+
+        _r = load_role(base)
+        if _r is not None:
+            from secpt.core.profile.loader import valid_prior
+
+            profile = _r[0]
+            _rp = [p for p in _r[1] if valid_prior(p)]
+            if _rp:
+                _run_priors = _rp
+            print(f"[commander] 角色/经验沿用已落盘 role.json：{profile}", flush=True)
 
     # 目标理解三来源（见上方注释）：resume 落盘复用 > legacy/stages 入口兜底 > 指挥官首轮
     goal = None
@@ -2269,6 +2313,7 @@ async def run_frontier(
         → 种子资产入图 → objective 替换为结构化文本（此后所有简报/任务共享）。
         """
         nonlocal idle_rounds, stall_wake_budget, delivery_pending, objective, need_goal_pending
+        nonlocal profile, _run_priors
         signal = None  # 本轮唤醒信号（Commander 分支赋值；legacy planner 兜底 None）
         if fr.has_open_direct():
             return 0  # 模式②：规划者暂停
@@ -2319,6 +2364,20 @@ async def run_frontier(
                     f"steps={len(outcome.goal.attack_steps)}（goal.json 已落盘）",
                     flush=True,
                 )
+            # 首轮角色/经验选择：仅 auto 模式（用户显式 --profile 不覆盖）；落盘复用
+            if _role_auto and outcome.profile:
+                profile = outcome.profile
+                if outcome.priors:
+                    _run_priors = list(outcome.priors)
+                with contextlib.suppress(Exception):
+                    from secpt.core.orchestrator.commander import save_role
+
+                    save_role(base, profile, _run_priors)
+                print(
+                    f"[commander] 角色/经验选择：{profile}"
+                    f"（经验：{('、'.join(_run_priors)) or '无'}；role.json 已落盘）",
+                    flush=True,
+                )
             # 指挥官自执行的简单任务：入池后立即自取（主循环内联跑，不占操作员）
             for _d in outcome.tasks_detail:
                 if _d.get("self") and _d.get("iid"):
@@ -2334,6 +2393,8 @@ async def run_frontier(
                     "hypotheses": outcome.hypotheses_added,
                     "drift_rejected": outcome.drift_rejected,
                     "planned": outcome.tasks_detail[:8],
+                    "profile": outcome.profile,
+                    "priors": list(outcome.priors),
                     "wake": (signal.as_dict() if signal else {"kind": "plan"}),
                 },
             )
@@ -2503,9 +2564,16 @@ async def run_frontier(
             if wall > 0:
                 kw["max_wall_s"] = wall
             _tools_extra = [t for t in (intent.tools or "").split(",") if t.strip()]
+            # 意图级角色赋予：指挥官派单可带 profile/prior（如 web+pwn 混合任务分派
+            # 不同角色）；缺省沿用任务级角色与经验选择
+            _iprof = getattr(intent, "profile", "") or profile
+            _iprior = getattr(intent, "prior", "") or (
+                _run_priors[0] if _run_priors else None
+            )
             return run_engine(
                 objective=obj,
-                profile=profile,
+                profile=_iprof,
+                prior=_iprior,
                 job_id=job,
                 llm=llm,
                 model_primary=_pick_intent_model(

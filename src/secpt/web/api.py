@@ -528,7 +528,7 @@ def inject_message(job_id: str, content: str) -> dict:
 def create_task(
     objective: str,
     *,
-    profile: str = "ctf",
+    profile: str = "auto",  # 缺省 auto：角色/场景/经验由指挥官首轮选定并赋予操作员
     files: list[dict] | None = None,
     fake: bool = False,
     budget_steps: int = 0,

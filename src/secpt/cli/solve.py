@@ -346,35 +346,22 @@ def solve(
     prior_name = prior or _auto_prior(objective)
     gt = _find_ground_truth(challenge_dir)
 
-    from secpt.core.orchestrator.goals import is_rendered
+    # 协议闸口（L0 唯一保留的分类决策）：benchmark 是外部平台协议（拉题/容器/
+    # 结算/账本纪律），必须开跑前判定；判定走确定性规则（tsec/跑分/unique_code
+    # 等平台关键词），不烧 LLM。
+    # 其余——角色/安全场景的选择、经验（先验）的选择——不是协议，是任务理解的
+    # 一部分：由 Commander 首轮唤醒从角色目录中选定并赋予操作员（可逐任务覆盖）。
+    if profile in (None, "auto"):
+        from secpt.core.profile.router import _match_rules
 
-    # 入口只做协议级分类（profile/benchmark 判定 + 先验推荐 + 多标签合并），
-    # 保证 benchmark 协议与预算/工具链在任务开跑前就位。
-    # 任务理解（GoalSpec 拆解）归 Commander：首轮唤醒产出、落盘 goal.json，
-    # 由 frontier 内部完成（SECPT_GOALS=0 关闭；benchmark/stages 豁免）。
-    understanding = None
-    _u_on = os.environ.get("SECPT_UNDERSTANDING", "1") != "0"
-    if (profile is None or profile == "auto") and _u_on and not is_rendered(objective):
-        from secpt.core.orchestrator.understanding import understand_task
-
-        understanding = asyncio.run(understand_task(objective, llm=None, model=model))
-        profile = understanding.profiles[0]
-        print(
-            f"[understand] 协议分类 → profiles={understanding.profiles}"
-            f"{'（多标签）' if len(understanding.profiles) > 1 else ''}"
-            f" priors={understanding.priors or '（无）'}"
-            f"{'  ' + understanding.notes if understanding.notes else ''}"
-        )
-    elif profile is None or profile == "auto":
-        from secpt.core.profile.router import route_objective
-
-        profile = asyncio.run(route_objective(objective))
-        print(f"[solve] profile 自动路由 → {profile}")
-
-    if understanding is not None and understanding.priors and not prior:
-        # 先验推荐：理解智能体产物（已过存在性校验）；用户 --prior 显式指定时最高优先
-        prior_name = understanding.priors[0]
-        print(f"[understand] 先验推荐 → {prior_name}")
+        matched = _match_rules(objective)
+        profile = "benchmark" if "benchmark" in matched else "auto"
+        if profile == "benchmark":
+            print("[solve] 协议闸口：命中 benchmark 平台协议（规则）→ 战役跑分")
+        else:
+            print("[solve] 角色/场景/经验选择：交由指挥官首轮唤醒完成")
+    else:
+        print(f"[solve] 角色显式指定：{profile}（指挥官不再改）")
 
     _goals_why = (
         "benchmark 豁免（程序化协议）"
@@ -384,21 +371,6 @@ def solve(
     print(f"[solve] 目标拆解：交由指挥官首轮唤醒完成（{_goals_why}）")
 
     job_id = uuid.uuid4().hex[:8]
-
-    # 多标签合并：横向任务的能力/知识并集（工具白名单 + 先验文本），
-    # 主标签定角色/终止/预算。物化为任务级 YAML，下游按 profile 路径加载（字符串管道零改动）
-    if understanding is not None and len(understanding.profiles) > 1:
-        from secpt.core.orchestrator.understanding import (
-            materialize_merged_profile,
-            merge_profiles_from_names,
-        )
-
-        merged = merge_profiles_from_names(understanding.profiles)
-        profile = materialize_merged_profile(merged, job_id)
-        print(
-            f"[understand] 多标签合并 → 主={merged.name} 并入={understanding.profiles[1:]}"
-            f"（工具/白名单/先验并集；物化 {Path(profile).name}）"
-        )
 
     spec = TaskSpec(
         job_id=job_id,

@@ -8,7 +8,7 @@
 
 | 层 | 规范名 | 职责边界 | 载体模块 |
 |---|---|---|---|
-| **L0 接入层** | **Gateway** | 任务接入与鉴权：自然语言/附件入口、上传净化、token 认证、scope 预检、profile 路由 | `cli/solve.py`、`web/api.py`、`cli/app.py`、`core/orchestrator/dag.py` |
+| **L0 接入层** | **Gateway** | 任务接入与鉴权：自然语言/附件入口、上传净化、token 认证、scope 预检、**协议闸口**（唯一保留的分类决策：benchmark 平台协议规则检测）。角色/安全场景/经验的选择不是协议，归指挥官 | `cli/solve.py`、`web/api.py`、`cli/app.py`、`core/orchestrator/dag.py` |
 | **L1 编导层** | **Command** | 任务池治理、规划-执行-调度、值守触发、快判分流、卡壳介入、交付判定 | `core/orchestrator/frontier.py`、`watch.py`、`commander.py`、`triage.py`、`coach.py`、`delivery_gate.py`、`hypothesis.py` |
 | **L2 作业层** | **Field** | 单链 ReAct 执行：工具调用、止损三档、compaction、进度锚点、断点续跑 | `runtime/engine.py`、`runtime/local_runner.py`、`runtime/stuck.py` |
 | **L3 支撑层** | **Sustainment** | 治理与记忆：scope/限速/拦截/审计、图记忆、findings、经验、评判、证据 | `governance/`、`intel/`、`learning/`、`evaluation/`、`findings/`、`evidence/`、`web/`（观测面） |
@@ -52,11 +52,15 @@ L2 不感知其他执行体（协作只经 L1 的黑板）；L3 只被上三层�
 ## 四、一次任务的规范时序
 
 ```
-Gateway 接入（自然语言 + 附件；只做协议级分类：profile/benchmark 判定 + 先验推荐）
-  → CDR 首轮唤醒（任务理解）：理解客户原始需求 → 产 GoalSpec（落盘 goal.json）
-        → 假设树 v0 + 战略文档 v0 + 拆分派首批任务
-        → 派单三要素：max_wall_s（何时截止）+ notes（注意事项：边界/风险/禁止动作）
+Gateway 接入（自然语言 + 附件；协议闸口仅检测 benchmark 平台协议——规则命中即战役跑分）
+  → CDR 首轮唤醒（任务理解 + 角色赋予）：
+        理解客户原始需求 → 产 GoalSpec（落盘 goal.json）
+        角色/安全场景选择（从角色目录选一，落盘 role.json）+ 经验选择（priors）
+        假设树 v0 + 战略文档 v0 + 拆分派首批任务
+        派单三要素：max_wall_s（何时截止）+ notes（注意事项：边界/风险/禁止动作）
           + self（简单任务 CDR 当场自执行，不占操作员名额）
+        派单可逐任务带 profile/prior——同一任务的不同操作员可领不同角色
+        （如 web+pwn 混合任务）；缺省沿用任务级角色与经验
   → 稳态循环（占 90%）：操作员A/B/C…并行领单 ReAct ──产出──→ SNT 结算
         │ 任务状态全程落在作战地图（frontier.sqlite / hypothesis.sqlite / strategy.md / events.jsonl）
         │ 无触发器：循环继续，CDR 不在场

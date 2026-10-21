@@ -57,6 +57,13 @@ async def run_task(
     """
     from secpt.core.orchestrator.frontier import run_frontier
     from secpt.core.profile.loader import load_profile
+    from secpt.core.profile.router import _match_rules
+
+    # 协议闸口（唯一漏斗，CLI/Web 两个入口都在这里过）：角色未指定时，题面命中
+    # benchmark 平台关键词 → 升级 platform 协议（战役跑分）。角色/场景/经验的
+    # 选择不是协议，不在此处理——由指挥官首轮唤醒完成。
+    if spec.task_type in ("auto", "") and "benchmark" in _match_rules(spec.objective or ""):
+        spec = spec.model_copy(update={"task_type": "benchmark"})
 
     if spec.task_type == "benchmark":
         from .benchmark import run_benchmark_campaign
@@ -76,7 +83,13 @@ async def run_task(
         base_job_id=spec.job_id,
         llm=llm,
         model=model_primary,
-        max_workers=max(1, int(getattr(prof, "workers", 1) or 1)),
+        # auto 模式（角色交由指挥官首轮选定）：默认开 3 路操作员并行池，
+        # 角色落定后各任务按选定 profile 跑；显式 profile 沿用其 workers 配置
+        max_workers=(
+            max(3, int(getattr(prof, "workers", 1) or 1))
+            if spec.task_type == "auto"
+            else max(1, int(getattr(prof, "workers", 1) or 1))
+        ),
         default_assets=assets,
         default_max_steps=spec.budget.steps if spec.budget.steps > 0 else 0,
         # goal asset_scope 输入可信边界：entries + SECPT_SCOPE_ALLOW（双空=跳过校验）

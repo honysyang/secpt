@@ -133,3 +133,37 @@ def load_profile(name: str) -> Profile:
         return Profile(name=fallback)
     data.setdefault("name", fallback)
     return Profile(**data)
+
+
+# 角色（profile）选择是指挥官理解任务的一部分，不是入口协议——L0 只拦 benchmark
+# 平台协议；其余角色/场景/经验由指挥官首轮唤醒从目录中选（可逐任务覆盖）。
+# 内部档案不参与选择：benchmark（平台协议闸口）、multistage/generic-free（内部用）。
+_INTERNAL_PROFILES = frozenset({"benchmark", "multistage", "generic-free"})
+
+
+def role_catalog() -> list[tuple[str, str]]:
+    """可选角色目录：(名称, 一行说明)。动态来自 profiles/*.yaml 的 note/role 字段。"""
+    out: list[tuple[str, str]] = []
+    for f in sorted(PROFILES_DIR.glob("*.yaml")):
+        name = f.stem
+        if name in _INTERNAL_PROFILES:
+            continue
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+        desc = str(data.get("note") or data.get("role") or "")[:80]
+        out.append((name, desc))
+    return out
+
+
+def valid_role(name: str) -> bool:
+    """角色名校验：目录内且非内部档案。"""
+    n = str(name or "").strip()
+    return bool(n) and n not in _INTERNAL_PROFILES and (PROFILES_DIR / f"{n}.yaml").is_file()
+
+
+def valid_prior(name: str) -> bool:
+    """经验文件名校验：knowledge/priors/<name> 存在。"""
+    n = str(name or "").strip()
+    return bool(n) and (PRIORS_DIR / n).is_file()

@@ -26,6 +26,11 @@ _DEPLOY_ENV_VARS = (
     "ZHIPU_API_KEY",
     "ZHIPU_BASE_URL",
     "JEV_API_KEY",
+    # 平台连接：隔离本机 .env 的 BENCHMARK_BASE_URL/TOKEN——否则测试可能
+    # 打到真实平台（实测：gate 单测漏隔离时直连平台拿到 409）
+    "BENCHMARK_BASE_URL",
+    "BENCHMARK_TOKEN",
+    "BENCHMARK_TASK_ID",
 )
 
 
