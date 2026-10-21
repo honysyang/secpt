@@ -602,10 +602,13 @@ def main():
         if not ready:
             out["hint"] = "端口 40s 未就绪：先 api.py holders 看槽位，避免盲目重 start"
     elif cmd == "submit" and len(rest) >= 2:
+        # 平台要求 unique_code 同时出现在 query 与 body（实测 422：body unique_code
+        # Field required）——tsec1-run-2317 实证：只放 query 时每个 worker 都要
+        # 现场写 workaround 脚本，浪费步数
         out = call(
             "POST",
             f"/openapi/v1/challenges/submit?unique_code={rest[0]}",
-            {"flag": rest[1]},
+            {"unique_code": rest[0], "flag": rest[1]},
         )
     elif cmd == "close" and rest:
         # close 门反转：只要该题「存在有效租约」（无论谁的）就是在途，一律拒绝；
