@@ -42,7 +42,7 @@ L2 不感知其他执行体（协作只经 L1 的黑板）；L3 只被上三层�
 | frontier.sqlite（任务池 + 资产租约） | `var/jobs/<base>/` | CDR 派单 / OPT 领取结算 / SNT 修剪 | 全体 |
 | hypothesis.sqlite（假设树） | `var/jobs/<base>/` | CDR 结算 / OPT 证据事件 | CDR / Verifier |
 | strategy.md（作战意图） | `var/jobs/<base>/` | CDR 全量重写 | CDR 下次唤醒 / Verifier |
-| events.jsonl（事件流，seq 单调） | `var/jobs/<id>/` | 全体（SNT 聚合子流） | Web 面板 / 评判 / 复盘 |
+| events.jsonl（事件流，seq 单调） | `var/jobs/<id>/` | 全体（SNT 聚合子流；父流三写入方持 PEV_LOCK 串行） | Web 面板 / 评判 / 复盘 |
 | findings.sqlite + 证据 blob | `var/` | OPT 上报 / VRF 复验 | 报告 / 交付 |
 | benchmark_ledger.sqlite | `var/` | campaign 认领与结算 | 跑分防双开 |
 
@@ -65,6 +65,8 @@ Gateway 接入（自然语言 + 附件；协议闸口仅检测 benchmark 平台�
         │ 任务状态全程落在作战地图（frontier.sqlite / hypothesis.sqlite / strategy.md / events.jsonl）
         │ 无触发器：循环继续，CDR 不在场
         │ 有触发器：唤醒 CDR（信念结算→随时调整方向→再派单→改文档→休眠）
+        │   多信号同轮攒下时一次唤醒全交付（列表化简报，防信号饿死）；
+        │   简报携态势：已确认战果 + 在途任务（谁还在场上/跑了多久）
   → 卡壳：SNT 唤醒 COH → 诊断 → 要求 CDR 重写战略文档 → COH 退出
   → 收敛：CDR 请求交付 → SNT 排空在途后勤 → VRF 核验
         → 通过：结束（verified_flags 落账）；否决：退回任务池

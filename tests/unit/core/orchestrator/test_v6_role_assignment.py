@@ -129,7 +129,7 @@ def test_briefing_includes_role_catalog(env) -> None:
     tree = HypothesisTree(hypothesis_db_path("r1b"))
     text = _briefing("客户原始需求", fr, tree, None, "", need_goal=True)
     assert "【角色与经验·待选择】" in text
-    for name, _desc in role_catalog():
+    for name, _desc, _sc in role_catalog():
         assert f"- {name}：" in text
     assert "benchmark" not in [
         ln.split("：", 1)[0].lstrip("- ").strip() for ln in text.splitlines() if ln.startswith("- ")

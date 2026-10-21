@@ -26,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - Windows 分支
     fcntl = None
 
+from secpt.core.job.evlock import PEV_LOCK
 from secpt.core.job.store import JobStore
 
 
@@ -200,7 +201,10 @@ class EventSink:
                     f"（EVENT_CATALOG 契约，已记录不阻断）",
                     file=__import__("sys").stderr,
                 )
-        with self._lock:
+        with self._lock, PEV_LOCK:
+            # 跨写入方（编排 _parent_event / Web 注入）可能在本实例初始化后
+            # 追加过事件：持全局锁重读尾 seq，保证任何交错下 seq 单调不回退
+            self._seq = max(self._seq, self._tail_seq())
             self._seq += 1
             line = {
                 "seq": self._seq,

@@ -152,24 +152,45 @@ def _briefing(
     objective: str,
     fr,
     tree: HypothesisTree,
-    signal: dict | None,
+    signal,
     strategy: str,
     *,
     need_goal: bool = False,
+    flags: list | None = None,
+    running: list | None = None,
 ) -> str:
     """简报编译器：确定性生成，不是 LLM 摘要——输入保真。"""
     situation = fr.situation_report()
+    # 触发原因：信号可能积压多个（值守层攒下的议题一次交付，防信号饿死）
+    if isinstance(signal, list):
+        _sig_txt = json.dumps(signal[:8], ensure_ascii=False) if signal else (
+            json.dumps({"kind": "plan", "detail": "常规规划"}, ensure_ascii=False)
+        )
+    else:
+        _sig_txt = json.dumps(signal or {"kind": "plan", "detail": "常规规划"}, ensure_ascii=False)
     parts = [
         "【总目标】",
         objective[:1500],
         "",
-        "【触发原因（本次唤醒的议题）】",
-        json.dumps(signal or {"kind": "plan", "detail": "常规规划"}, ensure_ascii=False),
+        "【触发原因（本次唤醒的议题，可能多条）】",
+        _sig_txt,
     ]
+    # 战果与在途态势：指挥官的方向决策必须看得见"已经赢了什么、谁还在场上"
+    if flags:
+        parts += ["", "【当前战果（已确认 flag）】", "、".join(str(f)[:60] for f in flags[:8])]
+    if running:
+        parts += [
+            "",
+            "【在途任务（操作员正在执行）】",
+            json.dumps(running[:8], ensure_ascii=False),
+        ]
     if need_goal:
-        from secpt.core.profile.loader import role_catalog
+        from secpt.core.profile.loader import prior_catalog, role_catalog
 
-        _catalog = "\n".join(f"- {n}：{d}" for n, d in role_catalog()) or "（无）"
+        _catalog = "\n".join(
+            f"- {n}：{d}" + (f"｜场景：{sc}" if sc else "") for n, d, sc in role_catalog()
+        ) or "（无）"
+        _priors = "\n".join(f"- {n}：{t}" for n, t in prior_catalog()) or "（无）"
         parts += [
             "",
             "【任务拆解·待完成】上方总目标是客户原始需求，尚未结构化。"
@@ -181,8 +202,11 @@ def _briefing(
             _catalog,
             "",
             "从中选且只选一个 profile 输出到 profile 字段；按需再选经验文件输出到 "
-            "priors 数组（knowledge/priors 下的文件名，如 saml.md 填 saml.md；"
-            "不确定就留空数组）。选定的角色与经验会被赋予执行本任务的操作员。",
+            "priors 数组（下列目录中挑，填文件名；不确定就留空数组）。"
+            "选定的角色与经验会被赋予执行本任务的操作员。",
+            "",
+            "【经验目录（knowledge/priors）】",
+            _priors,
         ]
     if strategy:
         parts += ["", "【当前战略文档（你上次写的，本次全量重写）】", strategy[:2500]]
@@ -310,12 +334,14 @@ async def commander_round(
     llm,
     *,
     model: str = "deepseek-chat",
-    signal: dict | None = None,
+    signal=None,  # dict | list[dict] | None：单信号或值守层积压的信号列表
     path: Path | None = None,
     max_new: int = 3,
     next_depth: int = 0,
     asset_pool: list[str] | None = None,
     need_goal: bool = False,
+    flags: list | None = None,  # 已确认战果（简报【当前战果】）
+    running: list | None = None,  # 在途任务 [{title, elapsed_s, lane}]（简报态势）
 ) -> CommanderOutcome:
     """Commander 一次唤醒。返回结果（含 decision，供主循环处理 deliver）。
 
@@ -326,7 +352,10 @@ async def commander_round(
     path = path if path is not None else None
     old_doc = load_strategy(path) if path is not None else ""
     prompt = _COMMANDER_PROMPT.format(
-        briefing=_briefing(objective, fr, tree, signal, old_doc, need_goal=need_goal)
+        briefing=_briefing(
+            objective, fr, tree, signal, old_doc,
+            need_goal=need_goal, flags=flags, running=running,
+        )
     )
     try:
         if hasattr(llm, "call"):

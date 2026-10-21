@@ -17,3 +17,5 @@ constraints:
   - 禁止加载私钥（本地执行/脚本均不得读取 id_rsa 等私钥材料）；任何私钥不会进入 transcript（引擎自动屏蔽）
   - 爆破/符号执行等长任务先 small-input dry-run 验证流程（local_runner CPU 60s/内存 1GB 硬限，超限即杀）；生产规模放专门 worker
 note: 二进制利用专用：工具镜像 + pwn 先验；若无附件源码先 checksec 定防御面
+scenario: >
+  二进制利用：附件是 ELF/内核镜像/含 libc，或 nc 过去的菜单式服务。checksec 定防御面→本地调试通→远程打通。题面带'栈溢出/堆/UAF/格式化字符串/rop/elf/libc'时选我。

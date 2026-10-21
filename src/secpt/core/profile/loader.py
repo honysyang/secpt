@@ -88,6 +88,8 @@ class Profile(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     roe: RoeSpec = Field(default_factory=RoeSpec)  # 交战规则（双模治理）
     note: str = ""
+    # 场景指引：何时选这个角色 + 典型目标 + 边界（指挥官角色选择的依据，注入简报）
+    scenario: str = ""
     sandbox: str = ""  # 非空 → 覆盖全局 sandbox 默认（none）；需容器时写 docker/auto
 
     @property
@@ -141,9 +143,13 @@ def load_profile(name: str) -> Profile:
 _INTERNAL_PROFILES = frozenset({"benchmark", "multistage", "generic-free"})
 
 
-def role_catalog() -> list[tuple[str, str]]:
-    """可选角色目录：(名称, 一行说明)。动态来自 profiles/*.yaml 的 note/role 字段。"""
-    out: list[tuple[str, str]] = []
+def role_catalog() -> list[tuple[str, str, str]]:
+    """可选角色目录：(名称, 一行说明, 场景指引)。动态来自 profiles/*.yaml。
+
+    scenario 字段回答"何时选我"：典型目标形态、打法边界——指挥官选择的依据，
+    也是赋予操作员时的上下文（场景不透明则选择退化成拍脑袋）。
+    """
+    out: list[tuple[str, str, str]] = []
     for f in sorted(PROFILES_DIR.glob("*.yaml")):
         name = f.stem
         if name in _INTERNAL_PROFILES:
@@ -153,7 +159,31 @@ def role_catalog() -> list[tuple[str, str]]:
         except Exception:
             data = {}
         desc = str(data.get("note") or data.get("role") or "")[:80]
-        out.append((name, desc))
+        scenario = str(data.get("scenario") or "")[:300]
+        out.append((name, desc, scenario))
+    return out
+
+
+def prior_catalog() -> list[tuple[str, str]]:
+    """经验文件目录：(文件名, 首行标题/适用面)。供指挥官选择经验时对照。
+
+    取每个 prior 文件的第一个标题行或"适用："行——维护者只需保持文件首行即目录。
+    """
+    out: list[tuple[str, str]] = []
+    for f in sorted(PRIORS_DIR.glob("*.md")):
+        try:
+            head = f.read_text(encoding="utf-8", errors="replace")[:800]
+        except OSError:
+            head = ""
+        title = ""
+        for ln in head.splitlines():
+            t = ln.strip().lstrip("#").strip()
+            if t.startswith("适用"):
+                title = t[:100]
+                break
+            if t and not title:
+                title = t[:100]
+        out.append((f.name, title))
     return out
 
 

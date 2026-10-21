@@ -548,54 +548,57 @@ def _aggregate_sub_events(
         parent_dir = jobs_dir() / base
         parent_dir.mkdir(parents=True, exist_ok=True)
         parent_events = parent_dir / "events.jsonl"
-        seq = 0
-        if parent_events.is_file():
-            with open(parent_events, encoding="utf-8") as rf:
-                seq = sum(1 for _ in rf)
-        with open(parent_events, "a", encoding="utf-8") as out:
-            for sub in fresh:
-                sub_path = jobs_dir() / sub / "events.jsonl"
-                if not sub_path.is_file():
-                    continue  # 子 job 事件未生成（engine 异常早退）→ 下次收尾再试
-                with open(sub_path, encoding="utf-8") as rf:
-                    for line in rf:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            ev = _json.loads(line)
-                        except _json.JSONDecodeError:
-                            continue
-                        seq += 1
-                        ev["seq"] = seq
-                        ev["job_id"] = base
-                        payload = ev.get("payload")
-                        if isinstance(payload, dict):
-                            ev["payload"] = {"subjob": sub, **payload}
-                        out.write(_json.dumps(ev, ensure_ascii=False) + "\n")
-                seen.add(sub)  # 已聚合标记（幂等：下次调用跳过）
-            if final:
-                seq += 1
-                out.write(
-                    _json.dumps(
-                        {
-                            "seq": seq,
-                            "job_id": base,
-                            "ts": time.time(),
-                            "round": 0,
-                            "type": "round_end",
-                            "payload": {
-                                "n_messages": 0,
-                                "sub_jobs": list(seen),
-                                "chains": len(chains),
-                                "flags": flags,
-                                "note": "frontier 收尾聚合（子 job 事件已并入父事件流）",
+        # 与 _parent_event / EventSink 同一全局锁：seq 数行→append 跨写入方串行，
+        # Web 注入在聚合期间插入不再撞重号
+        with _PEV_LOCK:
+            seq = 0
+            if parent_events.is_file():
+                with open(parent_events, encoding="utf-8") as rf:
+                    seq = sum(1 for _ in rf)
+            with open(parent_events, "a", encoding="utf-8") as out:
+                for sub in fresh:
+                    sub_path = jobs_dir() / sub / "events.jsonl"
+                    if not sub_path.is_file():
+                        continue  # 子 job 事件未生成（engine 异常早退）→ 下次收尾再试
+                    with open(sub_path, encoding="utf-8") as rf:
+                        for line in rf:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                ev = _json.loads(line)
+                            except _json.JSONDecodeError:
+                                continue
+                            seq += 1
+                            ev["seq"] = seq
+                            ev["job_id"] = base
+                            payload = ev.get("payload")
+                            if isinstance(payload, dict):
+                                ev["payload"] = {"subjob": sub, **payload}
+                            out.write(_json.dumps(ev, ensure_ascii=False) + "\n")
+                    seen.add(sub)  # 已聚合标记（幂等：下次调用跳过）
+                if final:
+                    seq += 1
+                    out.write(
+                        _json.dumps(
+                            {
+                                "seq": seq,
+                                "job_id": base,
+                                "ts": time.time(),
+                                "round": 0,
+                                "type": "round_end",
+                                "payload": {
+                                    "n_messages": 0,
+                                    "sub_jobs": list(seen),
+                                    "chains": len(chains),
+                                    "flags": flags,
+                                    "note": "frontier 收尾聚合（子 job 事件已并入父事件流）",
+                                },
                             },
-                        },
-                        ensure_ascii=False,
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
     except Exception as e:  # 可观测层失败不阻断编排
         print(f"[frontier] 父事件流聚合失败（忽略）: {e}")
 
@@ -694,43 +697,49 @@ def retro(fr: Frontier, *, base: str = "") -> str:
     return "continue"
 
 
+from secpt.core.job.evlock import PEV_LOCK as _PEV_LOCK  # 父流跨写入方串行锁（evlock 单点）
+
+
 def _parent_event(base: str, etype: str, payload: dict) -> None:
     """编排层事件直写父流（对话面板的轨迹源）。
 
-    seq 取当前行数 +1（与 _aggregate_sub_events 同一口径，单调不回退）；
-    全程同步无 await，与主循环聚合写入互不交错。best-effort：观测层失败不炸编排。
+    seq 取当前行数 +1（与 _aggregate_sub_events 同一口径，单调不回退）。
+    写入全程持锁：seq 的"读行数→写"不是原子的，Web 注入等后台线程与编排
+    主循环并发写会撞出重复 seq/交错行（实测面板偶发 seq 重号即此因）。
+    best-effort：观测层失败不炸编排。
     """
     import json as _json
 
     from secpt.core.job.resume import jobs_dir
 
     try:
-        parent = jobs_dir() / base
-        parent.mkdir(parents=True, exist_ok=True)
-        f = parent / "events.jsonl"
-        seq = 0
-        if f.is_file():
-            with open(f, encoding="utf-8") as rf:
-                seq = sum(1 for _ in rf)
-        with open(f, "a", encoding="utf-8") as out:
-            out.write(
-                _json.dumps(
-                    {
-                        "seq": seq + 1,
-                        "job_id": base,
-                        "ts": time.time(),
-                        "round": 0,
-                        "type": etype,
-                        "payload": payload,
-                        "actor": {
-                            "plan_event": "commander",
-                            "intent_event": "sentinel",
-                        }.get(etype, "sentinel"),
-                    },
-                    ensure_ascii=False,
+        with _PEV_LOCK:
+            parent = jobs_dir() / base
+            parent.mkdir(parents=True, exist_ok=True)
+            f = parent / "events.jsonl"
+            seq = 0
+            if f.is_file():
+                with open(f, encoding="utf-8") as rf:
+                    seq = sum(1 for _ in rf)
+            with open(f, "a", encoding="utf-8") as out:
+                out.write(
+                    _json.dumps(
+                        {
+                            "seq": seq + 1,
+                            "job_id": base,
+                            "ts": time.time(),
+                            "round": 0,
+                            "type": etype,
+                            "payload": payload,
+                            "actor": {
+                                "plan_event": "commander",
+                                "intent_event": "sentinel",
+                            }.get(etype, "sentinel"),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
     except Exception:
         pass
 
@@ -2328,22 +2337,37 @@ async def run_frontier(
         if tree is not None and watch is not None:
             from secpt.core.orchestrator.commander import commander_round
 
-            signal = pending_signals.pop(0) if pending_signals else None
+            # 信号一次全交付：值守层可能攒下多条议题（预算+停滞+内务同轮到达），
+            # 只带一条会让其余的等下一轮——而下一轮可能被 idle 门挡住，信号饿死
+            _sigs = [pending_signals.pop(0) for _ in range(len(pending_signals))]
             _send_need_goal = need_goal_pending
             need_goal_pending = False  # 只给首轮一次理解机会；失败即降级原文
+            # 在途态势：指挥官看得见"谁还在场上"才能决定是否加派/改向
+            _now = time.time()
+            _running = [
+                {
+                    "title": str(r.get("title") or "")[:60],
+                    "elapsed_s": int(_now - float(r.get("updated_at") or _now)),
+                    "lane": str(r.get("lane") or "main"),
+                }
+                for r in fr.list_all(status="running", limit=20)
+            ]
             outcome = await commander_round(
                 objective,
                 fr,
                 tree,
                 planner_llm,
                 model=model,
-                signal=signal.as_dict() if signal is not None else None,
+                signal=[x.as_dict() for x in _sigs] if _sigs else None,
                 path=_strategy_path,
                 max_new=max_new_per_wake,
                 next_depth=next_depth,
                 asset_pool=list(default_assets or []),
                 need_goal=_send_need_goal,
+                flags=list(flags),
+                running=_running,
             )
+            signal = _sigs[0] if _sigs else None  # 兼容下方 wake 字段
             # 首轮任务理解产物：过滤（输入可信边界）→ 落盘 → 种子资产 → 结构化
             if outcome.goal is not None:
                 _allow_src = [a for a in (scope_allow or []) if a and a.strip()]
@@ -2395,7 +2419,11 @@ async def run_frontier(
                     "planned": outcome.tasks_detail[:8],
                     "profile": outcome.profile,
                     "priors": list(outcome.priors),
-                    "wake": (signal.as_dict() if signal else {"kind": "plan"}),
+                    "wake": (
+                        {"kind": "multi", "signals": [x.as_dict() for x in _sigs]}
+                        if len(_sigs) > 1
+                        else (signal.as_dict() if signal else {"kind": "plan"})
+                    ),
                 },
             )
             if outcome.decision == "deliver":

@@ -14,3 +14,5 @@ constraints:
   - 禁止加载私钥（只处理证书/公钥材料；任何私钥不会进入 transcript，引擎自动屏蔽）
   - 爆破/格基约化等长任务先 small-input dry-run 验证流程（local_runner CPU 60s/内存 1GB 硬限）；生产规模放专门 worker
 note: 密码学专用：RSA/AES/PRNG/古典 攻击清单先验 + 数学库镜像
+scenario: >
+  密码学挑战：题面给密文/公钥/加密脚本/令牌，考察 RSA/AES/PRNG/格/古典密码。打法是数学分析+小脚本验证，不碰网络服务。
