@@ -249,6 +249,41 @@ class TestRunFrontier:
         obj = build_intent_objective("总目标", intent, fr.recent_results())
         assert "当前意图" in obj and "完成判据" in obj and "总目标" in obj
 
+    def test_worker_exception_settles_and_converges(self, tmp_path, monkeypatch):
+        """worker 异常不得悬挂主循环（实测 database is locked → 永久等 wake）。
+
+        _run_one 抛错时必须结算意图（exhausted）并唤醒主循环，否则 running
+        意图无人收敛，asyncio.run 永远不返回。
+        """
+        import secpt.cli.engine_runner as er
+
+        def _boom(**kw):
+            raise RuntimeError("database is locked (模拟)")
+
+        monkeypatch.setattr(er, "run_engine", _boom)
+        fr = Frontier(tmp_path / "fr.db")
+        fr.add("会炸的任务", goal="x", done_criteria="y")
+        summary = asyncio.run(
+            asyncio.wait_for(
+                run_frontier(
+                    "目标：验证 worker 异常收敛",
+                    llm=_WorkerLLM(),
+                    planner_llm=_PlannerLLM([]),
+                    base_job_id="crash1",
+                    max_rounds=4,
+                    max_intents=1,
+                    enable_commander=False,
+                    enable_delivery=False,
+                    frontier=fr,
+                ),
+                timeout=20,
+            )
+        )
+        statuses = {c["intent"]: c["status"] for c in summary["chains"]}
+        assert statuses.get("会炸的任务") == "exhausted"
+        assert summary["open_remaining"] == 0
+        assert fr.list_all(status="running") == []
+
 
 class TestProgressAwareResume:
     """⑦ 进展感知续步判据：ws 有实质产出（除 api.py 模板）才续预算。"""

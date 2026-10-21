@@ -40,3 +40,12 @@ def _isolate_deploy_env(monkeypatch):
     """隔离部署类 env：本机 .env 的 SECPT_MENTOR=1 等不得改变测试基线行为。"""
     for _k in _DEPLOY_ENV_VARS:
         monkeypatch.delenv(_k, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_var_dir(tmp_path_factory, monkeypatch):
+    """每用例独立 SECPT_VAR：默认 var/ 与本机真实任务/Web 服务共用同一个
+    secpt.sqlite。测试写真实库既污染数据，也会和长跑任务抢 SQLite 写锁
+    （实测 database is locked → worker 悬挂）。数据根必须落在临时目录。
+    """
+    monkeypatch.setenv("SECPT_VAR", str(tmp_path_factory.mktemp("secpt-var")))

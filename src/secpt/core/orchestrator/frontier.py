@@ -1033,6 +1033,8 @@ class Frontier:
         self.db_path = Path(db_path) if db_path else DEFAULT_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("PRAGMA journal_mode=WAL")  # 持久化，无需每连接重设
             c.executescript(_SCHEMA)
             self._migrate(c)
             self._recover_stale(c)
@@ -1093,7 +1095,11 @@ class Frontier:
                 c.execute("ALTER TABLE intents ADD COLUMN hypothesis TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        # 多 worker 线程会并发认领/结算；给足锁等待（默认 5s 太短：一次长写事务
+        # 就会让认领线程抛 database is locked，进而让 worker 协程死亡——
+        # 见 run_frontier 的 worker 监管）。WAL 由 __init__ 持久化设置。
+        conn = sqlite3.connect(str(self.db_path), timeout=15)
+        conn.execute("PRAGMA busy_timeout=15000")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -2868,7 +2874,17 @@ async def run_frontier(
             # 在途链自然收尾（不再开新题，避免无意义烧步）
             if _drain_now():
                 break
-            intent = fr.claim_next(lane="main")
+            try:
+                intent = fr.claim_next(lane="main")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # 认领是 SQLite 写事务（BEGIN IMMEDIATE）：库被长写事务占住时
+                # 会超时抛错。不能让 worker 协程因此死亡——否则在途意图无人
+                # 结算，主循环永久等 wake，整个任务悬挂。
+                print(f"[frontier] 主通道认领异常（2s 后重试）: {e}", flush=True)
+                await asyncio.sleep(2.0)
+                continue
             if intent is None:
                 fr.reopen_ready()  # 无 open 可领 → 解锁依赖已满足的 blocked 意图
                 await asyncio.sleep(0.5)
@@ -2883,16 +2899,69 @@ async def run_frontier(
                 "intent_event",
                 {"iid": intent.id, "title": intent.title, "status": "claimed", "lane": "main"},
             )
-            ans = await _run_one(intent)
+            try:
+                ans = await _run_one(intent)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                ans = _settle_worker_crash(intent, e)
             if ans:
                 _apply_answer(ans)
+
+    def _settle_worker_crash(intent: Intent, exc: BaseException) -> None:
+        """worker 逐意图异常兜底：结算 exhausted，防在途意图永久 running。
+
+        _run_one 内部大部分失败已转成 status 返回；能走到这里的是编排层
+        自身异常（DB 锁、回调炸、序列化失败等）。不结算会让主循环一直等
+        settle 事件（实测：database is locked → 整任务悬挂）。
+        """
+        _why = f"worker 异常: {type(exc).__name__}: {exc}"
+        print(f"[frontier] {_why}（意图 {intent.id} 结算为 exhausted）", flush=True)
+        with contextlib.suppress(Exception):
+            fr.settle(intent.id, status="exhausted", fail_reason=_why[:300])
+        # 同步上下文无 await，可直接落链结果（无需 chains_lock）
+        with contextlib.suppress(Exception):
+            chains.append(
+                ChainResult(
+                    intent=intent.title,
+                    role=getattr(intent, "role", "") or "",
+                    asset_scope=getattr(intent, "asset_scope", "") or "",
+                    status="exhausted",
+                    steps=0,
+                    depth=intent.depth,
+                    source=intent.source,
+                    lane=getattr(intent, "lane", "main") or "main",
+                )
+            )
+        with contextlib.suppress(Exception):
+            _parent_event(
+                base,
+                "intent_event",
+                {
+                    "iid": intent.id,
+                    "title": intent.title,
+                    "status": "failed",
+                    "lane": getattr(intent, "lane", "main") or "main",
+                    "error": _why[:300],
+                },
+            )
+        with contextlib.suppress(Exception):
+            wake_q.put_nowait(intent.id)
+        return None
 
     async def _logistics_loop() -> None:
         """后台后勤通道：只领 logistics 任务，不参与主路径收敛。"""
         while not stop_ev.is_set():
             if _drain_now():
                 break
-            intent = fr.claim_next(lane="logistics")
+            try:
+                intent = fr.claim_next(lane="logistics")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[frontier] 后勤通道认领异常（2s 后重试）: {e}", flush=True)
+                await asyncio.sleep(2.0)
+                continue
             if intent is None:
                 await asyncio.sleep(0.5)
                 continue
@@ -2906,7 +2975,12 @@ async def run_frontier(
                 "intent_event",
                 {"iid": intent.id, "title": intent.title, "status": "claimed", "lane": "logistics"},
             )
-            ans = await _run_one(intent)
+            try:
+                ans = await _run_one(intent)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                ans = _settle_worker_crash(intent, e)
             if ans:
                 _apply_answer(ans)
 
@@ -3039,6 +3113,21 @@ async def run_frontier(
     idle_rounds = 0
     rounds = 0
     while rounds < max_rounds and not stop:
+        # 兜底监管：worker 协程若在循环外被不可恢复异常杀掉，主循环会永远等
+        # wake（在途意图无人结算）。这里检测并收口，至少让任务正常落盘 summary。
+        if main_workers and all(t.done() for t in main_workers) and not stop_ev.is_set():
+            _errs = [
+                str(t.exception())
+                for t in main_workers
+                if not t.cancelled() and t.exception() is not None
+            ]
+            print(
+                f"[frontier] 主通道 worker 全部退出，任务收口：{'; '.join(_errs)[:200] or '无异常'}",
+                flush=True,
+            )
+            stop = True
+            stop_ev.set()
+            break
         if _drain_now():
             stop_ev.set()
             break
