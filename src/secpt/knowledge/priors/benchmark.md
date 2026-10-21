@@ -95,3 +95,13 @@ submit  → POST $BASE/openapi/v1/challenges/submit  {"unique_code":X,"flag":"..
 - **面板/数据库类（1panel、neo4j、管理控制台）**：先指纹定版本，按
   "默认口令 → 未授权访问 → 已知 CVE" 顺序打，不要黑盒盲测（c 族 6 题 0/1
   的共性：面对标准组件从零盲测，指纹→CVE 一步都没做）
+
+## 凭据全服务轮询（硬纪律）
+
+每获得一个新凭据（爆破命中 / 配置文件 / 数据库 hash 明文），**立即对所有可达服务轮询尝一遍**——
+不要只用在"发现它的那个服务"上：
+
+- 覆盖面：SSH / MySQL / Redis(AUTH) / FTP / 面板登录 / API 登录口 / SMB——同一口令跨服务复用是题设常态
+- Redis 必试 `AUTH <pass>` 再下结论 NOAUTH；401/NOAUTH ≠ 无效，只代表需要凭据
+- 命中即 `record_fact("credential:<服务>")`，供横向意图与后续轮次复用
+- 反向也成立：见到 NOAUTH/401/登录页，先 recall 已有凭据再谈爆破

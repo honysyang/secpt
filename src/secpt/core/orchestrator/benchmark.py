@@ -1486,6 +1486,19 @@ async def run_benchmark_campaign(
             flush=True,
         )
         _round_t0 = time.time()
+        # 每轮开始自动对账（tsec1-run-2317 教训：上一轮 flag1 已 300 分，本轮 list
+        # 显示 correct_flag_count=0，模型重新提交同旗并重探一遍——账本与平台实况
+        # 脱节直接浪费步数）。以平台为唯一真相源：假 solved 降级、有分回填。
+        # best-effort：平台不可达时跳过（不阻断轮次），下轮再试。
+        with contextlib.suppress(Exception):
+            rep = reconcile_ledger()
+            if any((rep.get(k) for k in ("downgraded", "synced", "solved_now")), start=[]):
+                print(
+                    f"[campaign] 轮前对账：降级假 solved {len(rep['downgraded'])}，"
+                    f"回填进度 {len(rep['synced'])}，补标 solved {len(rep['solved_now'])}，"
+                    f"未知题号 {len(rep['unknown'])}",
+                    flush=True,
+                )
         _deadline = (t0 + wall_s) if wall_s > 0 else None
         _round_model = _campaign_round_model(model, _round_no)
         if _round_model != model:
