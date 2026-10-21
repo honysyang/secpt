@@ -1843,6 +1843,18 @@ async def plan_round(
     return n
 
 
+def _strategy_focus(path) -> str:
+    """战略文档 "## 主攻方向" 一节摘录——注入操作员目标（这一步服务于哪个方向）。"""
+    try:
+        if not path or not Path(path).is_file():
+            return ""
+        _text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    _m = re.search(r"^##\s*主攻方向\s*\n(.*?)(?=^##\s|\Z)", _text, re.S | re.M)
+    return (_m.group(1).strip() if _m else "")[:300]
+
+
 def build_intent_objective(
     global_objective: str,
     intent: Intent,
@@ -1851,6 +1863,7 @@ def build_intent_objective(
     base: str = "",
     handoff: str = "",
     allow_logistics: bool = False,
+    focus: str = "",
 ) -> str:
     recent_txt = "\n".join(
         f"- [{r['status']}] {r['title']}: {r['result'][:200]}" for r in recent[:4]
@@ -1957,12 +1970,19 @@ def build_intent_objective(
             if (getattr(intent, "prior", "") or "").strip()
             else ""
         )
+    focus_ctx = ""
+    if focus:
+        focus_ctx = (
+            "\n\n【当前主攻方向（指挥官战略文档）】\n"
+            + focus
+            + "\n本任务是上述方向的一步：以完成判据收尾，结论指向该方向的推进。"
+        )
     return f"""【总目标】
 {global_objective}
 
 【当前意图】{intent.title}
 目标：{intent.goal}
-完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}{dispatch_meta}
+完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}{dispatch_meta}{focus_ctx}
 {handoff}{techniques}
 
 【近期相关结果（避免重复踩坑）】
@@ -2328,7 +2348,12 @@ async def run_frontier(
             return 0  # 模式②：规划者暂停
         if delivery_pending or delivery_wait:
             return 0  # 交付门未收口：暂停产新意图，等复验结算
-        if fr.total() >= max_intents or idle_rounds >= 2:
+        # v8 收敛裁决：convergence 信号必须送达 CDR（值守层只递信号不拍板），
+        # 不受意图上限/idle 门挡——这是收口前最后一次读图机会
+        _conv_pending = any(
+            getattr(s, "kind", "") == "convergence" for s in pending_signals
+        )
+        if (fr.total() >= max_intents or idle_rounds >= 2) and not _conv_pending:
             return 0
         with fr._conn() as c:
             row = c.execute("SELECT MAX(depth) d FROM intents").fetchone()
@@ -2571,6 +2596,7 @@ async def run_frontier(
             base=base,
             handoff=_asset_handoff,
             allow_logistics=bool(enable_logistics and getattr(intent, "lane", "main") == "main"),
+            focus=_strategy_focus(_strategy_path),
         )
         # 教练介入：重试/RESET 前注入确定性纠偏，避免同一路线反复烧预算
         if int(getattr(intent, "attempts", 1) or 1) > 1:
@@ -3301,6 +3327,33 @@ async def run_frontier(
         for _ in range(_logi_workers):
             worker_tasks.append(asyncio.create_task(_logistics_loop()))
 
+    # v8 质变快照：confirmed 假设数 / 真实 flag 数变化 = 地图质变。
+    # 原先这类变化最多等巩固定时器（6 轮）才被 CDR 看见；现在当轮插队唤醒。
+    _mat_confirmed = tree.counts().get("confirmed", 0) if tree is not None else 0
+    _mat_flags = len(flags)
+    conv_no_deliver = 0  # CDR 连续不交付计数：回退收口保险（SNT 兜底）
+
+    def _material_change():
+        nonlocal _mat_confirmed, _mat_flags
+        from secpt.core.orchestrator.watch import WakeSignal
+
+        _c = tree.counts().get("confirmed", 0) if tree is not None else 0
+        _f = len(flags)
+        if _c == _mat_confirmed and _f == _mat_flags:
+            return None
+        _delta = f"confirmed 假设 {_mat_confirmed}→{_c}，真实 flag {_mat_flags}→{_f}"
+        _mat_confirmed, _mat_flags = _c, _f
+        return WakeSignal(
+            kind="material_change",
+            detail=f"地图质变：{_delta}，请读图重估方向（继续/转向/收兵）",
+            priority=8,
+        )
+
+    def _conv_signal(detail: str):
+        from secpt.core.orchestrator.watch import WakeSignal
+
+        return WakeSignal(kind="convergence", detail=detail, priority=9)
+
     # 事件驱动 planner：worker settle / 心跳 唤醒（对齐 ARTEX"数据库变化唤醒"）
     idle_rounds = 0
     rounds = 0
@@ -3369,6 +3422,13 @@ async def run_frontier(
             )
             if _stall is not None:
                 pending_signals.append(_stall)
+            # v8 质变检测：confirmed 假设 / 真实 flag 变化当轮插队唤醒 CDR。
+            # 队列里已有 material_change 则跳过（一次唤醒处理一次质变即可）
+            _mat = _material_change()
+            if _mat is not None and not any(
+                getattr(s, "kind", "") == "material_change" for s in pending_signals
+            ):
+                pending_signals.append(_mat)
         # 是否还能产新意图（意图数达上限 / 规划连续两轮无产出 / 交付等待 → 收敛点）
         can_plan = (
             fr.total() < max_intents
@@ -3377,14 +3437,19 @@ async def run_frontier(
             and not delivery_wait
         )
         # 值守层信号插队：有信号时无视 idle_rounds（停滞/预算/内务必须被 Commander 处理）
+        # v8：convergence 信号额外无视意图上限——收口裁决必须送达 CDR
+        _has_conv = any(getattr(s, "kind", "") == "convergence" for s in pending_signals)
         _signal_plan = (
             bool(pending_signals)
-            and fr.total() < max_intents
+            and (fr.total() < max_intents or _has_conv)
             and not (delivery_pending or delivery_wait)
         )
         if _signal_plan or (can_plan and (starving or main_open == 0)):
+            _open_before_plan = fr.count_open()  # v8：CDR 接住了收敛议题则回退计数清零
             await _maybe_plan()
             rounds += 1
+            if fr.count_open() > _open_before_plan:
+                conv_no_deliver = 0  # 有新意图入池：收敛被 CDR 实质回应，重置回退保险
             main_open = fr.count_open(lane="main")
             # 指挥官自执行的简单任务：派单入池后立即按 id 自取内联跑掉——
             # 不占操作员名额，走与操作员完全相同的 _run_one 结算路径（含假设信念更新）
@@ -3434,13 +3499,26 @@ async def run_frontier(
                         _stall_signal_now("假设树仍有高价值未决节点（池空触发信念收敛检查）")
                     )
                     continue
+                if delivery_pending and not enable_delivery:
+                    break  # v8：CDR 已裁决交付且未启用交付门 → 直接收口
                 if enable_delivery and not delivery_decision:
                     if await _run_delivery_gate():
                         stop = True
                         stop_ev.set()
                         break
                     continue
-                break  # Goals 覆盖度驱动收敛：所有子目标已结算（done/exhausted）
+                # v8 收敛裁决归 CDR：SNT 只递 convergence 信号不亲自拍板；
+                # CDR 连续两次不交付 → SNT 回退收口（不可悬挂的兜底）
+                if conv_no_deliver < 2:
+                    conv_no_deliver += 1
+                    pending_signals.append(
+                        _conv_signal(
+                            "所有子目标已结算（done/exhausted）：请裁决——达成则 decision=deliver，"
+                            "有缺口则 continue 并派补产任务"
+                        )
+                    )
+                    continue
+                break  # 回退收口：CDR 两轮收敛唤醒均未交付（覆盖度兜底）
             # 复盘会 retro()（设计 §4.1）：空队列时先确定性路由——失败驱动局部递归
             # （§4.2）优先于"规划两轮无产出就收敛"。阶段由状态定：recurse 时编排层
             # 直接产结构化子意图（不经 planner LLM），防"planner 忘了展开"时系统卡死
@@ -3473,13 +3551,26 @@ async def run_frontier(
                     idle_rounds = 0
                     pending_signals.append(_stall_signal_now("规划无产出，但假设树仍有未决方向"))
                     continue
+                if delivery_pending and not enable_delivery:
+                    break  # v8：CDR 已裁决交付且未启用交付门 → 直接收口
                 if enable_delivery and not delivery_decision:
                     if await _run_delivery_gate():
                         stop = True
                         stop_ev.set()
                         break
                     continue
-                break  # 空队列 + 无法再规划（意图数达上限/规划两轮无产出）→ 收敛
+                # v8 收敛裁决归 CDR（同覆盖度收口）：池空且无法再规划时
+                # 由 CDR 读图裁决收兵或给新方向；连续两次不交付 → SNT 回退收口
+                if conv_no_deliver < 2:
+                    conv_no_deliver += 1
+                    pending_signals.append(
+                        _conv_signal(
+                            "任务池空且无法再规划：请裁决——目标达成则 decision=deliver，"
+                            "否则给出新方向并派任务"
+                        )
+                    )
+                    continue
+                break  # 回退收口：空队列 + 无法再规划 + CDR 两轮未交付
             timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）
         else:
             timeout = float(os.environ.get("SECPT_FRONTIER_HEARTBEAT", "60"))

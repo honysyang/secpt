@@ -265,6 +265,8 @@ _COMMANDER_PROMPT = """你是渗透任务的主智能体（Commander）。你被
    该任务由你在本轮直接执行，不占操作员名额；其余任务 self=false。
 6. 转向/收缩（decision=pivot/shrink）必须在 justification 引用证据（证据编号/假设 id）。
 7. 收敛判断：假设树无高价值未决节点且目标已达成 → decision=deliver。
+   触发原因含 kind="convergence" = 值守层判定可能已收口：达成→deliver；有缺口→
+   continue 并派补产任务（说明缺什么）。连续两次收敛唤醒不交付将被强制收口。
 8. strategy 全量重写（不是追加），固定四段：## 当前阶段 / ## 主攻方向 / ## 明确不做 / ## 转向日志。
    明确不做一栏写放弃理由（指向证据）。本次议题是内务（consolidation）时重在对账与修剪。
 

@@ -64,10 +64,14 @@ Gateway 接入（自然语言 + 附件；协议闸口仅检测 benchmark 平台�
   → 稳态循环（占 90%）：操作员A/B/C…并行领单 ReAct ──产出──→ SNT 结算
         │ 任务状态全程落在作战地图（frontier.sqlite / hypothesis.sqlite / strategy.md / events.jsonl）
         │ 无触发器：循环继续，CDR 不在场
+        │ 质变（confirmed 假设/真实 flag 变化）：当轮插队唤醒 CDR 读图重估
         │ 有触发器：唤醒 CDR（信念结算→随时调整方向→再派单→改文档→休眠）
         │   多信号同轮攒下时一次唤醒全交付（列表化简报，防信号饿死）；
         │   简报携态势：已确认战果 + 在途任务（谁还在场上/跑了多久）
+        │ 操作员目标编译注入：主攻方向（战略文档摘录）+ 已验证漏洞跨资产情报
   → 卡壳：SNT 唤醒 COH → 诊断 → 要求 CDR 重写战略文档 → COH 退出
+  → 收敛：SNT 只递 convergence 信号不拍板 → CDR 读图裁决（deliver 或补产）；
+        CDR 连续两次不交付 → SNT 回退兜底收口
   → 收敛：CDR 请求交付 → SNT 排空在途后勤 → VRF 核验
         → 通过：结束（verified_flags 落账）；否决：退回任务池
   → 终局：SNT 写 retro.md，学习层蒸馏经验
