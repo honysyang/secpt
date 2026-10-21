@@ -79,6 +79,9 @@ async def run_task(
         max_workers=max(1, int(getattr(prof, "workers", 1) or 1)),
         default_assets=assets,
         default_max_steps=spec.budget.steps if spec.budget.steps > 0 else 0,
+        # goal asset_scope 输入可信边界：entries + SECPT_SCOPE_ALLOW（双空=跳过校验）
+        scope_allow=assets
+        + [a for a in os.environ.get("SECPT_SCOPE_ALLOW", "").split(",") if a.strip()],
     )
     if spec.budget.wall_s > 0:
         # --wall 秒数 → 全局截止（frontier deadline_ts；0/-1 不限，7×24 语义不变）

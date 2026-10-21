@@ -22,7 +22,7 @@ L2 不感知其他执行体（协作只经 L1 的黑板）；L3 只被上三层�
 |---|---|---|---|---|
 | **Commander 指挥官** | CDR | `commander.py` | LLM，事件驱动无会话状态 | 读确定性简报 → 信念结算 → 方向决策 → 派单 → 全量重写战略文档；自身执行也经 L2 |
 | **Sentinel 值守哨兵** | SNT | `watch.py` + frontier 结算 | 纯代码，零 LLM，常驻 | 结算一切事件；四类确定性触发（预算/停滞/阶段门/内务）唤醒 Commander |
-| **Operator 作业智能体** | OPT | `runtime/engine.py` 实例 | LLM，ReAct，任务内全自主 | 领取独立任务，Thought→Action→Observation 直到完成；耗时粗活委托后勤 |
+| **Operator 操作员** | OPT | `runtime/engine.py` 实例 | LLM，ReAct，任务内全自主 | 多实例并行（操作员A/B/C…）：领取互相独立的任务，Thought→Action→Observation 直到完成；耗时粗活委托后勤 |
 | **Quartermaster 军需官** | QM | logistics lane | LLM，队列消费者 | 后台承接下载/批量搜索/爆破/爬取等耗时工作，只回写不决策 |
 | **Verifier 核验官** | VRF | `delivery_gate.py` | 确定性 + 按需 LLM | 证据核验与独立复现；裁决 confirmed/inferred/rejected；判定整体任务是否结束 |
 | **Coach 教练** | COH | `coach.py` | 确定性，休眠唤醒 | 仅对卡壳信号介入：要求 Commander 重写战略文档（不塞建议） |
@@ -52,11 +52,15 @@ L2 不感知其他执行体（协作只经 L1 的黑板）；L3 只被上三层�
 ## 四、一次任务的规范时序
 
 ```
-Gateway 接入（自然语言 + 附件）
-  → CDR 首次唤醒：假设树 v0 + 战略文档 v0 + 派首批任务
-  → 稳态循环（占 90%）：OPT 领单 ReAct ──产出──→ SNT 结算
+Gateway 接入（自然语言 + 附件；只做协议级分类：profile/benchmark 判定 + 先验推荐）
+  → CDR 首轮唤醒（任务理解）：理解客户原始需求 → 产 GoalSpec（落盘 goal.json）
+        → 假设树 v0 + 战略文档 v0 + 拆分派首批任务
+        → 派单三要素：max_wall_s（何时截止）+ notes（注意事项：边界/风险/禁止动作）
+          + self（简单任务 CDR 当场自执行，不占操作员名额）
+  → 稳态循环（占 90%）：操作员A/B/C…并行领单 ReAct ──产出──→ SNT 结算
+        │ 任务状态全程落在作战地图（frontier.sqlite / hypothesis.sqlite / strategy.md / events.jsonl）
         │ 无触发器：循环继续，CDR 不在场
-        │ 有触发器：唤醒 CDR（信念结算→决策→派单→改文档→休眠）
+        │ 有触发器：唤醒 CDR（信念结算→随时调整方向→再派单→改文档→休眠）
   → 卡壳：SNT 唤醒 COH → 诊断 → 要求 CDR 重写战略文档 → COH 退出
   → 收敛：CDR 请求交付 → SNT 排空在途后勤 → VRF 核验
         → 通过：结束（verified_flags 落账）；否决：退回任务池

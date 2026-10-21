@@ -233,6 +233,7 @@ CREATE TABLE IF NOT EXISTS intents (
     asset_scope TEXT DEFAULT '',        -- 角色意图挂靠的资产（去重键 + claim 过滤键）
     lane TEXT DEFAULT 'main',           -- 执行通道：main（主路径）| logistics（后台后勤）
     hypothesis TEXT DEFAULT '',         -- 挂靠假设（v4 假设树节点 id；空=无信念挂钩）
+    notes TEXT DEFAULT '',              -- 指挥官派单时的注意事项（边界/风险/禁止动作）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -275,6 +276,7 @@ class Intent:
     tools: str = ""  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
     lane: str = "main"  # 执行通道：main 主路径 / logistics 后台后勤
     hypothesis: str = ""  # 挂靠假设 id（v4 假设树；空=无信念挂钩）
+    notes: str = ""  # 指挥官派单时的注意事项（边界/风险/禁止动作）
     fail_reason: str = ""
 
 
@@ -1093,6 +1095,9 @@ class Frontier:
         if "hypothesis" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN hypothesis TEXT DEFAULT ''")
+        if "notes" not in cols:
+            with contextlib.suppress(sqlite3.Error):
+                c.execute("ALTER TABLE intents ADD COLUMN notes TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         # 多 worker 线程会并发认领/结算；给足锁等待（默认 5s 太短：一次长写事务
@@ -1121,6 +1126,7 @@ class Frontier:
         tools: str = "",  # 意图级工具覆盖（逗号分隔插件名；空=profile 默认）
         lane: str = "main",  # 执行通道：main 主路径 / logistics 后台后勤
         hypothesis: str = "",  # 挂靠假设（v4 假设树节点 id）
+        notes: str = "",  # 指挥官派单时的注意事项（边界/风险/禁止动作）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
@@ -1128,8 +1134,8 @@ class Frontier:
             c.execute(
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
                                         source,depends_on,subgoal,max_steps,max_wall_s,
-                                        role,asset_scope,lane,hypothesis,tools,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                        role,asset_scope,lane,hypothesis,notes,tools,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -1146,6 +1152,7 @@ class Frontier:
                     asset_scope[:300],
                     lane[:20],
                     hypothesis[:40],
+                    notes[:500],
                     tools[:300],
                     now,
                     now,
@@ -1321,7 +1328,11 @@ class Frontier:
                     " VALUES (?,?,?)",
                     (_scope, row["id"], time.time()),
                 )
-        d = dict(row)
+        return self._intent_from_row(row, int(row["attempts"]) + 1)
+
+    @staticmethod
+    def _intent_from_row(row: sqlite3.Row, attempts: int) -> Intent:
+        d = dict(row)  # sqlite3.Row 的 `in` 按值迭代不按键——必须 dict 化后 get（老库缺列兼容）
         return Intent(
             id=row["id"],
             title=row["title"],
@@ -1330,8 +1341,7 @@ class Frontier:
             priority=row["priority"],
             depth=row["depth"],
             status="running",
-            attempts=row["attempts"] + 1,
-            # sqlite3.Row 的 `in` 按值迭代不按键——必须 dict 化后 get（老库缺列兼容）
+            attempts=attempts,
             source=d.get("source", "planner"),
             depends_on=d.get("depends_on", "") or "",
             max_steps=int(d.get("max_steps", 0) or 0),
@@ -1341,8 +1351,35 @@ class Frontier:
             tools=d.get("tools", "") or "",
             lane=d.get("lane", "main") or "main",
             hypothesis=d.get("hypothesis", "") or "",
+            notes=d.get("notes", "") or "",
             fail_reason=d.get("fail_reason", "") or "",
         )
+
+    def claim_by_id(self, iid: str) -> Intent | None:
+        """按 id 认领指定意图（指挥官自执行路径：派单后立即自取，不抢队列）。
+
+        与 claim_next 同一事务语义（BEGIN IMMEDIATE + 租约），仅 open 可领。
+        """
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT * FROM intents WHERE id=? AND status='open'", (iid,)
+            ).fetchone()
+            if row is None:
+                return None
+            c.execute(
+                "UPDATE intents SET status='running', attempts=attempts+1, updated_at=?"
+                " WHERE id=? AND status='open'",
+                (time.time(), iid),
+            )
+            _scope = str(row["asset_scope"] or "")
+            if _scope:
+                c.execute(
+                    "INSERT OR REPLACE INTO asset_leases (asset_scope, intent_id, acquired_at)"
+                    " VALUES (?,?,?)",
+                    (_scope, iid, time.time()),
+                )
+        return self._intent_from_row(row, int(row["attempts"]) + 1)
 
     def find_duplicate(self, role: str, asset_scope: str) -> bool:
         """同 asset_scope+role 已有未结算意图 → True（去重：防多轮规划重复派同一资产）。"""
@@ -1877,12 +1914,21 @@ def build_intent_objective(
         for r in _done_logi[:3]:
             _lines.append(f"- {r['title']}: {str(r.get('result', ''))[:160]}")
         logistics_done = "\n".join(_lines)
+    # 指挥官派单元数据：截止（意图级墙钟预算）与注意事项（边界/风险/禁止动作）——
+    # 与 GoalSpec 的操作约束互补：约束是任务级，notes 是单意图级的临场纪律
+    dispatch_meta = ""
+    _notes = (getattr(intent, "notes", "") or "").strip()
+    if _notes:
+        dispatch_meta += f"\n注意事项：{_notes[:400]}"
+    _mws = int(getattr(intent, "max_wall_s", 0) or 0)
+    if _mws > 0:
+        dispatch_meta += f"\n时限：本任务预计 {_mws} 秒内完成（到点即结算，不要恋战）"
     return f"""【总目标】
 {global_objective}
 
 【当前意图】{intent.title}
 目标：{intent.goal}
-完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}
+完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}{dispatch_meta}
 {handoff}{techniques}
 
 【近期相关结果（避免重复踩坑）】
@@ -1990,6 +2036,7 @@ async def run_frontier(
     enable_delivery: bool = False,  # 交付门（dag/solve 主入口开启；直调默认关）
     delivery_max_attempts: int = 1,  # 交付门最多补几次验证任务（防无限追加）
     enable_commander: bool = True,  # v4 Commander（假设树+战略文档+事件唤醒；benchmark/stages 强制关）
+    scope_allow: list[str] | None = None,  # goal asset_scope 白名单（entries+SECPT_SCOPE_ALLOW；空=跳过校验）
 ) -> dict:
     """意图驱动主循环。返回汇总（chains/flags/wall）。
 
@@ -2023,20 +2070,18 @@ async def run_frontier(
         llm = llm or _prod
         planner_llm = planner_llm or _prod
 
-    # 目标拆解层（阶段一）：objective 非结构化（未经 render_goal_system）且非 benchmark 时
-    # 先拆解再规划；已结构化则幂等跳过（solve 已拆过的场景不重复调 LLM）
+    # 目标理解归指挥官（首轮唤醒产 goal）。三个来源按序：
+    # ① resume：goal.json 已落盘 → 直接渲染续用；② legacy 角色骨架 / stages 链：
+    # 骨架要先于指挥官搭好，入口理解兜底；③ 其余：标记 need_goal，首轮唤醒交指挥官。
+    # benchmark 是程序化协议，不拆解；SECPT_GOALS=0 关闭。
     from secpt.core.orchestrator.goals import (
         decompose_objective,
+        filter_goal_assets,
         is_rendered,
+        load_goal,
         render_goal_system,
         seed_goal_assets,
     )
-
-    goal = None
-    if profile != "benchmark" and not is_rendered(objective):
-        goal = await decompose_objective(objective, llm=llm, model=model)
-        seed_goal_assets(goal)
-        objective = render_goal_system(goal)
 
     # F1：base 先定（意图库按任务隔离），库即 var/jobs/<base>/frontier.sqlite——
     # 并发任务互不可见；resume 同 base 续接同一 todolist
@@ -2062,6 +2107,27 @@ async def run_frontier(
             print(f"[frontier] 假设树初始化失败，降级 v3 planner: {_e}", flush=True)
             tree = None
             watch = None
+
+    # 目标理解三来源（见上方注释）：resume 落盘复用 > legacy/stages 入口兜底 > 指挥官首轮
+    goal = None
+    need_goal_pending = False
+    if (
+        profile != "benchmark"
+        and not is_rendered(objective)
+        and os.environ.get("SECPT_GOALS", "1") != "0"
+    ):
+        _g = load_goal(base)
+        if _g is not None:
+            goal = _g
+            objective = render_goal_system(goal)
+            print("[commander] 目标理解：沿用已落盘 goal.json（resume 续接）", flush=True)
+        elif role_plan or stages:
+            goal = await decompose_objective(objective, llm=llm, model=model)
+            seed_goal_assets(goal)
+            objective = render_goal_system(goal)
+        elif enable_commander and tree is not None:
+            need_goal_pending = True  # 指挥官首轮唤醒完成理解+拆分
+            print("[commander] 目标理解：待指挥官首轮唤醒完成", flush=True)
 
     # 团队模式（role_plan）：折叠 Specialist 固定 DAG 为角色意图骨架——
     # recon 1 条（role=recon）+ 每资产 1 条 exploit（role=exploit, depends_on=recon）
@@ -2153,6 +2219,7 @@ async def run_frontier(
     idle_rounds = 0
     # v4 值守层：待消费唤醒信号（FIFO，Commander 每次取一条）；tree/watch 在下方初始化
     pending_signals: list = []
+    _self_exec_pending: list[str] = []  # 指挥官自执行任务的意图 id（派单后由主循环内联跑）
     commander_decisions: list = []
     stall_wake_budget = 2  # 停滞触发的额外唤醒上限（防无信念增量的无限重规划）
     max_new_per_wake = 3  # Commander 每次唤醒派单上限
@@ -2198,8 +2265,10 @@ async def run_frontier(
         """规划者轮（v4）：值守层信号驱动 Commander；无树/降级时走 v3 planner。
 
         人工接管（direct 未完成）/等待交付复验时暂停。
+        首轮 need_goal：Commander 响应中的 goal → 白名单过滤 → 落盘 goal.json
+        → 种子资产入图 → objective 替换为结构化文本（此后所有简报/任务共享）。
         """
-        nonlocal idle_rounds, stall_wake_budget, delivery_pending
+        nonlocal idle_rounds, stall_wake_budget, delivery_pending, objective, need_goal_pending
         signal = None  # 本轮唤醒信号（Commander 分支赋值；legacy planner 兜底 None）
         if fr.has_open_direct():
             return 0  # 模式②：规划者暂停
@@ -2215,6 +2284,8 @@ async def run_frontier(
             from secpt.core.orchestrator.commander import commander_round
 
             signal = pending_signals.pop(0) if pending_signals else None
+            _send_need_goal = need_goal_pending
+            need_goal_pending = False  # 只给首轮一次理解机会；失败即降级原文
             outcome = await commander_round(
                 objective,
                 fr,
@@ -2226,7 +2297,32 @@ async def run_frontier(
                 max_new=max_new_per_wake,
                 next_depth=next_depth,
                 asset_pool=list(default_assets or []),
+                need_goal=_send_need_goal,
             )
+            # 首轮任务理解产物：过滤（输入可信边界）→ 落盘 → 种子资产 → 结构化
+            if outcome.goal is not None:
+                _allow_src = [a for a in (scope_allow or []) if a and a.strip()]
+                if _allow_src:
+                    outcome.goal.asset_scope = filter_goal_assets(
+                        outcome.goal.asset_scope, _allow_src
+                    )
+                with contextlib.suppress(Exception):
+                    seed_goal_assets(outcome.goal)
+                with contextlib.suppress(Exception):
+                    from secpt.core.orchestrator.goals import save_goal
+
+                    save_goal(base, outcome.goal)
+                objective = render_goal_system(outcome.goal)
+                print(
+                    f"[commander] 任务理解完成：assets={len(outcome.goal.asset_scope)} "
+                    f"constraints={len(outcome.goal.constraints)} "
+                    f"steps={len(outcome.goal.attack_steps)}（goal.json 已落盘）",
+                    flush=True,
+                )
+            # 指挥官自执行的简单任务：入池后立即自取（主循环内联跑，不占操作员）
+            for _d in outcome.tasks_detail:
+                if _d.get("self") and _d.get("iid"):
+                    _self_exec_pending.append(_d["iid"])
             commander_decisions.append(outcome)
             _parent_event(
                 base,
@@ -3193,6 +3289,22 @@ async def run_frontier(
         if _signal_plan or (can_plan and (starving or main_open == 0)):
             await _maybe_plan()
             rounds += 1
+            main_open = fr.count_open(lane="main")
+            # 指挥官自执行的简单任务：派单入池后立即按 id 自取内联跑掉——
+            # 不占操作员名额，走与操作员完全相同的 _run_one 结算路径（含假设信念更新）
+            while _self_exec_pending:
+                _siid = _self_exec_pending.pop(0)
+                _si = fr.claim_by_id(_siid)
+                if _si is None:
+                    continue  # 已被他人领走或状态异常
+                try:
+                    _sans = await _run_one(_si)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as _se:
+                    _sans = _settle_worker_crash(_si, _se)
+                if _sans:
+                    _apply_answer(_sans)
             main_open = fr.count_open(lane="main")
         # 交付门：有候选成果/复验等待/自然收敛时，由交付体决定是否结束。
         if enable_delivery and main_open == 0 and (delivery_pending or delivery_wait):

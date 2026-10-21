@@ -229,3 +229,48 @@ def render_goal_system(goal: GoalSpec) -> str:
     if goal.attack_steps:
         parts.append("\n\n【攻击步骤参考】\n" + "\n".join(f"- {s}" for s in goal.attack_steps))
     return "".join(parts)
+
+
+def goal_path(base_job_id: str) -> Path:
+    """任务级目标文件路径（与 frontier/hypothesis 库同目录，按任务隔离）。"""
+    from secpt.core.job.resume import jobs_dir
+
+    return jobs_dir() / base_job_id / "goal.json"
+
+
+def save_goal(base_job_id: str, goal: GoalSpec) -> Path:
+    """原子落盘 GoalSpec（tmp + replace）——指挥官首轮理解的产物，resume 直接复用。"""
+    p = goal_path(base_job_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "objective": goal.objective,
+                "constraints": list(goal.constraints),
+                "asset_scope": list(goal.asset_scope),
+                "attack_steps": list(goal.attack_steps),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    tmp.replace(p)
+    return p
+
+
+def load_goal(base_job_id: str) -> GoalSpec | None:
+    """读取已落盘的 GoalSpec（resume 场景：不重复拆解）。损坏/缺失返回 None。"""
+    p = goal_path(base_job_id)
+    if not p.is_file():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return GoalSpec(
+            objective=str(d.get("objective") or ""),
+            constraints=[str(c) for c in (d.get("constraints") or [])],
+            asset_scope=[str(a) for a in (d.get("asset_scope") or [])],
+            attack_steps=[str(s) for s in (d.get("attack_steps") or [])],
+        )
+    except (OSError, ValueError, TypeError):
+        return None

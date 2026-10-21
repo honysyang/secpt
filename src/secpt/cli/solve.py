@@ -346,16 +346,12 @@ def solve(
     prior_name = prior or _auto_prior(objective)
     gt = _find_ground_truth(challenge_dir)
 
-    from secpt.core.orchestrator.goals import (
-        decompose_objective,
-        filter_goal_assets,
-        is_rendered,
-        render_goal_system,
-        seed_goal_assets,
-    )
+    from secpt.core.orchestrator.goals import is_rendered
 
-    # 统一理解智能体（路由+拆解一次产出；SECPT_UNDERSTANDING=0 回退旧两段式）
-    # profile 自动判定（用户没指定时）；理解产多标签 + GoalSpec + 先验推荐
+    # 入口只做协议级分类（profile/benchmark 判定 + 先验推荐 + 多标签合并），
+    # 保证 benchmark 协议与预算/工具链在任务开跑前就位。
+    # 任务理解（GoalSpec 拆解）归 Commander：首轮唤醒产出、落盘 goal.json，
+    # 由 frontier 内部完成（SECPT_GOALS=0 关闭；benchmark/stages 豁免）。
     understanding = None
     _u_on = os.environ.get("SECPT_UNDERSTANDING", "1") != "0"
     if (profile is None or profile == "auto") and _u_on and not is_rendered(objective):
@@ -364,7 +360,7 @@ def solve(
         understanding = asyncio.run(understand_task(objective, llm=None, model=model))
         profile = understanding.profiles[0]
         print(
-            f"[understand] 统一理解 → profiles={understanding.profiles}"
+            f"[understand] 协议分类 → profiles={understanding.profiles}"
             f"{'（多标签）' if len(understanding.profiles) > 1 else ''}"
             f" priors={understanding.priors or '（无）'}"
             f"{'  ' + understanding.notes if understanding.notes else ''}"
@@ -375,40 +371,17 @@ def solve(
         profile = asyncio.run(route_objective(objective))
         print(f"[solve] profile 自动路由 → {profile}")
 
-    # 目标拆解层：客户自然语言 → 结构化 GoalSpec，objective 替换为结构化文本。
-    # 理解智能体已产 GoalSpec 时直接沿用（不再二次 LLM）；benchmark 跑分是程序化
-    # 协议不拆解；SECPT_GOALS=0 跳过（与 SECPT_EXPERIENCE 等开关风格一致）
-    goals_on = os.environ.get("SECPT_GOALS", "1") != "0" and profile != "benchmark"
+    if understanding is not None and understanding.priors and not prior:
+        # 先验推荐：理解智能体产物（已过存在性校验）；用户 --prior 显式指定时最高优先
+        prior_name = understanding.priors[0]
+        print(f"[understand] 先验推荐 → {prior_name}")
+
     _goals_why = (
         "benchmark 豁免（程序化协议）"
         if profile == "benchmark"
         else f"SECPT_GOALS={os.environ.get('SECPT_GOALS', '1')}"
     )
-    print(f"[solve] 目标拆解层：{'启用' if goals_on else '关闭'}（{_goals_why}）")
-    if goals_on and not is_rendered(objective):
-        if understanding is not None:
-            goal = understanding.goal  # 理解智能体产物：零额外调用
-        else:
-            goal = asyncio.run(decompose_objective(objective, llm=None, model=model))
-        # 输入可信边界：拆解层产出的 asset_scope 逐项过白名单（与 bash scope 同源 =
-        # entries + SECPT_SCOPE_ALLOW），防污染题面经注入产虚假资产入图谱。
-        # entries 与 SECPT_SCOPE_ALLOW 双空时整段跳过校验（单题无入口场景不误伤）
-        _env_allow = os.environ.get("SECPT_SCOPE_ALLOW", "")
-        _allow_src = [e for e in entries if e and e.strip()] + [
-            a for a in _env_allow.split(",") if a.strip()
-        ]
-        goal.asset_scope = filter_goal_assets(goal.asset_scope, _allow_src)
-        seeded = seed_goal_assets(goal)
-        objective = render_goal_system(goal)
-        print(
-            f"[goals] 目标拆解：asset_scope={len(goal.asset_scope)} "
-            f"constraints={len(goal.constraints)} attack_steps={len(goal.attack_steps)} "
-            f"种子资产 {seeded} 个"
-        )
-        # 先验：理解推荐优先（已过存在性校验）；用户 --prior 显式指定时最高优先
-        if understanding is not None and understanding.priors and not prior:
-            prior_name = understanding.priors[0]
-            print(f"[understand] 先验推荐 → {prior_name}")
+    print(f"[solve] 目标拆解：交由指挥官首轮唤醒完成（{_goals_why}）")
 
     job_id = uuid.uuid4().hex[:8]
 

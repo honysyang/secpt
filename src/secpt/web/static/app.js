@@ -91,7 +91,7 @@ function buildRounds(events){
 }
 function tryFmt(s){try{return JSON.stringify(JSON.parse(s),null,1)}catch{return s}}
 function actorOf(e){return esc(actorName(e.actor||"agent"))}
-/* 职名映射（ARCHITECTURE.md 规范）：actor 原始串 → 职名·说明；未知 actor 视为作业实例 */
+/* 职名映射（ARCHITECTURE.md 规范）：actor 原始串 → 职名·说明；未知 actor 视为操作员实例（A/B/C…并行班次） */
 function actorName(raw){
   const r=String(raw).toLowerCase();
   if(r.includes("commander"))return "CDR 指挥官";
@@ -99,7 +99,7 @@ function actorName(raw){
   if(r.includes("logistics")||r.includes("quartermaster"))return "QM 军需";
   if(r.includes("coach"))return "COH 教练";
   if(r.includes("verifier")||r.includes("delivery")||r.includes("gate"))return "VRF 核验";
-  return "OPT " + String(raw).slice(0,12);  // 作业实例（job_id 班次）
+  return "操作员 " + String(raw).slice(0,10);  // 操作员实例（job_id 班次）
 }
 
 /* ── 对话流渲染 ── */
