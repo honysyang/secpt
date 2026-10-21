@@ -357,9 +357,6 @@ def solve_entry(
     ),
     wall: int = typer.Option(-1, "--wall", help="墙钟上限秒：-1=profile 默认，0=不限"),
     steps: int = typer.Option(0, "--steps", help="步数上限：0=profile 默认"),
-    mode: str = typer.Option(
-        "auto", "--mode", help="执行模式：auto（默认）/ single / frontier / stages"
-    ),
     no_judge: bool = typer.Option(False, "--no-judge", help="跑完不自动评判"),
     no_learn: bool = typer.Option(False, "--no-learn", help="跑完不自动沉淀经验"),
     no_watch: bool = typer.Option(False, "--no-watch", help="不打印实时交互日志（脚本/CI 用）"),
@@ -379,7 +376,6 @@ def solve_entry(
         fallback=fallback,
         wall=wall,
         steps=steps,
-        mode=mode,
         judge_enable=not no_judge,
         learn_enable=not no_learn,
         verbose=verbose,
