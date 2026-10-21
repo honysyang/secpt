@@ -196,6 +196,7 @@ class _Scripted:
 
 def test_delivery_rollback_lowers_confirmed_confidence(env, monkeypatch) -> None:
     """复验尝试耗尽仍未通过 → confirmed 假设置信度下调 + [rollback] 证据。"""
+    monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)  # 非 benchmark 环境：走复验通路
     monkeypatch.setenv("SECPT_ORCH_DELIVERY", "1")
     calls = {"n": 0}
 

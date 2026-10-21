@@ -1997,10 +1997,9 @@ async def run_frontier(
 
     from secpt.cli.engine_runner import resolve_models, run_engine
 
-    if profile == "benchmark":
-        enable_logistics = False
-        enable_delivery = False
-        enable_commander = False
+    # v4.2 去协议降级：benchmark 也走完整智能层（Commander/后勤/交付门）——
+    # 架构不应按任务类型打折；跑分协议纪律由 benchmark 先验（objective 铁律）
+    # 与台账对账保证，而非关闭回路。env 开关仍可按需关闭。
     if stages:
         enable_commander = False  # 清单型链路保持逐段执行语义
 

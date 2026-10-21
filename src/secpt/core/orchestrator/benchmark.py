@@ -1028,12 +1028,16 @@ async def run_benchmark(
             model=model,
             frontier=fr,
             max_workers=max_parallel,
-            # 清单型任务关 planner（复评修复）：预置题即全部工作，规划层只在
-            # "探索型"入口（hunt）才有意义——此前未传 max_intents 撞缺省 60，
-            # 题数<60 时队列排空后 planner 会给已完成题产"幽灵意图"（容器全关
-            # 任务还在跑的直接原因）；钉死 total==max → can_plan 恒 False
-            max_intents=len(claimed),
+            # 清单型任务关 planner（复评修复）的教训仍在：无余量时 planner 会给
+            # 已完成题产"幽灵意图"。v4.2 去协议降级：预置题 + 意图余量——
+            # Commander 可在余量内补产任务（换路线/后勤委托/复验），幽灵意图由
+            # 轮前对账与台账对账兜底。余量默认 8，SECPT_BENCH_EXTRA_INTENTS 可调。
+            max_intents=len(claimed)
+            + max(0, int(os.environ.get("SECPT_BENCH_EXTRA_INTENTS", "8") or 8)),
             max_rounds=len(picked) + 5,
+            enable_commander=os.environ.get("SECPT_ORCH_COMMANDER", "1") != "0",
+            enable_logistics=os.environ.get("SECPT_ORCH_LOGISTICS", "1") != "0",
+            enable_delivery=os.environ.get("SECPT_ORCH_DELIVERY", "1") != "0",
             stop_on_first_flag=False,  # 跑分模式：解完所有已入队题目，不因单个 flag 收敛
             on_started=_on_started,  # P0-2：意图真正开跑时才置 running
             on_settled=_on_settled,  # ② 结算收尾：确定性 close 本题容器
