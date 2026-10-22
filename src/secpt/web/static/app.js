@@ -24,6 +24,7 @@ const AGENT_IC="⬡";
 const ACOLORS=["#9E8CF0","#6BA8E8","#3ECF8E","#E8792B","#E86AA6","#E0B04A"];
 /* 终端/文件卡片的高保真资源：内联 SVG（不引外链，离线可用） */
 const ROBOT_SVG=`<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3.5" y="7.5" width="17" height="12" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="13.4" r="1.35" fill="currentColor"/><circle cx="15" cy="13.4" r="1.35" fill="currentColor"/><path d="M9.5 16.6h5M12 7.5V4.2M8.6 4.2h6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+const USER_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.8 20c.6-3.7 3.6-5.8 7.2-5.8s6.6 2.1 7.2 5.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
 const FILE_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.5 3v5.5H19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 /* 卡片展开态 + 复制缓冲：key = job:seq（避免把大段代码塞进 data-* 属性） */
 const FILE_BUF=new Map();
@@ -141,53 +142,51 @@ function renderFeed(){
     const calls=r.events.filter(e=>e.type==="tool_call");
     const results=new Map(r.events.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
     const dur=fmtDur(r.t1-r.t0);
-    html+=`<div class="rsep ${r.open?"open":""}" data-act="r-toggle" data-r="${r.round}">
-      <b>ROUND ${r.round}</b><span>已工作 ${dur}</span><span>·</span><span>${fmtTok(r.tokens)} tok</span><span>·</span><span>${fmtCny(r.cost)}</span><span>·</span><span>${r.tools} tools</span>${r.flags?`<span style="color:var(--flag)">🏁${r.flags}</span>`:""}<span class="arr">▼</span></div>`;
-    if(!r.open){
-      html+=`<div style="font-size:12.5px;color:var(--fg3);margin:0 0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.summary||"(无文本输出)")}</div>`;
-      continue;
-    }
-    const items=[
-      ...calls.map(c=>({t:"tool",o:{call:c,result:results.get(c.payload.call_id)},seq:c.seq})),
-      ...r.events.filter(e=>["assistant","user_msg","finding","error","loop_phase","status_change","plan_event","intent_event"].includes(e.type)&&(e.type!=="assistant"||e.payload.content)).map(e=>({t:"ev",o:e,seq:e.seq}))
-    ].sort((a,b)=>a.seq-b.seq);
-    for(const i of items){
-      if(i.t==="tool"){html+=toolItemHTML(i.o);continue}
-      const e=i.o,p=e.payload||{};
-      if(e.type==="assistant"){
-        html+=`<div class="msg-agent thought"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor(e.actor)}">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
-      }else if(e.type==="user_msg"){
-        const kindLabel={direct:"你 · 追问/指令",new_task:"你 · 下达任务",steer:"你 · 操舵",coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"msg");
-        html+=`<div class="msg-user"><div class="bub"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div></div>`;
-      }else if(e.type==="finding"){
-        html+=`<div class="milestone"><span class="mk">${p.kind==="flag"?"🏁":"⚑"}</span><span class="mv">${esc(p.value)}</span>${p.evidence?`<div class="sub">evidence · ${esc(p.evidence)}</div>`:""}</div>`;
-      }else if(e.type==="error"){
-        html+=`<div class="milestone finding"><span class="mk">⚠</span><span class="mv">${esc(p.message||JSON.stringify(p))}</span></div>`;
-      }else if(e.type==="loop_phase"){
-        html+=`<div class="sysnote">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
-      }else if(e.type==="status_change"){
-        html+=`<div class="sysnote">status → ${esc(p.status)}</div>`;
-      }else if(e.type==="plan_event"){
-        const w=e.payload.wake||{};const wakeTxt=w.detail||w.kind||"常规规划";
-        const bits=[`决策 <b>${esc(p.decision||"continue")}</b>`,`派 <b>${p.tasks||0}</b> 个任务`];
-        if(p.beliefs)bits.push(`信念结算 ${p.beliefs}`);
-        if(p.hypotheses)bits.push(`新假设 ${p.hypotheses}`);
-        if(p.drift_rejected)bits.push(`<span style="color:var(--warn)">防漂移拒收</span>`);
-        const planned=(p.planned||[]).map(t=>`<li>${esc(t.title)}<span class="lane ${t.lane==="main"?"lane-main":"lane-logistics"}">${t.lane==="main"?"主":"后勤"}</span></li>`).join("");
-        html+=`<div class="msg-agent thought plan"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor("commander")}">${actorOf({actor:"commander"})}</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
-      }else if(e.type==="intent_event"){
-        const st=e.payload.status;
-        const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
-        const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
-        html+=`<div class="msg-agent act"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor||"sentinel")}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
+    let body="";
+    if(r.open){
+      const items=[
+        ...calls.map(c=>({t:"tool",o:{call:c,result:results.get(c.payload.call_id)},seq:c.seq})),
+        ...r.events.filter(e=>["assistant","user_msg","finding","error","loop_phase","status_change","plan_event","intent_event"].includes(e.type)&&(e.type!=="assistant"||e.payload.content)).map(e=>({t:"ev",o:e,seq:e.seq}))
+      ].sort((a,b)=>a.seq-b.seq);
+      /* 同一侧的内容合并成 turn：用户输入开启新 turn，其后系统响应层层挂在这个 turn 下 */
+      const turns=[];
+      for(const i of items){
+        if(i.t==="ev"&&isUserEvent(i.o))turns.push({user:i.o,items:[]});
+        else{if(!turns.length)turns.push({user:null,items:[]});turns[turns.length-1].items.push(i)}
+      }
+      for(const t of turns){
+        if(t.user)body+=turnUserHTML(t.user);
+        if(t.items.length){
+          body+=`<div class="turn sys">
+            <div class="turn-rail"><span class="turn-avatar sys">${ROBOT_SVG}</span></div>
+            <div class="turn-body">${turnCapHTML(t.items)}
+              <div class="turn-items">${t.items.map(itemHTML).join("")}</div>
+            </div></div>`;
+        }
       }
     }
+    html+=`<section class="round-panel ${r.open?"open":""}" data-r="${r.round}">
+      <div class="round-head" data-act="r-toggle" data-r="${r.round}">
+        <span class="ricon">▤</span><b>ROUND ${r.round}</b>
+        <span class="rmeta">已工作 ${dur}</span><span class="rdot">·</span>
+        <span class="rmeta">${fmtTok(r.tokens)} tok</span><span class="rdot">·</span>
+        <span class="rmeta">${fmtCny(r.cost)}</span><span class="rdot">·</span>
+        <span class="rmeta">${r.tools} tools</span>
+        ${r.flags?`<span class="rflag">🏁${r.flags}</span>`:""}
+        <span class="rsum">${esc(r.summary||"(无文本输出)")}</span>
+        <span class="arr">▼</span>
+      </div>
+      ${r.open?`<div class="round-body">${body||'<div class="faint" style="font-size:12px">（本轮无展开内容）</div>'}</div>`:""}
+    </section>`;
   }
   feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>`;
   $$("[data-act=r-toggle]",feed).forEach(h=>h.onclick=()=>{
-    const rid=+h.dataset.r;const open=!h.classList.contains("open");
-    state.roundOpen[rid]=open;
-    h.classList.toggle("open",open);toggleRoundBody(h,open);applyFilter();
+    const rid=+h.dataset.r,panel=h.closest(".round-panel");
+    const open=!panel.classList.contains("open");
+    if(!open){panel.classList.remove("open");state.roundOpen[rid]=false;return}
+    state.roundOpen[rid]=true;
+    const top=feed.scrollTop,follow=state.follow;
+    state.follow=false;renderFeed();feed.scrollTop=top;state.follow=follow;
   });
   $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>{
     const k=state.jobId+":t:"+h.dataset.k;
@@ -219,6 +218,81 @@ function renderFeed(){
   applyFilter();
   if(state.follow)feed.scrollTop=feed.scrollHeight;
 }
+/* 用户直投消息（coach/budget/info 是系统注入，不算用户侧） */
+function isUserEvent(e){
+  if(e.type!=="user_msg")return false;
+  const k=String((e.payload||{}).kind||"msg");
+  return !["coach","budget","info"].includes(k);
+}
+const USER_KIND_LBL={direct:"追问/指令",new_task:"下达任务",steer:"操舵",msg:"消息"};
+function turnUserHTML(e){
+  const p=e.payload||{};
+  const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
+  return `<div class="turn user">
+    <div class="turn-rail"><span class="turn-avatar user">${USER_SVG}</span></div>
+    <div class="turn-body">
+      <div class="turn-cap"><b>用户输入</b><span>${esc(lbl)} · ${fmtT(e.ts)}</span></div>
+      <div class="ubub">${esc(p.content)}</div>
+    </div></div>`;
+}
+function turnCapHTML(items){
+  let th=0,tool=0,file=0,act=0,note=0;
+  for(const i of items){
+    if(i.t==="tool"){i.o.call.payload.tool==="write_file"?file++:tool++}
+    else{
+      const t=i.o.type;
+      if(t==="assistant"||t==="plan_event")th++;
+      else if(t==="finding"||t==="error"||t==="intent_event")act++;
+      else note++;
+    }
+  }
+  const bits=[];
+  if(th)bits.push(`${th} 条思考`);
+  if(tool)bits.push(`${tool} 次终端`);
+  if(file)bits.push(`${file} 个文件`);
+  if(act)bits.push(`${act} 条成果/结算`);
+  if(note)bits.push(`${note} 条状态`);
+  return `<div class="turn-cap"><b>系统响应</b><span>${bits.join(" · ")||"过程记录"}</span></div>`;
+}
+function itemHTML(i){
+  if(i.t==="tool")return toolItemHTML(i.o);
+  const e=i.o,p=e.payload||{};
+  if(e.type==="assistant"){
+    return `<div class="msg-agent thought turn-item"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor(e.actor)}">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
+  }
+  if(e.type==="user_msg"){
+    const kindLabel={coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"系统消息");
+    return `<div class="inject-note turn-item"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
+  }
+  if(e.type==="finding"){
+    return `<div class="milestone turn-item"><span class="mk">${p.kind==="flag"?"🏁":"⚑"}</span><span class="mv">${esc(p.value)}</span>${p.evidence?`<div class="sub">evidence · ${esc(p.evidence)}</div>`:""}</div>`;
+  }
+  if(e.type==="error"){
+    return `<div class="milestone finding turn-item"><span class="mk">⚠</span><span class="mv">${esc(p.message||JSON.stringify(p))}</span></div>`;
+  }
+  if(e.type==="loop_phase"){
+    return `<div class="sysnote turn-item">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
+  }
+  if(e.type==="status_change"){
+    return `<div class="sysnote turn-item">status → ${esc(p.status)}</div>`;
+  }
+  if(e.type==="plan_event"){
+    const w=e.payload.wake||{};const wakeTxt=w.detail||w.kind||"常规规划";
+    const bits=[`决策 <b>${esc(p.decision||"continue")}</b>`,`派 <b>${p.tasks||0}</b> 个任务`];
+    if(p.beliefs)bits.push(`信念结算 ${p.beliefs}`);
+    if(p.hypotheses)bits.push(`新假设 ${p.hypotheses}`);
+    if(p.drift_rejected)bits.push(`<span style="color:var(--warn)">防漂移拒收</span>`);
+    const planned=(p.planned||[]).map(t=>`<li>${esc(t.title)}<span class="lane ${t.lane==="main"?"lane-main":"lane-logistics"}">${t.lane==="main"?"主":"后勤"}</span></li>`).join("");
+    return `<div class="msg-agent thought plan turn-item"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor("commander")}">${actorOf({actor:"commander"})}</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
+  }
+  if(e.type==="intent_event"){
+    const st=e.payload.status;
+    const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
+    const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
+    return `<div class="msg-agent act turn-item"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor||"sentinel")}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
+  }
+  return "";
+}
 /* 文件卡展开：正文按需回源（大段代码不进首屏 DOM） */
 async function toggleFileCard(card){
   if(!card)return;
@@ -238,10 +312,6 @@ async function toggleFileCard(card){
       body.dataset.filled="1";COPY_BUF.set(key,d.content);
     }else body.innerHTML=`<div class="file-err">${esc(d.error||"读取失败")}</div>`;
   }catch(e){body.innerHTML=`<div class="file-err">${esc("读取失败："+e.message)}</div>`}
-}
-function toggleRoundBody(h,open){
-  let n=h.nextElementSibling;
-  while(n&&!n.classList.contains("rsep")){n.style.display=open?"":"none";n=n.nextElementSibling}
 }
 
 /* ── 任务列表（工作台左列）：父子任务合并为一行 ──
@@ -409,7 +479,7 @@ function termCardHTML(call,result){
   const out=result?String(result.payload.preview||""):"";
   const key=`${state.jobId}:${call.seq}`;
   COPY_BUF.set(key,`$ ${cmd}\n${out}`);
-  return `<div class="term-card ${result?"":"pending"}">
+  return `<div class="term-card turn-item ${result?"":"pending"}">
     <div class="term-head">
       <span class="tlights"><i></i><i></i><i></i></span>
       <span class="cmd-name">bash</span>
@@ -448,7 +518,7 @@ function fileCardHTML(call,result){
   const open=state.openKeys.has(key);
   const cached=FILE_BUF.get(key);
   const bodyHTML=open?(cached!=null?`<pre class="code"><code>${esc(cached)}</code></pre>`:`<div class="file-loading">加载文件内容…</div>`):"";
-  return `<div class="file-card ${open?"open":""}" data-key="${key}" data-sub="${esc(sub)}" data-path="${esc(path)}" data-full="${cached!=null?"1":"0"}">
+  return `<div class="file-card turn-item ${open?"open":""}" data-key="${key}" data-sub="${esc(sub)}" data-path="${esc(path)}" data-full="${cached!=null?"1":"0"}">
     <div class="file-head" data-act="file-toggle">
       <span class="ficon">${FILE_SVG}</span>
       <span class="fpath" title="${esc(path||"(未知路径)")}">${esc(path||"(未知路径)")}</span>
@@ -479,7 +549,7 @@ function toolLogHTML(c){
   const args=c.call.payload.args;
   const key=`${state.jobId}:t:${c.call.seq}`;
   const open=!state.closedKeys.has(key);
-  return `<div class="tlog ${open?"open":""} ${c.result?"":"pending"}">
+  return `<div class="tlog turn-item ${open?"open":""} ${c.result?"":"pending"}">
     <div class="tl-head" data-act="tl-toggle" data-k="${c.call.seq}"><span class="arr">▼</span><span>⚙</span><span class="tname">${esc(c.call.payload.tool)}</span><span class="abadge" style="--ac:${acolor(c.call.actor)}">${AGENT_IC} ${actorOf(c.call)}</span>
       <span class="st ${st}">${stTxt} · ${bytes}B · ${fmtT(c.call.ts)}</span></div>
     <div class="tl-body">
@@ -489,15 +559,29 @@ function toolLogHTML(c){
 }
 function applyFilter(){
   const f=state.filter,feed=$("#feed");if(!feed)return;
-  $$(".rsep",feed).forEach(rs=>{
-    let n=rs.nextElementSibling,has=false,nodes=[];
-    while(n&&!n.classList.contains("rsep")){nodes.push(n);if(f==="tool"&&n.matches(".tlog,.term-card,.file-card"))has=true;if(f==="agent"&&n.classList.contains("msg-agent"))has=true;if(f==="milestone"&&n.classList.contains("milestone"))has=true;n=n.nextElementSibling}
-    if(f==="all"){rs.style.display="";nodes.forEach(x=>x.style.display="");return}
-    rs.style.display=has?"":"none";
-    nodes.forEach(x=>x.style.display=has?"":"none");
+  $$(".round-panel",feed).forEach(p=>{
+    if(f==="all"){
+      p.style.display="";
+      $$(".turn.sys",p).forEach(t=>t.style.display="");
+      $$(".turn-item",p).forEach(x=>x.style.display="");
+      return;
+    }
+    let any=false;
+    $$(".turn.sys",p).forEach(t=>{
+      let has=false;
+      $$(".turn-item",t).forEach(x=>{
+        const show=(f==="tool"&&x.matches(".tlog,.term-card,.file-card"))||
+                   (f==="agent"&&x.matches(".msg-agent"))||
+                   (f==="milestone"&&x.matches(".milestone"));
+        x.style.display=show?"":"none";
+        if(show)has=true;
+      });
+      t.style.display=has?"":"none";
+      if(has)any=true;
+    });
+    p.style.display=any?"":"none";
   });
 }
-
 /* ── 工作台骨架 ── */
 function workspaceHTML(){
   if(state.newTaskMode){
