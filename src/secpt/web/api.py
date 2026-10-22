@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import sys
 import threading
 import time
 import uuid
@@ -374,9 +375,16 @@ def workspace_payload(job_id: str) -> dict:
                     seen.add(fl)
                     out["flags"].append(fl)
     with contextlib.suppress(Exception):
+        # delivery.json（job 目录）优先；旧版 web 配置键兜底
+        import json
+
         from secpt.core.orchestrator.summary import RunSummary  # noqa: F401 契约存在性
 
-        out["delivery"] = load_config().get(f"delivery:{job_id}")
+        _dj = _var() / "jobs" / job_id / "delivery.json"
+        if _dj.is_file():
+            out["delivery"] = json.loads(_dj.read_text(encoding="utf-8"))
+        else:
+            out["delivery"] = load_config().get(f"delivery:{job_id}")
     return out
 
 
@@ -406,6 +414,7 @@ def save_uploads(job_id: str, files: list[dict]) -> list[str]:
 def _run_job(
     job_id: str, spec, llm, confirm_event=None
 ) -> None:  # pragma: no cover - 线程体，集成验证
+    _ok = False
     try:
         import asyncio
 
@@ -415,25 +424,35 @@ def _run_job(
         summary = asyncio.run(
             run_task(spec, store=JobStore(), llm=llm, confirm_event=confirm_event)
         )
-        # 交付判定等 extras 落配置文件供面板读取（框架阶段的最小持久化）
+        _ok = True
+        # 交付判定落 job 目录（delivery.json）供面板读取——不能走 save_config：
+        # 那只放行 _CONFIGURABLE 白名单键，delivery:* 会被静默丢弃（真实运行暴露）
         extras = summary.get("delivery") if isinstance(summary, dict) else None
         if extras:
-            cfg = load_config()
-            cfg[f"delivery:{job_id}"] = extras
-            save_config(cfg)
+            with contextlib.suppress(Exception):
+                from secpt.core.job.resume import jobs_dir
+
+                _dp = jobs_dir() / job_id / "delivery.json"
+                _dp.parent.mkdir(parents=True, exist_ok=True)
+                import json
+
+                _dp.write_text(json.dumps(extras, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
+        print(f"[web] job {job_id} 运行异常: {type(e).__name__}: {e}", file=sys.stderr)
         with contextlib.suppress(Exception):
             from secpt.core.job.event import EventSink
             from secpt.core.job.resume import jobs_dir
 
             EventSink(job_id, jobs_dir()).error(f"web task failed: {e}")
     finally:
+        # 终态必须用 JOB_STATUSES 合法值（"completed" 不在其中，upsert 会
+        # ValueError 并被下面的 suppress 吞掉——任务永远卡 running，真实运行暴露）
         with _JOBS_LOCK, contextlib.suppress(Exception):
             from secpt.core.job.store import JobStore
 
             rec = JobStore().get_job(job_id)
             if rec is not None and rec.status in ("running", "pending"):
-                rec.status = "completed"
+                rec.status = "succeeded" if _ok else "failed"
                 JobStore().upsert_job(rec)
 
 

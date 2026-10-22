@@ -322,3 +322,43 @@ def test_inject_blocked_while_awaiting_confirm(env, monkeypatch) -> None:
     _mk_record_status("wait-1", "awaiting_confirm")
     result = api.inject_message("wait-1", "先帮我看看 8080")
     assert "error" in result and "接战单" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# _run_job 收尾（真实运行暴露：非法终态 "completed" 被吞 → 任务卡 running；
+# save_config 白名单丢弃 delivery:* → 交付判定永不落盘）
+# ---------------------------------------------------------------------------
+
+
+def test_run_job_sets_valid_terminal_status_and_delivery(env, monkeypatch):
+    """正常收口：status→succeeded（JOB_STATUSES 合法值），delivery 写 job 目录。"""
+
+    async def fake_run_task(spec, **kw):
+        return {"job_id": spec.job_id, "mode": "frontier", "delivery": {"accepted": True}}
+
+    monkeypatch.setattr("secpt.core.orchestrator.dag.run_task", fake_run_task)
+    _mk_record_status("fin-1", "running")
+    from secpt.core.job.store import JobStore
+
+    api._run_job("fin-1", JobStore().get_job("fin-1").spec, llm=None)
+    rec = JobStore().get_job("fin-1")
+    assert rec.status == "succeeded"  # 不是 "completed"（upsert 会 ValueError）
+    payload = api.workspace_payload("fin-1")
+    assert (payload.get("delivery") or {}).get("accepted") is True
+    from secpt.core.job.resume import jobs_dir
+
+    assert (jobs_dir() / "fin-1" / "delivery.json").is_file()
+
+
+def test_run_job_marks_failed_on_exception(env, monkeypatch):
+    """编排抛异常：status→failed，事件流留 error，不再卡 running。"""
+
+    async def boom(spec, **kw):
+        raise RuntimeError("orchestrator dead")
+
+    monkeypatch.setattr("secpt.core.orchestrator.dag.run_task", boom)
+    _mk_record_status("fin-2", "running")
+    from secpt.core.job.store import JobStore
+
+    api._run_job("fin-2", JobStore().get_job("fin-2").spec, llm=None)
+    assert JobStore().get_job("fin-2").status == "failed"
