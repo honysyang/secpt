@@ -18,9 +18,29 @@ const M={jobs:[],events:[],workspace:{},findings:[],assets:[],
 const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"followup",taskFilter:"all",
   labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
   assetTypes:[],assetQ:"",findSev:["critical","high","medium","low"],findQ:"",
-  expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false};
+  expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false,
+  openKeys:new Set(),closedKeys:new Set(),roundOpen:{}};
 const AGENT_IC="⬡";
 const ACOLORS=["#9E8CF0","#6BA8E8","#3ECF8E","#E8792B","#E86AA6","#E0B04A"];
+/* 终端/文件卡片的高保真资源：内联 SVG（不引外链，离线可用） */
+const ROBOT_SVG=`<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3.5" y="7.5" width="17" height="12" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="13.4" r="1.35" fill="currentColor"/><circle cx="15" cy="13.4" r="1.35" fill="currentColor"/><path d="M9.5 16.6h5M12 7.5V4.2M8.6 4.2h6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+const FILE_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.5 3v5.5H19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+/* 卡片展开态 + 复制缓冲：key = job:seq（避免把大段代码塞进 data-* 属性） */
+const FILE_BUF=new Map();
+const COPY_BUF=new Map();
+function parseArgs(a){if(a&&typeof a==="object")return a;try{return JSON.parse(a||"{}")}catch{return {}}}
+function copyText(txt,msg){
+  const done=()=>toast(msg||"已复制到剪贴板");
+  const fallback=()=>{
+    const ta=document.createElement("textarea");
+    ta.value=txt;ta.style.position="fixed";ta.style.left="-9999px";ta.style.opacity="0";
+    document.body.appendChild(ta);ta.select();
+    try{document.execCommand("copy");done()}catch(e){toast("复制失败")}
+    document.body.removeChild(ta);
+  };
+  if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(txt).then(done).catch(fallback);
+  else fallback();
+}
 function acolor(n){let h=0;for(const ch of String(n))h=(h*31+ch.charCodeAt(0))>>>0;return ACOLORS[h%ACOLORS.length]}
 const jobOf=id=>M.jobs.find(j=>j.job_id===id);
 const curJob=()=>jobOf(state.jobId)||M.jobs[0]||{job_id:"",status:"—",task_type:"",objective:""};
@@ -76,7 +96,9 @@ function renderNav(){
     </button>`).join("");
   $$("#navbtns .nav-btn").forEach(b=>b.onclick=()=>setView(b.dataset.v));
 }
-function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;renderDock();
+function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;
+  state.openKeys.clear();state.closedKeys.clear();state.roundOpen={};FILE_BUF.clear();COPY_BUF.clear();
+  renderDock();
   if(state.view!=="workspace")setView("workspace");else renderBody();refreshJobData(true)}
 function setView(v){state.view=v;renderNav();renderBody()}
 
@@ -112,7 +134,8 @@ function renderFeed(){
   const feed=$("#feed");if(!feed)return;
   const rounds=buildRounds(M.events);
   const last=rounds[rounds.length-1];
-  rounds.forEach(r=>{r.open=r.flags>0||r===last});
+  /* 展开态持久化：轮询每 1.5s 重建 DOM，用户的收起/展开不能被冲掉 */
+  rounds.forEach(r=>{r.open=state.roundOpen[r.round]!==undefined?state.roundOpen[r.round]:(r.flags>0||r===last)});
   let html="";
   for(const r of rounds){
     const calls=r.events.filter(e=>e.type==="tool_call");
@@ -129,10 +152,10 @@ function renderFeed(){
       ...r.events.filter(e=>["assistant","user_msg","finding","error","loop_phase","status_change","plan_event","intent_event"].includes(e.type)&&(e.type!=="assistant"||e.payload.content)).map(e=>({t:"ev",o:e,seq:e.seq}))
     ].sort((a,b)=>a.seq-b.seq);
     for(const i of items){
-      if(i.t==="tool"){html+=toolLogHTML(i.o);continue}
+      if(i.t==="tool"){html+=toolItemHTML(i.o);continue}
       const e=i.o,p=e.payload||{};
       if(e.type==="assistant"){
-        html+=`<div class="msg-agent"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor)}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
+        html+=`<div class="msg-agent thought"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor(e.actor)}">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
       }else if(e.type==="user_msg"){
         const kindLabel={direct:"你 · 追问/指令",new_task:"你 · 下达任务",steer:"你 · 操舵",coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"msg");
         html+=`<div class="msg-user"><div class="bub"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div></div>`;
@@ -151,7 +174,7 @@ function renderFeed(){
         if(p.hypotheses)bits.push(`新假设 ${p.hypotheses}`);
         if(p.drift_rejected)bits.push(`<span style="color:var(--warn)">防漂移拒收</span>`);
         const planned=(p.planned||[]).map(t=>`<li>${esc(t.title)}<span class="lane ${t.lane==="main"?"lane-main":"lane-logistics"}">${t.lane==="main"?"主":"后勤"}</span></li>`).join("");
-        html+=`<div class="msg-agent"><div class="a-head"><span class="abadge" style="--ac:${acolor("commander")}">${AGENT_IC} commander</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
+        html+=`<div class="msg-agent thought plan"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor("commander")}">${actorOf({actor:"commander"})}</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
       }else if(e.type==="intent_event"){
         const st=e.payload.status;
         const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
@@ -162,12 +185,59 @@ function renderFeed(){
   }
   feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>`;
   $$("[data-act=r-toggle]",feed).forEach(h=>h.onclick=()=>{
-    const rd=buildRounds(M.events).find(x=>x.round===+h.dataset.r);if(!rd)return;rd.open=!rd.open;
-    h.classList.toggle("open");toggleRoundBody(h,rd.open);
+    const rid=+h.dataset.r;const open=!h.classList.contains("open");
+    state.roundOpen[rid]=open;
+    h.classList.toggle("open",open);toggleRoundBody(h,open);applyFilter();
   });
-  $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>h.closest(".tlog").classList.toggle("open"));
+  $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>{
+    const k=state.jobId+":t:"+h.dataset.k;
+    const tl=h.closest(".tlog");
+    if(tl.classList.contains("open")){tl.classList.remove("open");state.closedKeys.add(k)}
+    else{tl.classList.add("open");state.closedKeys.delete(k)}
+  });
+  $$("[data-act=file-toggle]",feed).forEach(h=>h.onclick=e=>{
+    if(e.target.closest("[data-copy-key]"))return;
+    toggleFileCard(h.closest(".file-card"));
+  });
+  $$("[data-copy-key]",feed).forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    const card=b.closest(".file-card");
+    if(card){
+      (async()=>{
+        try{
+          const d=await fetchFileCard(card);
+          if(d.ok)copyText(d.content,b.dataset.copyMsg||"文件内容已复制");
+          else toast(d.error||"读取失败");
+        }catch(err){toast("读取失败："+err.message)}
+      })();
+      return;
+    }
+    const t=COPY_BUF.get(b.dataset.copyKey);
+    if(t==null)return;
+    copyText(t,b.dataset.copyMsg||"已复制到剪贴板");
+  });
   applyFilter();
   if(state.follow)feed.scrollTop=feed.scrollHeight;
+}
+/* 文件卡展开：正文按需回源（大段代码不进首屏 DOM） */
+async function toggleFileCard(card){
+  if(!card)return;
+  const key=card.dataset.key;
+  const body=card.querySelector(".file-body");
+  const open=!card.classList.contains("open");
+  if(!open){
+    card.classList.remove("open");state.openKeys.delete(key);return;
+  }
+  card.classList.add("open");state.openKeys.add(key);
+  if(body.dataset.filled==="1")return;
+  body.innerHTML=`<div class="file-loading">加载文件内容…</div>`;
+  try{
+    const d=await fetchFileCard(card);
+    if(d.ok){
+      body.innerHTML=`<pre class="code"><code>${esc(d.content)}</code></pre>`;
+      body.dataset.filled="1";COPY_BUF.set(key,d.content);
+    }else body.innerHTML=`<div class="file-err">${esc(d.error||"读取失败")}</div>`;
+  }catch(e){body.innerHTML=`<div class="file-err">${esc("读取失败："+e.message)}</div>`}
 }
 function toggleRoundBody(h,open){
   let n=h.nextElementSibling;
@@ -224,11 +294,10 @@ function taskRunning(jid){
 }
 const viewRunning=()=>taskRunning(state.jobId);
 function syncSendBtn(){
-  const btn=$("#btn-send");if(!btn)return;
   const run=viewRunning();
-  btn.classList.toggle("stoppable",run);
-  btn.textContent=run?"◼":"↑";
-  btn.title=run?"停止任务（协作式取消）":"Ctrl+Enter 发送";
+  const bi=$("#btn-interrupt");if(bi)bi.classList.toggle("show",run);
+  const gd=$("#gen-dots");if(gd)gd.classList.toggle("show",run);
+  const btn=$("#btn-send");if(btn)btn.title="Ctrl+Enter 发送";
 }
 function labelOf(j){return state.labels[j.job_id]||j.job_id}
 function renameTask(jid){
@@ -323,14 +392,95 @@ function renderTaskPanel(){
   });
 }
 
-/* ── 工具执行日志条目 ── */
+/* ── 对话条目分派：bash→终端卡 / write_file→文件卡 / 其余→通用工具日志 ── */
+function toolItemHTML(o){
+  const name=o.call.payload.tool;
+  if(name==="bash")return termCardHTML(o.call,o.result);
+  if(name==="write_file")return fileCardHTML(o.call,o.result);
+  return toolLogHTML(o);
+}
+/* 终端执行：黑底 + 绿色左边框 + 等宽字体 + Copy（#0d1117 / font-mono） */
+function termCardHTML(call,result){
+  const a=parseArgs(call.payload.args);
+  const cmd=String(a.command||(typeof call.payload.args==="string"?call.payload.args:"")||"");
+  const st=result?(result.payload.status==="ok"?"ok":"err"):"wait";
+  const stTxt=result?(result.payload.status==="ok"?"done":result.payload.status):"running…";
+  const bytes=result?(result.payload.bytes||0):0;
+  const out=result?String(result.payload.preview||""):"";
+  const key=`${state.jobId}:${call.seq}`;
+  COPY_BUF.set(key,`$ ${cmd}\n${out}`);
+  return `<div class="term-card ${result?"":"pending"}">
+    <div class="term-head">
+      <span class="tlights"><i></i><i></i><i></i></span>
+      <span class="cmd-name">bash</span>
+      <span class="term-st ${st}">${esc(stTxt)}${result?` · ${bytes}B`:""}</span>
+      <span class="term-time">${fmtT(call.ts)}</span>
+      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="终端内容已复制">Copy</button>
+    </div>
+    <pre class="term-cmd"><span class="ps1">$</span>${esc(cmd)}</pre>
+    ${result?`<pre class="term-out">${esc(out||"(无输出)")}</pre>`:`<div class="term-wait"><span class="dots"><i></i><i></i><i></i></span>执行中…</div>`}
+  </div>`;
+}
+/* 写文件：可折叠卡片（头部=路径+状态，正文=代码块，默认收起）
+   tool_call.args 在事件流里被截断到 500 字符 → 路径/大小取自 tool_result
+   的 "wrote N bytes to …/jobs/<sub>/ws/<path>"，正文展开时回磁盘读。 */
+function fileCardHTML(call,result){
+  const key=`${state.jobId}:${call.seq}`;
+  const pv=result?String(result.payload.preview||""):"";
+  let sub=String(call.payload.subjob||""),path="",size=null;
+  const m=pv.match(/wrote\s+(\d+)\s+bytes\s+to\s+(.+?)\s*$/);
+  if(m){
+    size=+m[1];
+    const mm=m[2].match(/jobs\/([^/]+)\/ws\/(.+)$/);
+    if(mm){sub=mm[1];path=mm[2]}
+  }
+  if(!path){
+    const a=parseArgs(call.payload.args);
+    path=String(a.path||"");
+    if(size==null&&a.content!=null)size=String(a.content).length;
+    if(!path){
+      const sm=String(call.payload.args||"").match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if(sm){try{path=JSON.parse(`"${sm[1]}"`)}catch{path=sm[1]}}
+    }
+  }
+  const ok=!!result&&result.payload.status==="ok";
+  const stTxt=result?(ok?"Success":"Failed"):"Writing…";
+  const open=state.openKeys.has(key);
+  const cached=FILE_BUF.get(key);
+  const bodyHTML=open?(cached!=null?`<pre class="code"><code>${esc(cached)}</code></pre>`:`<div class="file-loading">加载文件内容…</div>`):"";
+  return `<div class="file-card ${open?"open":""}" data-key="${key}" data-sub="${esc(sub)}" data-path="${esc(path)}" data-full="${cached!=null?"1":"0"}">
+    <div class="file-head" data-act="file-toggle">
+      <span class="ficon">${FILE_SVG}</span>
+      <span class="fpath" title="${esc(path||"(未知路径)")}">${esc(path||"(未知路径)")}</span>
+      <span class="fstat ${ok?"ok":"err"}">${esc(stTxt)}</span>
+      <span class="fmeta">${size!=null?size+"B":"—"} · ${fmtT(call.ts)}</span>
+      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="文件内容已复制">Copy</button>
+      <span class="arr">▼</span>
+    </div>
+    <div class="file-body" data-filled="${cached!=null?"1":"0"}">${bodyHTML}</div>
+  </div>`;
+}
+/* 文件正文按需回源：GET /api/jobs/{id}/file?sub=&path=（服务端做归属/穿越校验） */
+async function fetchFileCard(card){
+  const key=card.dataset.key;
+  if(card.dataset.full==="1"&&FILE_BUF.has(key))return {ok:true,content:FILE_BUF.get(key)};
+  const qs=`sub=${encodeURIComponent(card.dataset.sub||"")}&path=${encodeURIComponent(card.dataset.path||"")}`;
+  const d=await api(`/api/jobs/${encodeURIComponent(state.jobId)}/file?${qs}`);
+  if(d&&d.ok){
+    FILE_BUF.set(key,d.content);COPY_BUF.set(key,d.content);
+    card.dataset.full="1";card.dataset.filled="1";
+  }
+  return d||{error:"读取失败"};
+}
 function toolLogHTML(c){
   const st=c.result?(c.result.payload.status==="ok"?"ok":"err"):"wait";
   const stTxt=c.result?c.result.payload.status:"running…";
   const bytes=c.result?(c.result.payload.bytes||0):0;
   const args=c.call.payload.args;
-  return `<div class="tlog open ${c.result?"":"pending"}">
-    <div class="tl-head" data-act="tl-toggle"><span class="arr">▼</span><span>⚙</span><span class="tname">${esc(c.call.payload.tool)}</span><span class="abadge" style="--ac:${acolor(c.call.actor)}">${AGENT_IC} ${actorOf(c.call)}</span>
+  const key=`${state.jobId}:t:${c.call.seq}`;
+  const open=!state.closedKeys.has(key);
+  return `<div class="tlog ${open?"open":""} ${c.result?"":"pending"}">
+    <div class="tl-head" data-act="tl-toggle" data-k="${c.call.seq}"><span class="arr">▼</span><span>⚙</span><span class="tname">${esc(c.call.payload.tool)}</span><span class="abadge" style="--ac:${acolor(c.call.actor)}">${AGENT_IC} ${actorOf(c.call)}</span>
       <span class="st ${st}">${stTxt} · ${bytes}B · ${fmtT(c.call.ts)}</span></div>
     <div class="tl-body">
       <span class="lbl">args · 调用参数</span><pre>${esc(tryFmt(typeof args==="string"?args:JSON.stringify(args)))}</pre>
@@ -341,7 +491,7 @@ function applyFilter(){
   const f=state.filter,feed=$("#feed");if(!feed)return;
   $$(".rsep",feed).forEach(rs=>{
     let n=rs.nextElementSibling,has=false,nodes=[];
-    while(n&&!n.classList.contains("rsep")){nodes.push(n);if(f==="tool"&&n.classList.contains("tlog"))has=true;if(f==="agent"&&n.classList.contains("msg-agent"))has=true;if(f==="milestone"&&n.classList.contains("milestone"))has=true;n=n.nextElementSibling}
+    while(n&&!n.classList.contains("rsep")){nodes.push(n);if(f==="tool"&&n.matches(".tlog,.term-card,.file-card"))has=true;if(f==="agent"&&n.classList.contains("msg-agent"))has=true;if(f==="milestone"&&n.classList.contains("milestone"))has=true;n=n.nextElementSibling}
     if(f==="all"){rs.style.display="";nodes.forEach(x=>x.style.display="");return}
     rs.style.display=has?"":"none";
     nodes.forEach(x=>x.style.display=has?"":"none");
@@ -363,8 +513,9 @@ function workspaceHTML(){
       <div class="center-hero">
         <div class="hero-brand">${AGENT_IC} secpt <span class="muted">· 下达新任务</span></div>
         <div class="composer center">
+          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>Agent is generating…</span></div>
           <div class="attach-strip" id="attach-strip"></div>
-          <textarea id="c-in" rows="3" placeholder="目标 / 范围 / 约束 / 交付要求…（附件点 ＋，Ctrl+Enter 发送）"></textarea>
+          <textarea id="c-in" rows="3" placeholder="Enter your security task or reply to the Agent..." title="目标 / 范围 / 约束 / 交付要求…（附件点 ＋，Ctrl+Enter 发送）"></textarea>
           <div class="composer-foot">
             <button class="cbtn" id="btn-attach" title="附件 / 图片">＋</button>
             <input type="file" id="c-files" multiple hidden>
@@ -374,7 +525,8 @@ function workspaceHTML(){
             </div>
             <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
-            <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
+            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
+            <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
           </div>
         </div>
         <div class="hero-hint">任务流：接战受理（接战单确认）→ Commander 编成派单 → 执行体 ReAct 并行 → 后勤后台 → 交付门验收 → 经验沉淀</div>
@@ -416,8 +568,9 @@ function workspaceHTML(){
       <div class="feed" id="feed"></div>
       <div class="composer-float">
         <div class="composer">
+          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>Agent is generating…</span></div>
           <div class="attach-strip" id="attach-strip"></div>
-          <textarea id="c-in" rows="2" placeholder="${state.mode==="followup"?(taskRunning(j.job_id)?"追问当前任务：发送即入作战地图（人工直投，规划让路）…":"任务已收敛 · 发送将以同一张作战地图续接编排（不新开任务）…"):"目标 / 范围 / 约束 / 交付要求…（将新建独立任务）"}"></textarea>
+          <textarea id="c-in" rows="3" placeholder="Enter your security task or reply to the Agent..." title="${state.mode==="followup"?(taskRunning(j.job_id)?"追问当前任务：发送即入作战地图（人工直投，规划让路）…":"任务已收敛 · 发送将以同一张作战地图续接编排（不新开任务）…"):"目标 / 范围 / 约束 / 交付要求…（将新建独立任务）"}"></textarea>
           <div class="composer-foot">
             <button class="cbtn" id="btn-attach" title="附件（下达新任务时随任务上传）">＋</button>
             <input type="file" id="c-files" multiple hidden>
@@ -427,7 +580,8 @@ function workspaceHTML(){
             </div>
             <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
-            <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
+            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
+            <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
           </div>
         </div>
       </div>
@@ -449,13 +603,10 @@ function bindWorkspace(){
     renderBody()});
   const cin=$("#c-in");
   cin.addEventListener("keydown",e=>{
-    if((e.ctrlKey||e.metaKey)&&e.key==="Enter"){
-      if($("#btn-send").classList.contains("stoppable"))stopComposer();else sendComposer();
-    }
+    if((e.ctrlKey||e.metaKey)&&e.key==="Enter")sendComposer();
   });
-  $("#btn-send").onclick=()=>{
-    if($("#btn-send").classList.contains("stoppable"))stopComposer();else sendComposer();
-  };
+  $("#btn-send").onclick=()=>sendComposer();
+  const bi=$("#btn-interrupt");if(bi)bi.onclick=()=>stopComposer();
   $("#btn-attach").onclick=()=>$("#c-files").click();
   $("#c-files").onchange=async e=>{
     for(const f of e.target.files)state.composerFiles.push(await toB64(f));
@@ -929,7 +1080,8 @@ document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){$("#fdetail").classList.remove("show");togglePalette(false);closeDock()}
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();togglePalette(!$("#palette").classList.contains("show"))}
 });
-document.documentElement.dataset.theme=localStorage.getItem("secpt-theme")||(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");
+/* 规格要求暗色面板：默认 dark（仍可用右上角 ◐ 切到 light 并记忆） */
+document.documentElement.dataset.theme=localStorage.getItem("secpt-theme")||"dark";
 
 /* ── 启动 + 轮询 ── */
 async function refreshJobData(full){

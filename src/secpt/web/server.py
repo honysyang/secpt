@@ -12,6 +12,7 @@
     GET  /api/jobs                  → 任务列表
     POST /api/jobs                  → 提交任务 {objective, profile, files[{name,data_b64}], fake}
     GET  /api/jobs/{id}/events?after=N → 事件流增量（执行轨迹）
+    GET  /api/jobs/{id}/file?sub=&path= → 意图工作区文件读取（文件卡展开/复制）
     GET  /api/jobs/{id}/workspace   → 作战面板（任务池/假设树/战略文档/成果）
 """
 
@@ -93,6 +94,16 @@ class SecptWebHandler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 after = int((qs.get("after") or ["0"])[0] or 0)
                 self._send_json(api.events_payload(job_id, after=after))
+            elif path.startswith("/api/jobs/") and path.endswith("/file"):
+                job_id = path[len("/api/jobs/") : -len("/file")]
+                qs = parse_qs(parsed.query)
+                self._send_json(
+                    api.job_file_payload(
+                        job_id,
+                        sub=(qs.get("sub") or [""])[0],
+                        path=(qs.get("path") or [""])[0],
+                    )
+                )
             elif path.startswith("/api/jobs/") and path.endswith("/workspace"):
                 job_id = path[len("/api/jobs/") : -len("/workspace")]
                 self._send_json(api.workspace_payload(job_id))

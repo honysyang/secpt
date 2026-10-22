@@ -383,3 +383,34 @@ def test_web_host_env_override(monkeypatch) -> None:
     r = CliRunner().invoke(app, ["web", "--host", "127.0.0.1"])
     assert r.exit_code == 0, r.output
     assert seen["host"] == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# 文件卡回源：GET /api/jobs/{id}/file（事件流 args 截断，正文只能回磁盘）
+# ---------------------------------------------------------------------------
+
+
+def test_job_file_payload_reads_workspace(env) -> None:
+    ws = env / "jobs" / "job-1-iabcd" / "ws"
+    (ws / "recon").mkdir(parents=True)
+    (ws / "recon" / "probe.py").write_text("print('ok')\n", encoding="utf-8")
+
+    d = api.job_file_payload("job-1", sub="job-1-iabcd", path="recon/probe.py")
+    assert d["ok"] is True
+    assert d["content"] == "print('ok')\n"
+    assert d["bytes"] == 12
+
+    # 父 job 自己的 ws 也允许（sub 缺省）
+    (ws.parent / "ws" / "note.md").write_text("hi", encoding="utf-8")
+    assert api.job_file_payload("job-1-iabcd", path="note.md")["ok"] is True
+
+
+def test_job_file_payload_rejects_escape_and_foreign_subjob(env) -> None:
+    ws = env / "jobs" / "job-1-iabcd" / "ws"
+    ws.mkdir(parents=True)
+    (ws / "a.txt").write_text("x", encoding="utf-8")
+
+    assert "error" in api.job_file_payload("job-1", sub="job-1-iabcd", path="../../etc/passwd")
+    assert "error" in api.job_file_payload("job-1", sub="other-job", path="a.txt")
+    assert "error" in api.job_file_payload("job-1", sub="job-1-iabcd", path="missing.txt")
+    assert "error" in api.job_file_payload("job-1", sub="job-1-iabcd", path="")

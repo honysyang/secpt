@@ -277,6 +277,40 @@ def events_payload(job_id: str, after: int = 0, limit: int = 400) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def job_file_payload(job_id: str, *, sub: str = "", path: str = "") -> dict:
+    """读取意图子任务工作区文件（对话面板文件卡展开/复制用）。
+
+    事件流里的 tool_call.args 被截断（500 字符），前端无法据此还原写文件
+    的路径与正文，只能回到磁盘读。约束：只允许父 job 自身或其子 job
+    （<job_id>-iXXXX/-r2/-rs）的 ws；解析后路径必须仍在 ws 内；上限 512KB。
+    """
+    jid = str(job_id or "").strip()
+    sid = str(sub or "").strip() or jid
+    rel = str(path or "").strip()
+    if not jid or not rel:
+        return {"error": "缺少参数（sub/path）"}
+    if not (sid == jid or sid.startswith(jid + "-")):
+        return {"error": "子任务不属于该任务"}
+    base = (_var() / "jobs" / sid / "ws").resolve()
+    target = (base / rel).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return {"error": "路径越界"}
+    if not target.is_file():
+        return {"error": "文件不存在（可能已被压缩/清理）"}
+    size = target.stat().st_size
+    if size > 512 * 1024:
+        return {"error": f"文件过大（{size}B），请在 CLI 查看"}
+    return {
+        "ok": True,
+        "sub": sid,
+        "path": rel,
+        "bytes": size,
+        "content": target.read_bytes().decode("utf-8", errors="replace"),
+    }
+
+
 def workspace_payload(job_id: str) -> dict:
     out: dict = {
         "job_id": job_id,
