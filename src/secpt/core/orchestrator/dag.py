@@ -49,6 +49,7 @@ async def run_task(
     db_path: str = "var/secpt.sqlite",
     model_primary: str = "deepseek-chat",
     model_fallback: str = "deepseek-reasoner",
+    confirm_event: object | None = None,  # 接战确认闸（Web 非自动下发时传入 frontier）
 ) -> dict:
     """统一路由：benchmark → campaign；其余 → frontier（唯一执行编排）。
 
@@ -96,6 +97,9 @@ async def run_task(
         scope_allow=assets
         + [a for a in os.environ.get("SECPT_SCOPE_ALLOW", "").split(",") if a.strip()],
     )
+    if confirm_event is not None:
+        kw["confirm_event"] = confirm_event
+
     if spec.budget.wall_s > 0:
         # --wall 秒数 → 全局截止（frontier deadline_ts；0/-1 不限，7×24 语义不变）
         kw["deadline_ts"] = time.time() + float(spec.budget.wall_s)

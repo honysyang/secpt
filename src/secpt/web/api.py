@@ -346,6 +346,9 @@ def workspace_payload(job_id: str) -> dict:
                 "objective": _g.objective,
                 "asset_scope": list(_g.asset_scope or []),
                 "attack_steps": list(_g.attack_steps or []),
+                "restatement": _g.restatement,  # 接战单：目标重述（确认卡渲染）
+                "success_criteria": list(_g.success_criteria or []),
+                "constraints": list(_g.constraints or []),
             }
     # 阶段性成果：flag / finding 事件
     with contextlib.suppress(Exception):
@@ -400,14 +403,18 @@ def save_uploads(job_id: str, files: list[dict]) -> list[str]:
     return paths
 
 
-def _run_job(job_id: str, spec, llm) -> None:  # pragma: no cover - 线程体，集成验证
+def _run_job(
+    job_id: str, spec, llm, confirm_event=None
+) -> None:  # pragma: no cover - 线程体，集成验证
     try:
         import asyncio
 
         from secpt.core.job.store import JobStore
         from secpt.core.orchestrator.dag import run_task
 
-        summary = asyncio.run(run_task(spec, store=JobStore(), llm=llm))
+        summary = asyncio.run(
+            run_task(spec, store=JobStore(), llm=llm, confirm_event=confirm_event)
+        )
         # 交付判定等 extras 落配置文件供面板读取（框架阶段的最小持久化）
         extras = summary.get("delivery") if isinstance(summary, dict) else None
         if extras:
@@ -428,6 +435,26 @@ def _run_job(job_id: str, spec, llm) -> None:  # pragma: no cover - 线程体，
             if rec is not None and rec.status in ("running", "pending"):
                 rec.status = "completed"
                 JobStore().upsert_job(rec)
+
+
+def confirm_task(job_id: str) -> dict:
+    """接战确认：放行挂起的编排（首轮受理已产《接战单》，status=awaiting_confirm）。"""
+    with _JOBS_LOCK:
+        rec = JOBS.get(job_id)
+        ev = (rec or {}).get("confirm_event")
+    if ev is None:
+        return {"error": "该任务不在待确认状态（可能已确认/自动下发/已完成）"}
+    ev.set()
+    with _JOBS_LOCK:
+        rec["confirm_event"] = None  # 一次性：重复确认报错（幂等防双击）
+    with contextlib.suppress(Exception):
+        from secpt.core.job.event import EventSink
+        from secpt.core.job.resume import jobs_dir
+
+        EventSink(job_id, jobs_dir()).write(
+            "loop_phase", {"phase": "confirm_clicked", "reason": "人工在 Web 确认接战单"}
+        )
+    return {"ok": True}
 
 
 def job_active(job_id: str) -> bool:
@@ -574,6 +601,12 @@ def inject_message(job_id: str, content: str) -> dict:
         return {"error": "消息不能为空"}
     import re
 
+    from secpt.core.job.store import JobStore as _JS
+
+    with contextlib.suppress(Exception):
+        _rec0 = _JS().get_job(job_id)
+        if _rec0 is not None and _rec0.status == "awaiting_confirm":
+            return {"error": "接战单待确认：请先在作战地图确认开战（或取消任务后重发新任务）"}
     from secpt.core.orchestrator.frontier import Frontier, frontier_db_path
 
     # 子任务（-iXXXX 续段/-r2/-rs）没有自己的任务池——回退到父任务的池。
@@ -631,6 +664,7 @@ def create_task(
     fake: bool = False,
     budget_steps: int = 0,
     budget_wall_s: float = 0.0,
+    auto_dispatch: bool = True,  # False=接战确认闸：CDR 先产《接战单》，人工确认后才编成派单
 ) -> dict:
     """提交任务：附件落盘 → TaskSpec → 后台线程执行 → 立即返回 job_id。"""
     import os
@@ -679,11 +713,18 @@ def create_task(
                     + "、".join(Path(a).name for a in artifacts[:5]),
                 },
             )
+    _confirm_event = None
+    if not auto_dispatch:
+        _confirm_event = threading.Event()  # 接战确认闸：挂起编排，等 /confirm 放行
     thread = threading.Thread(
-        target=_run_job, args=(job_id, spec, llm), name=f"web-job-{job_id}", daemon=True
+        target=_run_job,
+        args=(job_id, spec, llm, _confirm_event),
+        name=f"web-job-{job_id}",
+        daemon=True,
     )
     with _JOBS_LOCK:
         JOBS[job_id] = {
+            "confirm_event": _confirm_event,
             "thread": thread,
             "started_at": time.time(),
             "mode": "fake" if llm else "prod",

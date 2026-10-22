@@ -146,8 +146,13 @@ class SecptWebHandler(BaseHTTPRequestHandler):
                     fake=bool(body.get("fake")),
                     budget_steps=int(body.get("budget_steps") or 0),
                     budget_wall_s=float(body.get("budget_wall_s") or 0.0),
+                    auto_dispatch=bool(body.get("auto_dispatch", True)),
                 )
                 self._send_json(result, status=200 if "job_id" in result else 400)
+            elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/confirm"):
+                job_id = parsed.path[len("/api/jobs/") : -len("/confirm")]
+                result = api.confirm_task(job_id)
+                self._send_json(result, status=200 if result.get("ok") else 400)
             elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
                 job_id = parsed.path[len("/api/jobs/") : -len("/cancel")]
                 result = api.cancel_task(job_id)

@@ -20,6 +20,7 @@ from secpt.core.job.models import JobRecord, TaskSpec
 JOB_STATUSES = {
     "queued",
     "running",
+    "awaiting_confirm",  # 接战单已产出，等人工确认（Web 确认闸；确认后回 running）
     "paused",
     "succeeded",
     "failed",

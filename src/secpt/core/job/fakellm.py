@@ -27,6 +27,29 @@ class FakeLLM:
     async def call(self, messages, tools, model):
         if self.step_delay_s:
             await asyncio.sleep(self.step_delay_s)
+        # 指挥官受理轮（接战确认闸）：返回 canned《接战单》，fake 全链路也能演示确认闸。
+        # 提示词含"接战受理"即判定（不消耗 fake 步数）。
+        _prompt0 = str((messages[0].get("content") if messages else "") or "")
+        if "接战受理" in _prompt0:
+            return _resp(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "goal": {
+                                "objective": f"fake 受理目标（{self.job_id}）",
+                                "restatement": "fake：拿下目标站并拿到 flag",
+                                "success_criteria": ["拿到 FLAG{...}"],
+                                "constraints": ["授权范围内"],
+                                "asset_scope": [],
+                                "attack_steps": ["侦察", "利用"],
+                            },
+                            "risk_notes": [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            )
         self.calls += 1
         if self.calls > self.n:
             return _resp(

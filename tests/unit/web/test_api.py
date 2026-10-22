@@ -137,7 +137,7 @@ def test_create_task_spawns_runner(env, monkeypatch) -> None:
 
     seen: dict = {}
 
-    def fake_run(job_id, spec, llm):
+    def fake_run(job_id, spec, llm, confirm_event=None):
         seen["job_id"] = job_id
         seen["spec"] = spec
         seen["llm"] = llm
@@ -230,7 +230,7 @@ def test_inject_resumes_converged_task(env, monkeypatch) -> None:
     """任务收敛后对话追问：direct 意图入池 + 同 job_id 自动续接编排。"""
     seen: dict = {}
 
-    def fake_run(job_id, spec, llm):
+    def fake_run(job_id, spec, llm, confirm_event=None):
         seen["job_id"] = job_id
 
     monkeypatch.setattr(api, "_run_job", fake_run)
@@ -251,7 +251,7 @@ def test_inject_no_resume_while_active(env, monkeypatch) -> None:
     """任务运行中追问：只入池不重启（避免双编排撞同一张地图）。"""
     called: list[str] = []
 
-    def fake_run(job_id, spec, llm):
+    def fake_run(job_id, spec, llm, confirm_event=None):
         called.append(job_id)
 
     monkeypatch.setattr(api, "_run_job", fake_run)
@@ -268,3 +268,57 @@ def test_inject_no_resume_while_active(env, monkeypatch) -> None:
 
 def test_inject_no_pool_errors(env) -> None:
     assert "error" in api.inject_message("ghost-9", "你好")
+
+
+# ---------------------------------------------------------------------------
+# 接战确认闸（v11）：auto_dispatch 选项 / confirm_task / 待确认期 inject 拒收
+# ---------------------------------------------------------------------------
+
+
+def _mk_record_status(job_id: str, status: str, objective: str = "拿下目标"):
+    from secpt.core.job.models import JobRecord, TaskSpec
+    from secpt.core.job.store import JobStore
+
+    spec = TaskSpec(job_id=job_id, task_type="ctf", objective=objective)
+    JobStore().upsert_job(JobRecord(job_id=job_id, spec=spec, status=status))
+
+
+def test_create_task_auto_dispatch_option(env, monkeypatch):
+    """auto_dispatch=False → 接战确认闸：编排挂起等 /confirm；True/缺省 → 直接开打。"""
+
+    def fake_run(job_id, spec, llm, confirm_event=None):
+        pass
+
+    monkeypatch.setattr(api, "_run_job", fake_run)
+    r1 = api.create_task("拿下 test 站", fake=True, auto_dispatch=False)
+    assert "job_id" in r1
+    ev = api.JOBS[r1["job_id"]].get("confirm_event")
+    assert isinstance(ev, threading.Event) and not ev.is_set()
+    api.JOBS.pop(r1["job_id"], None)
+
+    r2 = api.create_task("拿下 test 站", fake=True, auto_dispatch=True)
+    assert api.JOBS[r2["job_id"]].get("confirm_event") is None
+    api.JOBS.pop(r2["job_id"], None)
+
+
+def test_confirm_task_releases_gate(env) -> None:
+    ev = threading.Event()
+    api.JOBS["gate-9"] = {"thread": threading.current_thread(), "confirm_event": ev}
+    try:
+        result = api.confirm_task("gate-9")
+        assert result.get("ok") is True and ev.is_set()
+        # 重复确认：事件已被消费，第二次报错
+        assert "error" in api.confirm_task("gate-9")
+    finally:
+        api.JOBS.pop("gate-9", None)
+
+
+def test_confirm_task_unknown_job_errors(env) -> None:
+    assert "error" in api.confirm_task("ghost-1")
+
+
+def test_inject_blocked_while_awaiting_confirm(env, monkeypatch) -> None:
+    """接战单待确认期：对话消息拒收，引导先确认（避免意图绕过确认直接入池）。"""
+    _mk_record_status("wait-1", "awaiting_confirm")
+    result = api.inject_message("wait-1", "先帮我看看 8080")
+    assert "error" in result and "接战单" in result["error"]

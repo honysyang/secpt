@@ -40,6 +40,10 @@ class GoalSpec:
     constraints: list[str] = field(default_factory=list)
     asset_scope: list[str] = field(default_factory=list)
     attack_steps: list[str] = field(default_factory=list)
+    restatement: str = ""  # 目标重述：用户真正想要的结果（不是用户说的话）
+    success_criteria: list[str] = field(
+        default_factory=list
+    )  # 任务级成功标准（VRF 验收/收敛裁决锚）
 
 
 def is_rendered(text: str) -> bool:
@@ -228,6 +232,10 @@ def render_goal_system(goal: GoalSpec) -> str:
         parts.append("\n\n【操作约束】\n" + "\n".join(f"- {c}" for c in goal.constraints))
     if goal.attack_steps:
         parts.append("\n\n【攻击步骤参考】\n" + "\n".join(f"- {s}" for s in goal.attack_steps))
+    if goal.restatement:
+        parts.append(f"\n\n【目标重述】\n{goal.restatement}")
+    if goal.success_criteria:
+        parts.append("\n\n【成功标准】\n" + "\n".join(f"- {c}" for c in goal.success_criteria))
     return "".join(parts)
 
 
@@ -250,6 +258,8 @@ def save_goal(base_job_id: str, goal: GoalSpec) -> Path:
                 "constraints": list(goal.constraints),
                 "asset_scope": list(goal.asset_scope),
                 "attack_steps": list(goal.attack_steps),
+                "restatement": goal.restatement,
+                "success_criteria": list(goal.success_criteria),
             },
             ensure_ascii=False,
         ),
@@ -271,6 +281,8 @@ def load_goal(base_job_id: str) -> GoalSpec | None:
             constraints=[str(c) for c in (d.get("constraints") or [])],
             asset_scope=[str(a) for a in (d.get("asset_scope") or [])],
             attack_steps=[str(s) for s in (d.get("attack_steps") or [])],
+            restatement=str(d.get("restatement") or ""),
+            success_criteria=[str(c) for c in (d.get("success_criteria") or [])],
         )
     except (OSError, ValueError, TypeError):
         return None

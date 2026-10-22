@@ -2102,7 +2102,9 @@ async def run_frontier(
     # 跑分（benchmark）传 False，持续解完所有已入队题目
     role_plan: bool = False,  # 团队模式：预置 recon→exploit×N 角色意图骨架（折叠 Specialist DAG）
     default_assets: list[str] | None = None,  # 团队模式资产兜底（goal 拆解无 asset_scope 时用入口）
-    orch_mode: object | None = None,  # v10 模式收敛：显式模式（缺省 resolve_orch_mode 现场归约）
+    orch_mode: object | None = None,
+    confirm_event: object | None = None,  # threading.Event：接战确认闸（Web 非自动下发时传入）。
+    # 首轮受理产《接战单》后挂起等确认；set() 后进入编成派单。None=不启用（CLI 默认）。  # v10 模式收敛：显式模式（缺省 resolve_orch_mode 现场归约）
     stages: object | None = None,  # S6 模式收敛：profile.stages 折叠为线性 depends_on 意图链
     # （原 run_stages 多阶段编排的唯一存续形态；调用方以 max_intents=len(stages) 关闭 planner）
     default_max_steps: int = 0,  # S6：意图未设步数预算时的全局默认（solve --steps 透传；0=profile 预算）
@@ -2408,7 +2410,7 @@ async def run_frontier(
         → 种子资产入图 → objective 替换为结构化文本（此后所有简报/任务共享）。
         """
         nonlocal idle_rounds, stall_wake_budget, delivery_pending, objective, need_goal_pending
-        nonlocal profile, _run_priors
+        nonlocal profile, _run_priors, stop  # stop：接战确认闸被用户取消时置位收口
         signal = None  # 本轮唤醒信号（Commander 分支赋值；legacy planner 兜底 None）
         if fr.has_open_direct():
             return -1  # 模式②：规划者暂停（-1=未执行规划，主循环不得计轮）
@@ -2459,6 +2461,8 @@ async def run_frontier(
                 need_goal=_send_need_goal,
                 flags=list(flags),
                 running=_running,
+                # 接战确认闸：仅首轮受理（need_goal）用受理提示词；确认后的编成轮照常派单
+                acceptance=confirm_event is not None and _send_need_goal,
             )
             signal = _sigs[0] if _sigs else None  # 兼容下方 wake 字段
             # 首轮任务理解产物：过滤（输入可信边界）→ 落盘 → 种子资产 → 结构化
@@ -2483,6 +2487,47 @@ async def run_frontier(
                     f"steps={len(outcome.goal.attack_steps)}（goal.json 已落盘）",
                     flush=True,
                 )
+            # 接战确认闸（Web 非自动下发）：受理轮产出的《接战单》先给人工确认，
+            # 编排挂起——任务单未派，操作员无事可做，冻结整个循环是正确语义。
+            # 取消路径：cancel 标记文件落盘即退出（cancel_task 通路 2 写同文件）。
+            if confirm_event is not None and outcome.goal is not None:
+                _parent_event(
+                    base,
+                    "loop_phase",
+                    {
+                        "phase": "awaiting_confirm",
+                        "reason": "接战单已产出（goal.json），等待人工确认后进入编成派单",
+                    },
+                )
+                with contextlib.suppress(Exception):
+                    from secpt.core.job.store import JobStore
+
+                    _rec = JobStore().get_job(base)
+                    if _rec is not None:
+                        _rec.status = "awaiting_confirm"
+                        JobStore().upsert_job(_rec)
+                print("[commander] 接战单待确认：编排挂起，等 Web 确认/取消…", flush=True)
+                while not confirm_event.wait(timeout=2.0):
+                    from secpt.core.job.resume import jobs_dir as _jd
+
+                    if stop_ev.is_set() or (_jd() / base / "cancel").is_file():
+                        stop = True
+                        stop_ev.set()
+                        break
+                if not stop:
+                    with contextlib.suppress(Exception):
+                        from secpt.core.job.store import JobStore
+
+                        _rec = JobStore().get_job(base)
+                        if _rec is not None and _rec.status == "awaiting_confirm":
+                            _rec.status = "running"
+                            JobStore().upsert_job(_rec)
+                    _parent_event(
+                        base,
+                        "loop_phase",
+                        {"phase": "confirmed", "reason": "人工确认接战单，进入编成派单"},
+                    )
+                    print("[commander] 接战单已确认：继续编成派单", flush=True)
             # 首轮角色/经验选择：仅 auto 模式（用户显式 --profile 不覆盖）；落盘复用
             if _role_auto and outcome.profile:
                 profile = outcome.profile

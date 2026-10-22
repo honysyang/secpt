@@ -208,6 +208,7 @@ function treeStatus(g){
 /* 状态灯：只有 running 是绿；终态成功=橙、失败/取消=红、其他=灰 */
 function dotClass(status){
   const s=(status||"").toLowerCase();
+  if(s==="awaiting_confirm")return "warn";
   if(s==="running")return "running";
   if(s==="failed"||s==="error"||s==="cancelled"||s==="exhausted"||s==="stalled")return "bad";
   if(s==="succeeded"||s==="completed"||s==="done")return "okwarn";
@@ -371,11 +372,12 @@ function workspaceHTML(){
               <button data-m="followup" class="${state.mode==="followup"?"on":""}">追问当前任务</button>
               <button data-m="new" class="on">下达新任务</button>
             </div>
+            <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
             <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
           </div>
         </div>
-        <div class="hero-hint">任务流：Commander 规划拆分 → 执行体 ReAct 并行 → 后勤后台 → 交付门验收 → 经验沉淀</div>
+        <div class="hero-hint">任务流：接战受理（接战单确认）→ Commander 编成派单 → 执行体 ReAct 并行 → 后勤后台 → 交付门验收 → 经验沉淀</div>
       </div>
     </div>
   </div>`;
@@ -423,6 +425,7 @@ function workspaceHTML(){
               <button data-m="followup" class="${state.mode==="followup"?"on":""}" title="消息进入当前任务的作战地图：运行中=人工直探；已收敛=自动续接编排">对话中发布</button>
               <button data-m="new" class="${state.mode==="new"?"on":""}" title="新建独立任务（新对话、新地图）">下达新任务</button>
             </div>
+            <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
             <button class="cbtn send ${curJob().status==="running"?"stoppable":""}" id="btn-send" title="${curJob().status==="running"?"停止任务（协作式取消）":"Ctrl+Enter 发送"}">${curJob().status==="running"?"◼":"↑"}</button>
           </div>
@@ -538,13 +541,15 @@ async function sendComposer(){
       }
       refreshJobData(true);
     }else{
+      const auto=(document.getElementById("c-auto")||{}).checked||false;
       const r=await api("/api/jobs",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({objective:text,profile:curJob().task_type||"ctf",
-          files:state.composerFiles,fake:false})});
+          files:state.composerFiles,fake:false,auto_dispatch:auto})});
       state.composerFiles=[];
       state.newTaskMode=false;
-      toast(`新任务已启动：${r.job_id}（${r.mode}）`);
+      toast(auto?`新任务已启动：${r.job_id}（${r.mode}）`
+                :`接战单生成中：${r.job_id} · 请在右侧作战地图确认开战`);
       await loadJobs();setTask(r.job_id);
     }
   }catch(e){toast(`下发失败：${e.message}`)}
@@ -568,7 +573,7 @@ function renderDock(){
   const hypColor={confirmed:"var(--ok)",refuted:"var(--fg3)",dead:"var(--fg3)",testing:"var(--info)",proposed:"var(--warn)"};
   const hypLbl={confirmed:"已证实",refuted:"已证伪",dead:"已放弃",testing:"验证中",proposed:"新提出"};
   let html="";
-  if(intents.length||hyps.length||w.focus){
+  if(intents.length||hyps.length||w.focus||w.status==="awaiting_confirm"){
     const intentRow=i=>{
       const elapsed=i.status==="running"?fmtDur(Math.max(0,now-(i.updated_at||now))):"";
       return `<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
@@ -576,9 +581,21 @@ function renderDock(){
         <div class="kmain">${i.source==="direct"?'<span class="badge b-type">人工</span>':""}${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
         <div class="ksub"><span>${esc(i.status)}${elapsed?` · ${elapsed}`:""}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`;
     };
-    html+=`<div class="dock-item ${dockOpen==="tasks"?"open":""}" data-d="tasks">
+    html+=`<div class="dock-item ${dockOpen==="tasks"||(dockOpen===""&&w.status==="awaiting_confirm")?"open":""}" data-d="tasks">
       <div class="dock-panel map">
         <h5>作战地图 · ${state.jobId||"—"}</h5>
+        ${w.status==="awaiting_confirm"?`<div class="accept-card">
+          <div class="ac-cap">📋 接战单 · 待确认</div>
+          ${w.goal&&w.goal.restatement?`<div class="ac-row"><span class="mlbl">目标重述</span>${esc(w.goal.restatement)}</div>`:""}
+          ${w.goal?`<div class="ac-row"><span class="mlbl">任务目标</span>${esc((w.goal.objective||"").slice(0,140))}</div>`:""}
+          ${w.goal&&(w.goal.success_criteria||[]).length?`<div class="ac-row"><span class="mlbl">成功标准</span><ul>${w.goal.success_criteria.slice(0,5).map(c=>`<li>${esc(c)}</li>`).join("")}</ul></div>`:""}
+          ${w.goal&&(w.goal.constraints||[]).length?`<div class="ac-row"><span class="mlbl">操作约束</span>${esc(w.goal.constraints.slice(0,3).join("；"))}</div>`:""}
+          <div class="ac-btns">
+            <button class="btn primary" data-act="confirm-accept">✔ 确认开战</button>
+            <button class="btn" data-act="cancel-accept">✘ 取消</button>
+          </div>
+          <div class="ac-hint">确认后 Commander 才编成派单；取消可重发修正后的任务</div>
+        </div>`:""}
         ${w.focus?`<div class="mapsec focus"><span class="mlbl">主攻方向</span>${esc(w.focus)}</div>`:""}
         ${w.goal?`<div class="mapsec"><span class="mlbl">总目标</span>${esc((w.goal.objective||"").slice(0,90))}${(w.goal.asset_scope||[]).length?`<span class="sub">${esc(w.goal.asset_scope.slice(0,4).join("、"))}</span>`:""}</div>`:""}
         <div class="mapbar"><i style="width:${intents.length?done/intents.length*100:0}%"></i></div>
@@ -608,6 +625,21 @@ function renderDock(){
   $$("[data-act=dock]",dock).forEach(b=>b.onclick=()=>{
     const d=b.closest(".dock-item").dataset.d;
     dockOpen=(dockOpen===d?"":d);renderDock();
+  });
+  $$("[data-act=confirm-accept]",dock).forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    try{const r=await api(`/api/jobs/${state.jobId}/confirm`,{method:"POST"});
+      if(r.ok){toast("接战单已确认 · Commander 开始编成派单");await loadWorkspace();renderDock();refreshJobData(true);}
+      else toast(r.error||"确认失败");
+    }catch(e){toast(`确认失败：${e.message}`)}
+    b.disabled=false;
+  });
+  $$("[data-act=cancel-accept]",dock).forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    try{const r=await api(`/api/jobs/${state.jobId}`,{method:"DELETE"});
+      toast(r.ok?"已取消 · 可修正任务后重发":(r.error||"取消失败"));
+      await loadJobs();
+    }catch(e){toast(`取消失败：${e.message}`)}
   });
   $$("[data-act=copy]",dock).forEach(x=>x.onclick=e=>{
     e.stopPropagation();

@@ -352,6 +352,27 @@ tasks 中不需要的键可以省略（max_wall_s 默认 0、notes 默认空、s
 
 {briefing}"""
 
+_ACCEPTANCE_PROMPT = """你是渗透任务的主智能体（Commander），现在执行【接战受理】：用户刚下达一个请求，
+你要先产出《接战单》供人工确认，**不要派发任何任务**（编成派单在确认之后才发生）。
+
+按以下步骤研判：
+1. 重述目标：用一句话写出用户真正想要的结果，而不是用户说的话。若目标含糊，
+   在 risk_notes 里写明"需要澄清：<问题>"，不要猜测。
+2. 写出成功标准：交付物长什么样、包含什么、达到什么程度算完成（任务收口与
+   交付核验都要对照它）。
+3. 评估风险：是否涉及写库、凭据、外联、不可逆操作 → 在 risk_notes 列出需要的授权。
+4. 给出资产范围与操作约束（凭据脱敏、隐藏文件不污染观测）。
+
+只输出一个 JSON 对象（不要 tasks/beliefs/hypotheses/strategy）：
+{{"goal": {{"objective": "结构化后的明确任务目标",
+           "restatement": "一句话目标重述（用户真正想要的结果）",
+           "success_criteria": ["可客观判定的完成标准，至少 1 条"],
+           "constraints": ["边界约束"], "asset_scope": ["域名/IP/端点"],
+           "attack_steps": ["侦察→利用→验证"]}},
+ "risk_notes": ["风险与所需授权；目标含糊时写 需要澄清：<问题>"]}}
+
+{briefing}"""
+
 
 def _apply_beliefs(tree: HypothesisTree, beliefs: list[dict]) -> int:
     n = 0
@@ -407,6 +428,7 @@ async def commander_round(
     need_goal: bool = False,
     flags: list | None = None,  # 已确认战果（简报【当前战果】）
     running: list | None = None,  # 在途任务 [{title, elapsed_s, lane}]（简报态势）
+    acceptance: bool = False,  # 接战受理轮：只产《接战单》（goal+restatement+success_criteria），不派单
 ) -> CommanderOutcome:
     """Commander 一次唤醒。返回结果（含 decision，供主循环处理 deliver）。
 
@@ -416,7 +438,7 @@ async def commander_round(
     """
     path = path if path is not None else None
     old_doc = load_strategy(path) if path is not None else ""
-    prompt = _COMMANDER_PROMPT.format(
+    prompt = (_ACCEPTANCE_PROMPT if acceptance else _COMMANDER_PROMPT).format(
         briefing=_briefing(
             objective,
             fr,
@@ -461,6 +483,8 @@ async def commander_round(
                 constraints=[str(c)[:300] for c in (g.get("constraints") or [])][:20],
                 asset_scope=[str(a)[:300] for a in (g.get("asset_scope") or [])][:50],
                 attack_steps=[str(s)[:300] for s in (g.get("attack_steps") or [])][:20],
+                restatement=str(g.get("restatement") or "")[:500],
+                success_criteria=[str(c)[:300] for c in (g.get("success_criteria") or [])][:10],
             )
     if need_goal:
         from secpt.core.profile.loader import valid_prior, valid_role
@@ -472,6 +496,14 @@ async def commander_round(
             _p = str(_pr or "").strip()
             if _p and valid_prior(_p) and _p not in outcome.priors:
                 outcome.priors.append(_p)
+
+    if acceptance:
+        # 接战受理轮：只取 goal（+risk_notes 打印留痕），信念/派单等确认后再做
+        with contextlib.suppress(Exception):
+            _rn = payload.get("risk_notes")
+            if _rn:
+                print(f"[commander] 接战单风险提示：{str(_rn)[:200]}", flush=True)
+        return outcome
 
     # 1) 信念结算
     beliefs = payload.get("beliefs") or []
