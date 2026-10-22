@@ -596,6 +596,13 @@ function bindWorkspace(){
   renderTaskPanel();
   $$(".chip[data-f]",body).forEach(c=>c.onclick=()=>{state.filter=c.dataset.f;$$(".chip[data-f]",body).forEach(x=>x.classList.toggle("on",x===c));applyFilter()});
   const wf=$("#ws-follow");if(wf)wf.onchange=e=>{state.follow=e.target.checked};
+  /* 手动上滚 → 暂停跟随（否则 1.5s 轮询重建会把视图拽回底部）；回到底部自动恢复 */
+  const feedEl=$("#feed");
+  if(feedEl)feedEl.addEventListener("scroll",()=>{
+    const near=feedEl.scrollHeight-feedEl.scrollTop-feedEl.clientHeight<48;
+    if(!near&&state.follow){state.follow=false;if(wf)wf.checked=false}
+    else if(near&&!state.follow){state.follow=true;if(wf)wf.checked=true}
+  },{passive:true});
   // 新建模式无 feed：renderFeed/renderTaskPanel 对缺失元素有守卫，安全
   $$(".mode-switch button",body).forEach(b=>b.onclick=()=>{
     state.mode=b.dataset.m;
