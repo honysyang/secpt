@@ -335,38 +335,41 @@ function renderTimeline(rounds,now,running){
   for(const e of evs){
     if(e.type==="user_msg"&&isUserEvent(e)){
       const lbl=USER_KIND_LBL[e.payload.kind]||e.payload.kind||"消息";
-      nodes+=`<button class="tl-node user" style="left:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
+      nodes+=`<button class="tl-node user" style="top:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
     }
   }
   for(const r of rounds){
     const dur=(running&&r===rounds[rounds.length-1]?now:r.t1)-r.t0;
     const st=roundStatus(r,r===rounds[rounds.length-1],running,curJob().status,now);
-    nodes+=`<button class="tl-node round ${st.cls}" style="left:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
+    nodes+=`<button class="tl-node round ${st.cls}" style="top:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
   }
   for(const e of evs){
     if(e.type!=="tool_call")continue;
     const res=results.get(e.payload.call_id);
     const dur=res?Math.max(0,res.ts-e.ts):null;
     const tip=`${e.payload.tool} · ${fmtT(e.ts)}${dur!=null?` · 用时 ${fmtSec(dur)}`:" · 进行中"}`;
-    nodes+=`<button class="tl-node tool" style="left:${pos(e.ts)}%" data-kind="tool" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(tip)}" aria-label="工具调用"></button>`;
+    nodes+=`<button class="tl-node tool" style="top:${pos(e.ts)}%" data-kind="tool" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(tip)}" aria-label="工具调用"></button>`;
   }
   const total=(running?now:tLast)-t0;
   const bad=["failed","cancelled","stalled"].includes(curJob().status);
-  const totalTxt=running?`进行中 · 累计 ${fmtSec(total)}`:(bad?`✕ 任务结束 · 总耗时 ${fmtSec(total)}`:`✓ 任务完成 · 总耗时 ${fmtSec(total)}`);
+  const tCls=running?"run":bad?"bad":"done";
+  const tK=running?"● 进行中":bad?"✕ 已结束":"✓ 任务完成";
+  const tV=fmtSec(total);
+  const tTitle=running?`进行中 · 累计 ${tV}`:(bad?`任务结束 · 总耗时 ${tV}`:`任务完成 · 总耗时 ${tV}`);
   el.innerHTML=`<div class="tl-wrap">
-    <div class="tl-head">
+    <div class="tl-side-head">
       <span class="tl-title">时间线</span>
-      <span class="tl-legend"><i class="lg-user"></i>用户<i class="lg-round"></i>轮次<i class="lg-tool"></i>工具</span>
-      <span class="tl-total ${running?"run":bad?"bad":"done"}">${totalTxt}</span>
+      <div class="tl-total ${tCls}" title="${esc(tTitle)}"><span class="tl-total-k">${tK}</span><b>${tV}</b></div>
     </div>
     <div class="tl-track">${nodes}<div class="tl-tip" id="tl-tip"></div></div>
+    <div class="tl-legend"><span><i class="lg-user"></i>用户</span><span><i class="lg-round"></i>轮次</span><span><i class="lg-tool"></i>工具</span></div>
   </div>`;
   const track=$(".tl-track",el),tip=$("#tl-tip",el);
   $$(".tl-node",el).forEach(n=>{
-    n.onmousemove=e=>{
-      const r=track.getBoundingClientRect();
+    n.onmousemove=()=>{
+      const nr=n.getBoundingClientRect(),tr=track.getBoundingClientRect();
       tip.textContent=n.dataset.tip||"";
-      tip.style.left=Math.max(8,Math.min(r.width-8,e.clientX-r.left))+"px";
+      tip.style.top=Math.max(10,Math.min(tr.height-10,nr.top-tr.top+nr.height/2))+"px";
       tip.classList.add("show");
       const p=$(`.round-panel[data-round="${n.dataset.round}"]`);
       if(p)p.classList.add("linked");
@@ -756,8 +759,10 @@ function workspaceHTML(){
         ${[["all","全部"],["tool","工具"],["agent","智能体"],["milestone","成果"]].map(([v,l])=>`<button class="chip ${state.filter===v?"on":""}" data-f="${v}">${l}</button>`).join("")}
         <label class="follow"><input type="checkbox" id="ws-follow" ${state.follow?"checked":""}>跟随</label>
       </div>
-      <div class="feed-timeline" id="feed-timeline"></div>
-      <div class="feed" id="feed"></div>
+      <div class="feed-row">
+        <aside class="feed-timeline" id="feed-timeline" aria-label="对话时间线"></aside>
+        <div class="feed" id="feed"></div>
+      </div>
       <div class="composer-float">
         <div class="composer">
           <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>Agent is generating…</span></div>
