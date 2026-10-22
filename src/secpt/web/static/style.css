@@ -231,11 +231,12 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .cbtn.send:hover{opacity:.85}
 
 /* ═══════════ 右上角悬浮胶囊坞 ═══════════ */
-.dock{position:fixed;top:68px;right:22px;z-index:80;display:flex;flex-direction:column;gap:10px;align-items:flex-end}
-.dock-item{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
-.dock-panel{display:none;width:390px;max-height:52vh;overflow-y:auto;background:var(--bg1);border:1px solid var(--line2);border-radius:14px;padding:15px;box-shadow:0 24px 70px rgba(0,0,0,.5)}
-.dock-item.open .dock-panel{display:block;animation:dockin .16s ease}
-@keyframes dockin{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.dock{position:fixed;top:68px;right:22px;z-index:80;display:flex;flex-direction:column;gap:8px;width:390px;align-items:stretch}
+.dock-item{display:flex;flex-direction:column;align-items:stretch;gap:0}
+.dock-panel{display:grid;grid-template-rows:0fr;opacity:0;margin-top:0;background:var(--bg1);border:1px solid var(--line2);border-radius:12px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.5);transition:grid-template-rows .22s ease,opacity .16s ease,margin-top .22s ease;pointer-events:none}
+.dock-panel-inner{min-height:0;max-height:52vh;overflow-y:auto}
+.dock-pad{padding:14px}
+.dock-item.open .dock-panel{grid-template-rows:1fr;opacity:1;margin-top:8px;pointer-events:auto}
 .dock-panel h5{margin:2px 0 11px;font:10.5px var(--mono);color:var(--fg3);letter-spacing:.12em;font-weight:500}
 .dockstat{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .dockstat span{font:10.5px var(--mono);color:var(--fg3);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
@@ -248,11 +249,19 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .planlist{margin:7px 0 0;padding-left:18px;color:var(--fg2);font-size:12.5px;line-height:1.7}
 .planlist li{margin:1px 0}
 .planlist .lane{font:9.5px var(--mono);border-radius:4px;padding:0 5px;margin-left:7px;background:var(--bg3);color:var(--fg2)}
-.dock-pill{display:flex;align-items:center;gap:9px;background:var(--bg1);border:1px solid var(--line2);border-radius:99px;padding:8px 18px;font-size:12.5px;color:var(--fg2);cursor:pointer;box-shadow:0 12px 36px rgba(0,0,0,.45);transition:border-color .12s,color .12s}
+.dock-pill{display:flex;align-items:center;gap:8px;width:100%;background:var(--bg1);border:1px solid var(--line2);border-radius:10px;padding:9px 13px;font-size:12.5px;color:var(--fg2);cursor:pointer;box-shadow:0 12px 36px rgba(0,0,0,.35);transition:border-color .12s,color .12s;text-align:left}
+.dp-title{font-weight:600;color:var(--fg);white-space:nowrap}
+.dp-meta{margin-left:auto;font:10.5px var(--mono);color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dp-state{font:9.5px var(--mono);border:1px solid var(--line2);border-radius:99px;padding:0 7px;line-height:16px;color:var(--fg3);white-space:nowrap;flex:none}
+.dp-state.run{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.dp-state.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.dp-state.done{color:var(--fg2)}
+.dp-state.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+.dp-ic{color:var(--c-ok);font-size:12px;flex:none}
 .dock-pill:hover{border-color:var(--fg3);color:var(--fg)}
 .dock-item.open .dock-pill{border-color:var(--fg3);color:var(--fg)}
 .dock-pill .pv{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;color:var(--fg)}
-.dock-pill .caret-ic{font-size:8.5px;color:var(--fg3);transition:transform .15s}
+.dock-pill .caret-ic{font-size:8.5px;color:var(--fg3);transition:transform .18s;flex:none;margin-left:2px}
 .dock-item.open .caret-ic{transform:rotate(180deg)}
 .kcard{border:1px solid var(--line);border-radius:7px;padding:8px 11px;margin-bottom:8px;background:var(--bg2);font-size:12px;line-height:1.5;overflow:hidden}
 .kcard .kmain{flex:1;min-width:0}
@@ -641,13 +650,17 @@ input:focus,textarea:focus{border-color:var(--line2)}
   .tl-head{gap:8px}
 }
 
-/* 移动端胶囊坞：收成两个圆形图标按钮，面板仍向上展开 */
+/* 移动端坞：两张手风琴卡全宽叠放，内容向上展开 */
 @media (max-width:760px){
-  .dock{flex-direction:row;align-items:flex-end;gap:8px;bottom:152px}
-  .dock-item{align-items:flex-end}
-  .dock-pill.map,.dock-pill.outcome{width:36px;height:36px;padding:0;border-radius:50%;justify-content:center;font-size:0;gap:0}
-  .dock-pill .pv,.dock-pill .caret-ic,.dock-pill .dot{display:none}
-  .dock-pill.map::before{content:"◈";font:14px var(--ui)}
-  .dock-pill.outcome::before{content:"⚑";font:14px var(--ui);color:var(--c-ok)}
-  .dock-item.open .dock-pill.map::before,.dock-item.open .dock-pill.outcome::before{color:var(--fg)}
+  .dock{left:10px;right:10px;width:auto;top:auto;bottom:150px;flex-direction:column;gap:8px}
+  .dock-item{flex-direction:column-reverse}
+  .dock-item.open .dock-panel{margin-top:0;margin-bottom:8px}
+  .dock-panel-inner{max-height:44vh}
+  .dock-pad{padding:12px}
+  .dp-meta{font-size:10px}
+}
+
+/* 宽屏为右上角手风琴坞预留头部空间，避免遮住任务元信息与过滤器 */
+@media (min-width:1400px){
+  .anchor-bar{padding-right:430px}
 }

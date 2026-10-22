@@ -102,6 +102,7 @@ function renderNav(){
 }
 function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;
   state.openKeys.clear();state.closedKeys.clear();state.roundOpen={};state.workOpen={};state.toolOpen={};FILE_BUF.clear();COPY_BUF.clear();
+  M.workspace={};dockState.mapSig="";dockState.outSig="";
   renderDock();
   if(state.view!=="workspace")setView("workspace");else renderBody();refreshJobData(true)}
 function setView(v){state.view=v;renderNav();renderBody()}
@@ -903,99 +904,200 @@ async function sendComposer(){
   }catch(e){toast(`下发失败：${e.message}`)}
 }
 
-/* ── 右上角悬浮胶囊坞 ── */
-let dockOpen="";
-function closeDock(){if(dockOpen){dockOpen="";renderDock()}}
-function renderDock(){
+/* ── 右上角悬浮手风琴坞（作战地图 / 产出成果）──
+   交互：点击只切换本地 open 类（CSS 过渡），不发请求、不重建 DOM；
+   数据：按签名比对，只有工作区数据确实变化时才更新对应面板，轮询空转
+        不产生任何 DOM 写入；展开态与面板滚动位置保持不变。 */
+const dockState={open:new Set(),mapSig:"",outSig:"",built:false,bound:false};
+
+function closeDock(){
+  dockState.open.clear();
+  $$("#dock .dock-item").forEach(it=>{
+    it.classList.remove("open");
+    const b=it.querySelector(".dock-pill");
+    if(b)b.setAttribute("aria-expanded","false");
+  });
+}
+
+/* 骨架只建一次：标题栏（概要）+ 可折叠内容区 */
+function dockSkeleton(){
+  const dock=$("#dock");if(!dock||dockState.built)return;
+  dock.innerHTML=`
+    <div class="dock-item" data-d="tasks" style="display:none">
+      <button class="dock-pill map" data-act="dock" aria-expanded="false">
+        <span class="dot" id="dock-map-dot"></span>
+        <span class="dp-title">作战地图</span>
+        <span class="dp-meta" id="dock-map-meta"></span>
+        <span class="dp-state" id="dock-map-state"></span>
+        <span class="caret-ic">▼</span>
+      </button>
+      <div class="dock-panel"><div class="dock-panel-inner" id="dock-map-body"></div></div>
+    </div>
+    <div class="dock-item" data-d="outcome" style="display:none">
+      <button class="dock-pill outcome" data-act="dock" aria-expanded="false">
+        <span class="dp-ic">⚑</span>
+        <span class="dp-title">产出成果</span>
+        <span class="dp-meta" id="dock-out-meta"></span>
+        <span class="dp-state" id="dock-out-state"></span>
+        <span class="caret-ic">▼</span>
+      </button>
+      <div class="dock-panel"><div class="dock-panel-inner" id="dock-out-body"></div></div>
+    </div>`;
+  dockState.built=true;
+}
+
+function dockSyncOpen(item,key){
+  if(!item)return;
+  const open=dockState.open.has(key);
+  item.classList.toggle("open",open);
+  const b=item.querySelector(".dock-pill");
+  if(b)b.setAttribute("aria-expanded",String(open));
+}
+
+function dockMapBody(w,intents,hyps,hc,running,open,done,settledN){
+  const stColor={open:"var(--info)",running:"var(--ok)",done:"var(--fg3)",exhausted:"var(--bad)"};
+  const hypColor={confirmed:"var(--ok)",refuted:"var(--fg3)",dead:"var(--fg3)",testing:"var(--info)",proposed:"var(--warn)"};
+  const hypLbl={confirmed:"已证实",refuted:"已证伪",dead:"已放弃",testing:"验证中",proposed:"新提出"};
+  const intentRow=i=>`<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
+      <span class="dot" style="margin-top:5px;${i.status==="running"?"animation:pulse 1.8s infinite;":""}background:${stColor[i.status]||"var(--fg3)"}"></span>
+      <div class="kmain">${i.source==="direct"?'<span class="badge b-type">人工</span>':""}${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
+      <div class="ksub"><span>${esc(i.status)}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`;
+  return `
+    ${w.status==="awaiting_confirm"?`<div class="accept-card">
+      <div class="ac-cap">📋 接战单 · 待确认</div>
+      ${w.goal&&w.goal.restatement?`<div class="ac-row"><span class="mlbl">目标重述</span>${esc(w.goal.restatement)}</div>`:""}
+      ${w.goal?`<div class="ac-row"><span class="mlbl">任务目标</span>${esc((w.goal.objective||"").slice(0,140))}</div>`:""}
+      ${w.goal&&(w.goal.success_criteria||[]).length?`<div class="ac-row"><span class="mlbl">成功标准</span><ul>${w.goal.success_criteria.slice(0,5).map(c=>`<li>${esc(c)}</li>`).join("")}</ul></div>`:""}
+      ${w.goal&&(w.goal.constraints||[]).length?`<div class="ac-row"><span class="mlbl">操作约束</span>${esc(w.goal.constraints.slice(0,3).join("；"))}</div>`:""}
+      <div class="ac-btns">
+        <button class="btn primary" data-act="confirm-accept">✔ 确认开战</button>
+        <button class="btn" data-act="cancel-accept">✘ 取消</button>
+      </div>
+      <div class="ac-hint">确认后 Commander 才编成派单；取消可重发修正后的任务</div>
+    </div>`:""}
+    ${w.focus?`<div class="mapsec focus"><span class="mlbl">主攻方向</span>${esc(w.focus)}</div>`:""}
+    ${w.goal?`<div class="mapsec"><span class="mlbl">总目标</span>${esc((w.goal.objective||"").slice(0,90))}${(w.goal.asset_scope||[]).length?`<span class="sub">${esc(w.goal.asset_scope.slice(0,4).join("、"))}</span>`:""}</div>`:""}
+    <div class="mapbar"><i style="width:${intents.length?done/intents.length*100:0}%"></i></div>
+    <div class="dockstat"><span class="ds-running">${running.length} 执行中</span><span class="ds-open">${open.length} 待执行</span><span class="ds-done">${done} 完成</span>${settledN?`<span class="ds-exhausted">${settledN} 结算</span>`:""}<span>${intents.length} 项</span></div>
+    ${Object.keys(hc).filter(k=>hc[k]>0&&hypLbl[k]).map(k=>`<span class="hpchip" style="color:${hypColor[k]};border-color:${hypColor[k]}">${hypLbl[k]} ${hc[k]}</span>`).join("")}
+    ${hyps.filter(h=>h.state==="testing"||h.state==="proposed").slice(0,4).map(h=>`<div class="hypline"><span class="hpchip sm" style="color:${hypColor[h.state]};border-color:${hypColor[h.state]}">${hypLbl[h.state]||h.state}</span><span class="htxt" title="${esc(h.test||"")}">${esc(h.title)}</span><span class="conf">${Math.round((h.confidence||0)*100)}%</span></div>`).join("")}
+    <div class="mapsec-cap">执行中</div>
+    ${running.map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
+    <div class="mapsec-cap">待执行</div>
+    ${open.slice(0,6).map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}`;
+}
+
+function dockOutBody(flags,w,finds){
+  return `
+    ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
+    ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
+    <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
+    ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">本任务暂无发现</div>'}`;
+}
+
+function renderDock(force=false){
   const dock=$("#dock");if(!dock)return;
+  dockSkeleton();
   const w=M.workspace||{},intents=w.intents||[];
   const hyps=w.hypotheses||[],hc=w.hypothesis_counts||{};
-  const now=Date.now()/1000;
   const done=intents.filter(i=>i.status==="done").length;
   const running=intents.filter(i=>i.status==="running");
   const open=intents.filter(i=>i.status==="open");
   const settledN=intents.length-done-running.length-open.length;
   const flags=(M.events||[]).filter(e=>e.type==="finding"&&e.payload.kind==="flag");
   const finds=(M.findings||[]).filter(f=>f.job_id===state.jobId||String(f.job_id||"").startsWith((state.jobId||"⌂")+"-"));
-  const stColor={open:"var(--info)",running:"var(--ok)",done:"var(--fg3)",exhausted:"var(--bad)"};
-  const hypColor={confirmed:"var(--ok)",refuted:"var(--fg3)",dead:"var(--fg3)",testing:"var(--info)",proposed:"var(--warn)"};
-  const hypLbl={confirmed:"已证实",refuted:"已证伪",dead:"已放弃",testing:"验证中",proposed:"新提出"};
-  let html="";
-  if(intents.length||hyps.length||w.focus||w.status==="awaiting_confirm"){
-    const intentRow=i=>{
-      const elapsed=i.status==="running"?fmtDur(Math.max(0,now-(i.updated_at||now))):"";
-      return `<div class="kcard" style="display:flex;gap:9px;align-items:flex-start">
-        <span class="dot" style="margin-top:5px;${i.status==="running"?"animation:pulse 1.8s infinite;":""}background:${stColor[i.status]||"var(--fg3)"}"></span>
-        <div class="kmain">${i.source==="direct"?'<span class="badge b-type">人工</span>':""}${esc(i.title)}<span class="lane ${i.lane==="main"?"lane-main":"lane-logistics"}">${i.lane==="main"?"主":"后勤"}</span>
-        <div class="ksub"><span>${esc(i.status)}${elapsed?` · ${elapsed}`:""}</span>${i.hypothesis?`<span>→ ${esc(i.hypothesis)}</span>`:""}${i.fail_reason?`<span>${esc(i.fail_reason.slice(0,60))}</span>`:""}</div></div></div>`;
-    };
-    html+=`<div class="dock-item ${dockOpen==="tasks"||(dockOpen===""&&w.status==="awaiting_confirm")?"open":""}" data-d="tasks">
-      <div class="dock-panel map">
-        <h5>作战地图 · ${state.jobId||"—"}</h5>
-        ${w.status==="awaiting_confirm"?`<div class="accept-card">
-          <div class="ac-cap">📋 接战单 · 待确认</div>
-          ${w.goal&&w.goal.restatement?`<div class="ac-row"><span class="mlbl">目标重述</span>${esc(w.goal.restatement)}</div>`:""}
-          ${w.goal?`<div class="ac-row"><span class="mlbl">任务目标</span>${esc((w.goal.objective||"").slice(0,140))}</div>`:""}
-          ${w.goal&&(w.goal.success_criteria||[]).length?`<div class="ac-row"><span class="mlbl">成功标准</span><ul>${w.goal.success_criteria.slice(0,5).map(c=>`<li>${esc(c)}</li>`).join("")}</ul></div>`:""}
-          ${w.goal&&(w.goal.constraints||[]).length?`<div class="ac-row"><span class="mlbl">操作约束</span>${esc(w.goal.constraints.slice(0,3).join("；"))}</div>`:""}
-          <div class="ac-btns">
-            <button class="btn primary" data-act="confirm-accept">✔ 确认开战</button>
-            <button class="btn" data-act="cancel-accept">✘ 取消</button>
-          </div>
-          <div class="ac-hint">确认后 Commander 才编成派单；取消可重发修正后的任务</div>
-        </div>`:""}
-        ${w.focus?`<div class="mapsec focus"><span class="mlbl">主攻方向</span>${esc(w.focus)}</div>`:""}
-        ${w.goal?`<div class="mapsec"><span class="mlbl">总目标</span>${esc((w.goal.objective||"").slice(0,90))}${(w.goal.asset_scope||[]).length?`<span class="sub">${esc(w.goal.asset_scope.slice(0,4).join("、"))}</span>`:""}</div>`:""}
-        <div class="mapbar"><i style="width:${intents.length?done/intents.length*100:0}%"></i></div>
-        <div class="dockstat"><span class="ds-running">${running.length} 执行中</span><span class="ds-open">${open.length} 待执行</span><span class="ds-done">${done} 完成</span>${settledN?`<span class="ds-exhausted">${settledN} 结算</span>`:""}<span>${intents.length} 项</span></div>
-        ${Object.keys(hc).filter(k=>hc[k]>0&&hypLbl[k]).map(k=>`<span class="hpchip" style="color:${hypColor[k]};border-color:${hypColor[k]}">${hypLbl[k]} ${hc[k]}</span>`).join("")}
-        ${hyps.filter(h=>h.state==="testing"||h.state==="proposed").slice(0,4).map(h=>`<div class="hypline"><span class="hpchip sm" style="color:${hypColor[h.state]};border-color:${hypColor[h.state]}">${hypLbl[h.state]||h.state}</span><span class="htxt" title="${esc(h.test||"")}">${esc(h.title)}</span><span class="conf">${Math.round((h.confidence||0)*100)}%</span></div>`).join("")}
-        <div class="mapsec-cap">执行中</div>
-        ${running.map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
-        <div class="mapsec-cap">待执行</div>
-        ${open.slice(0,6).map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
-      </div>
-      <button class="dock-pill map" data-act="dock"><span class="dot ${running.length?"running":""}" style="${running.length?"":"background:var(--fg3)"}"></span>作战地图<span class="pv">${running.length?running.length+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
-    </div>`;
-  }
-  if(flags.length||finds.length||w.delivery){
-    html+=`<div class="dock-item ${dockOpen==="outcome"?"open":""}" data-d="outcome">
-      <div class="dock-panel">
-        ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
-        ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
-        <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
-        ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">本任务暂无发现</div>'}
-      </div>
-      <button class="dock-pill outcome" data-act="dock">⚑ 产出成果<span class="pv">${(flags.length?flags.length+" 旗":"")+(flags.length&&finds.length?" · ":"")+(finds.length?finds.length+" 发现":"")}</span><span class="caret-ic">▼</span></button>
-    </div>`;
-  }
-  dock.innerHTML=html;
-  $$("[data-act=dock]",dock).forEach(b=>b.onclick=()=>{
-    const d=b.closest(".dock-item").dataset.d;
-    dockOpen=(dockOpen===d?"":d);renderDock();
+  const hasMap=!!(intents.length||hyps.length||w.focus||w.status==="awaiting_confirm");
+  const hasOut=!!(flags.length||finds.length||w.delivery);
+
+  const mapItem=dock.querySelector('[data-d="tasks"]');
+  const outItem=dock.querySelector('[data-d="outcome"]');
+  if(mapItem){mapItem.style.display=hasMap?"":"none";dockSyncOpen(mapItem,"tasks")}
+  if(outItem){outItem.style.display=hasOut?"":"none";dockSyncOpen(outItem,"outcome")}
+
+  /* 数据签名：只比对内容字段，不含时间戳，轮询空转时零 DOM 写入 */
+  const mapSig=JSON.stringify([w.status,w.focus,
+    w.goal?[w.goal.objective,w.goal.restatement,w.goal.asset_scope,w.goal.constraints,w.goal.success_criteria]:null,
+    intents.map(i=>[i.id,i.title,i.status,i.lane,i.hypothesis,i.fail_reason,i.source]),
+    hyps.map(h=>[h.id,h.state,h.title,h.test,Math.round((h.confidence||0)*100)]),hc]);
+  const outSig=JSON.stringify([flags.map(f=>f.payload.value),w.delivery,
+    finds.map(f=>[f.id,f.severity,f.title,f.confidence])]);
+
+  if(hasMap&&(force||mapSig!==dockState.mapSig)){
+    const dot=$("#dock-map-dot",dock),meta=$("#dock-map-meta",dock),st=$("#dock-map-state",dock);
+    if(dot)dot.className="dot "+dotClass(w.status||"");
+    if(meta)meta.textContent=w.status==="awaiting_confirm"?"接战单待确认"
+      :`${intents.length} 项${running.length?` · ${running.length} 执行中`:""}${done?` · ${done} 完成`:""}`;
+    if(st){
+      const L={running:"运行中",awaiting_confirm:"待确认",succeeded:"已完成",failed:"失败",cancelled:"已取消",stalled:"已停滞"}[w.status]||"";
+      st.textContent=L;
+      st.className="dp-state "+(w.status==="running"?"run":w.status==="awaiting_confirm"?"warn":"done");
+    }
+    const body=$("#dock-map-body",dock);
+    if(body){const sc=body.scrollTop;body.innerHTML=`<div class="dock-pad">${dockMapBody(w,intents,hyps,hc,running,open,done,settledN)}</div>`;body.scrollTop=sc}
+    dockState.mapSig=mapSig;
+  }else if(!hasMap){dockState.mapSig=""}
+
+  if(hasOut&&(force||outSig!==dockState.outSig)){
+    const meta=$("#dock-out-meta",dock),st=$("#dock-out-state",dock);
+    if(meta)meta.textContent=[flags.length?`${flags.length} 旗`:"",finds.length?`${finds.length} 发现`:""].filter(Boolean).join(" · ")||"—";
+    if(st){
+      st.textContent=w.delivery?(w.delivery.accepted?"已交付":"未通过"):"收集中";
+      st.className="dp-state "+(w.delivery?(w.delivery.accepted?"done":"bad"):"run");
+    }
+    const body=$("#dock-out-body",dock);
+    if(body){const sc=body.scrollTop;body.innerHTML=`<div class="dock-pad">${dockOutBody(flags,w,finds)}</div>`;body.scrollTop=sc}
+    dockState.outSig=outSig;
+  }else if(!hasOut){dockState.outSig=""}
+}
+
+/* 事件委托只绑一次：点击不触发任何渲染，仅切换本地 open 类 */
+function bindDockEvents(){
+  const dock=$("#dock");if(!dock||dockState.bound)return;
+  dockState.bound=true;
+  dock.addEventListener("click",async e=>{
+    const pill=e.target.closest("[data-act=dock]");
+    if(pill){
+      const item=pill.closest(".dock-item"),key=item.dataset.d;
+      const open=!item.classList.contains("open");
+      item.classList.toggle("open",open);
+      pill.setAttribute("aria-expanded",String(open));
+      if(open)dockState.open.add(key);else dockState.open.delete(key);
+      return;
+    }
+    const acc=e.target.closest("[data-act=confirm-accept]");
+    if(acc){
+      acc.disabled=true;
+      try{
+        const r=await api(`/api/jobs/${state.jobId}/confirm`,{method:"POST"});
+        if(r.ok){toast("接战单已确认 · Commander 开始编成派单");await loadWorkspace();renderDock(true);refreshJobData(true);}
+        else toast(r.error||"确认失败");
+      }catch(err){toast(`确认失败：${err.message}`)}
+      acc.disabled=false;
+      return;
+    }
+    const cancel=e.target.closest("[data-act=cancel-accept]");
+    if(cancel){
+      cancel.disabled=true;
+      try{
+        const r=await api(`/api/jobs/${state.jobId}`,{method:"DELETE"});
+        toast(r.ok?"已取消 · 可修正任务后重发":(r.error||"取消失败"));
+        await loadJobs();
+      }catch(err){toast(`取消失败：${err.message}`)}
+      cancel.disabled=false;
+      return;
+    }
+    const copy=e.target.closest("[data-act=copy]");
+    if(copy){
+      const val=copy.closest(".flagbox")?.querySelector("span")?.textContent;
+      if(val)copyText(val);
+      return;
+    }
+    const hyp=e.target.closest(".hyp[data-f]");
+    if(hyp){
+      const f=(M.findings||[]).find(x=>x.id===hyp.dataset.f);
+      if(f)openFinding(f);
+    }
   });
-  $$("[data-act=confirm-accept]",dock).forEach(b=>b.onclick=async()=>{
-    b.disabled=true;
-    try{const r=await api(`/api/jobs/${state.jobId}/confirm`,{method:"POST"});
-      if(r.ok){toast("接战单已确认 · Commander 开始编成派单");await loadWorkspace();renderDock();refreshJobData(true);}
-      else toast(r.error||"确认失败");
-    }catch(e){toast(`确认失败：${e.message}`)}
-    b.disabled=false;
-  });
-  $$("[data-act=cancel-accept]",dock).forEach(b=>b.onclick=async()=>{
-    b.disabled=true;
-    try{const r=await api(`/api/jobs/${state.jobId}`,{method:"DELETE"});
-      toast(r.ok?"已取消 · 可修正任务后重发":(r.error||"取消失败"));
-      await loadJobs();
-    }catch(e){toast(`取消失败：${e.message}`)}
-  });
-  $$("[data-act=copy]",dock).forEach(x=>x.onclick=e=>{
-    e.stopPropagation();
-    const val=x.parentElement.querySelector("span").textContent;
-    try{navigator.clipboard&&navigator.clipboard.writeText(val)}catch(err){}
-    toast("已复制到剪贴板");
-  });
-  $$(".hyp[data-f]",dock).forEach(el=>el.onclick=()=>{const f=finds.find(x=>x.id===el.dataset.f);if(f)openFinding(f)});
 }
 
 /* ── 其他视图 ── */
@@ -1293,11 +1395,18 @@ async function boot(){
   await Promise.all([loadJobs(),loadAssets(),loadFindings(),loadTools(),loadExperience(),loadConfig()]);
   if(state.jobId)try{await loadEvents(true)}catch(e){}
   await loadWorkspace();
+  bindDockEvents();
   renderNav();setView("workspace");renderDock();
   setInterval(async()=>{try{await loadEvents(false);
     if(state.view==="workspace"){renderFeed();renderTaskPanel()}
     syncSendBtn();renderDock()}catch(e){}},1500);
-  setInterval(async()=>{try{await Promise.all([loadWorkspace(),loadJobs(),loadFindings(),loadExperience()]);
+  setInterval(async()=>{try{
+    /* 坞收起且任务已收口时不再轮询 workspace：作战地图/成果是静态终态，
+       轮询既无收益也会造成无谓刷新；运行中/待确认/坞展开时才保持 4s 更新 */
+    const needWs=viewRunning()||curJob().status==="awaiting_confirm"||dockState.open.size>0;
+    const ps=[loadJobs(),loadFindings(),loadExperience()];
+    if(needWs)ps.push(loadWorkspace());
+    await Promise.all(ps);
     if(state.view==="workspace")renderTaskPanel();
     renderNav();renderDock()}catch(e){}},4000);
   setInterval(async()=>{try{await loadAssets();await loadConfig();
