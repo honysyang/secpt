@@ -58,8 +58,10 @@ L2 不感知其他执行体（协作只经 L1 的黑板）；L3 只被上三层�
 
 ```
 Gateway 接入（自然语言 + 附件；协议闸口仅检测 benchmark 平台协议——规则命中即战役跑分）
-  → CDR 首轮唤醒（任务理解 + 角色赋予）：
-        理解客户原始需求 → 产 GoalSpec（落盘 goal.json）
+  → CDR 首轮唤醒（受理《接战单》→ 任务理解 + 角色赋予）：
+        Web 路径先产接战单（目标重述/成功标准，人工确认后放行；auto_dispatch 可跳过）
+        理解客户原始需求 → 产 GoalSpec（落盘 goal.json，含 restatement/success_criteria——
+        交付核验与收敛裁决的客观锚）
         角色/安全场景选择（从角色目录选一，落盘 role.json）+ 经验选择（priors）
         假设树 v0 + 战略文档 v0 + 拆分派首批任务
         派单三要素：max_wall_s（何时截止）+ notes（注意事项：边界/风险/禁止动作）
