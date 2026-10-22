@@ -10,6 +10,7 @@ const $=(s,el=document)=>el.querySelector(s), $$=(s,el=document)=>[...el.querySe
 const esc=t=>{const d=document.createElement("div");d.textContent=t==null?"":String(t);return d.innerHTML};
 const fmtT=ts=>{const d=new Date(ts*1000);return d.toTimeString().slice(0,8)};
 const fmtDur=s=>s<60?`${s.toFixed(0)}s`:`${Math.floor(s/60)}m${Math.round(s%60)}s`;
+const fmtSec=s=>{s=Math.max(0,s);if(s<0.05)return "<0.1s";return s<60?`${s.toFixed(1)}s`:`${Math.floor(s/60)}m${Math.round(s%60)}s`};
 const fmtTok=n=>n>=1000?(n/1000).toFixed(1)+"k":""+n;
 const fmtCny=n=>"¥"+(n||0).toFixed(4);
 
@@ -19,11 +20,13 @@ const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"followup",
   labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
   assetTypes:[],assetQ:"",findSev:["critical","high","medium","low"],findQ:"",
   expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false,
-  openKeys:new Set(),closedKeys:new Set(),roundOpen:{}};
+  openKeys:new Set(),closedKeys:new Set(),roundOpen:{},workOpen:{},toolOpen:{}};
 const AGENT_IC="⬡";
 const ACOLORS=["#9E8CF0","#6BA8E8","#3ECF8E","#E8792B","#E86AA6","#E0B04A"];
 /* 终端/文件卡片的高保真资源：内联 SVG（不引外链，离线可用） */
 const ROBOT_SVG=`<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3.5" y="7.5" width="17" height="12" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="13.4" r="1.35" fill="currentColor"/><circle cx="15" cy="13.4" r="1.35" fill="currentColor"/><path d="M9.5 16.6h5M12 7.5V4.2M8.6 4.2h6.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+const BRAIN_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9.5 4.5A3 3 0 0 0 6.6 7a3.2 3.2 0 0 0-1.8 2.8c0 1 .4 1.9 1.1 2.5a3 3 0 0 0 .1 4.9 3 3 0 0 0 2.5 2.3A3 3 0 0 0 12 21V4.8a3 3 0 0 0-2.5-.3Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M14.5 4.5A3 3 0 0 1 17.4 7a3.2 3.2 0 0 1 1.8 2.8c0 1-.4 1.9-1.1 2.5a3 3 0 0 1-.1 4.9 3 3 0 0 1-2.5 2.3A3 3 0 0 1 12 21" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+const TOOL_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M14.8 6.2a4.3 4.3 0 0 0-5.5 5.5L4.2 16.8a2 2 0 0 0 2.8 2.8l5.1-5.1a4.3 4.3 0 0 0 5.5-5.5l-2.4 2.4-2.6-.6-.6-2.6 2.8-2Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
 const USER_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.8 20c.6-3.7 3.6-5.8 7.2-5.8s6.6 2.1 7.2 5.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
 const FILE_SVG=`<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.5 3v5.5H19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 /* 卡片展开态 + 复制缓冲：key = job:seq（避免把大段代码塞进 data-* 属性） */
@@ -98,7 +101,7 @@ function renderNav(){
   $$("#navbtns .nav-btn").forEach(b=>b.onclick=()=>setView(b.dataset.v));
 }
 function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;
-  state.openKeys.clear();state.closedKeys.clear();state.roundOpen={};FILE_BUF.clear();COPY_BUF.clear();
+  state.openKeys.clear();state.closedKeys.clear();state.roundOpen={};state.workOpen={};state.toolOpen={};FILE_BUF.clear();COPY_BUF.clear();
   renderDock();
   if(state.view!=="workspace")setView("workspace");else renderBody();refreshJobData(true)}
 function setView(v){state.view=v;renderNav();renderBody()}
@@ -135,44 +138,42 @@ function renderFeed(){
   const feed=$("#feed");if(!feed)return;
   const rounds=buildRounds(M.events);
   const last=rounds[rounds.length-1];
+  const now=Date.now()/1000;
+  const running=viewRunning();
   /* 展开态持久化：轮询每 1.5s 重建 DOM，用户的收起/展开不能被冲掉 */
   rounds.forEach(r=>{r.open=state.roundOpen[r.round]!==undefined?state.roundOpen[r.round]:(r.flags>0||r===last)});
   let html="";
   for(const r of rounds){
     const calls=r.events.filter(e=>e.type==="tool_call");
     const results=new Map(r.events.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
-    const dur=fmtDur(r.t1-r.t0);
+    const st=roundStatus(r,r===last,running,curJob().status,now);
     let body="";
     if(r.open){
       const items=[
         ...calls.map(c=>({t:"tool",o:{call:c,result:results.get(c.payload.call_id)},seq:c.seq})),
         ...r.events.filter(e=>["assistant","user_msg","finding","error","loop_phase","status_change","plan_event","intent_event"].includes(e.type)&&(e.type!=="assistant"||e.payload.content)).map(e=>({t:"ev",o:e,seq:e.seq}))
       ].sort((a,b)=>a.seq-b.seq);
-      /* 同一侧的内容合并成 turn：用户输入开启新 turn，其后系统响应层层挂在这个 turn 下 */
-      const turns=[];
+      /* 一轮内三块：用户输入（对话侧） / 思考与工作 / 工具与结果 */
+      const users=[],work=[],tools=[];
       for(const i of items){
-        if(i.t==="ev"&&isUserEvent(i.o))turns.push({user:i.o,items:[]});
-        else{if(!turns.length)turns.push({user:null,items:[]});turns[turns.length-1].items.push(i)}
+        if(i.t==="ev"&&isUserEvent(i.o))users.push(i.o);
+        else if(i.t==="tool"||(i.t==="ev"&&["finding","error"].includes(i.o.type)))tools.push(i);
+        else work.push(i);
       }
-      for(const t of turns){
-        if(t.user)body+=turnUserHTML(t.user);
-        if(t.items.length){
-          body+=`<div class="turn sys">
-            <div class="turn-rail"><span class="turn-avatar sys">${ROBOT_SVG}</span></div>
-            <div class="turn-body">${turnCapHTML(t.items)}
-              <div class="turn-items">${t.items.map(itemHTML).join("")}</div>
-            </div></div>`;
-        }
-      }
+      if(users.length)body+=userGroupHTML(users);
+      if(work.length)body+=panelHTML("work",r.round,work,
+        state.workOpen[r.round]!==undefined?state.workOpen[r.round]:true);
+      if(tools.length)body+=panelHTML("tool",r.round,tools,
+        state.toolOpen[r.round]!==undefined?state.toolOpen[r.round]:(running&&r===last));
     }
-    html+=`<section class="round-panel ${r.open?"open":""}" data-r="${r.round}">
+    html+=`<section class="round-panel ${r.open?"open":""}" data-round="${r.round}">
       <div class="round-head" data-act="r-toggle" data-r="${r.round}">
         <span class="ricon">▤</span><b>ROUND ${r.round}</b>
-        <span class="rmeta">已工作 ${dur}</span><span class="rdot">·</span>
+        <span class="rstat ${st.cls}"><i></i>${esc(st.text)}</span>
         <span class="rmeta">${fmtTok(r.tokens)} tok</span><span class="rdot">·</span>
         <span class="rmeta">${fmtCny(r.cost)}</span><span class="rdot">·</span>
         <span class="rmeta">${r.tools} tools</span>
-        ${r.flags?`<span class="rflag">🏁${r.flags}</span>`:""}
+        ${r.flags?`<span class="rflag">⚑${r.flags}</span>`:""}
         <span class="rsum">${esc(r.summary||"(无文本输出)")}</span>
         <span class="arr">▼</span>
       </div>
@@ -180,6 +181,7 @@ function renderFeed(){
     </section>`;
   }
   feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>`;
+  renderTimeline(rounds,now,running);
   $$("[data-act=r-toggle]",feed).forEach(h=>h.onclick=()=>{
     const rid=+h.dataset.r,panel=h.closest(".round-panel");
     const open=!panel.classList.contains("open");
@@ -187,6 +189,13 @@ function renderFeed(){
     state.roundOpen[rid]=true;
     const top=feed.scrollTop,follow=state.follow;
     state.follow=false;renderFeed();feed.scrollTop=top;state.follow=follow;
+  });
+  $$("[data-act=panel-toggle]",feed).forEach(h=>h.onclick=()=>{
+    const rid=+h.dataset.r,kind=h.dataset.panel;
+    const panel=h.closest(".work-panel,.tool-panel");
+    const open=panel.classList.contains("collapsed");
+    panel.classList.toggle("collapsed",!open);
+    if(kind==="work")state.workOpen[rid]=open;else state.toolOpen[rid]=open;
   });
   $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>{
     const k=state.jobId+":t:"+h.dataset.k;
@@ -216,7 +225,19 @@ function renderFeed(){
     copyText(t,b.dataset.copyMsg||"已复制到剪贴板");
   });
   applyFilter();
+  if(state.locate&&Date.now()<state.locate.until){
+    const sel=state.locate.kind==="round"
+      ?`.round-panel[data-round="${state.locate.round}"]`
+      :`[data-seq="${state.locate.seq}"]`;
+    const t=$(sel,feed);if(t)t.classList.add("flash");
+  }
   if(state.follow)feed.scrollTop=feed.scrollHeight;
+}
+function roundStatus(r,isLast,running,jobStatus,now){
+  const dur=(isLast&&running?now:r.t1)-r.t0;
+  if(isLast&&running)return {cls:"run",text:`进行中，已用时 ${fmtSec(dur)}`};
+  if(isLast&&["failed","cancelled","stalled"].includes(jobStatus))return {cls:"bad",text:`已结束，用时 ${fmtSec(dur)}`};
+  return {cls:"done",text:`已完成，用时 ${fmtSec(dur)}`};
 }
 /* 用户直投消息（coach/budget/info 是系统注入，不算用户侧） */
 function isUserEvent(e){
@@ -225,73 +246,145 @@ function isUserEvent(e){
   return !["coach","budget","info"].includes(k);
 }
 const USER_KIND_LBL={direct:"追问/指令",new_task:"下达任务",steer:"操舵",msg:"消息"};
-function turnUserHTML(e){
-  const p=e.payload||{};
-  const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
-  return `<div class="turn user">
+function userGroupHTML(list){
+  return `<div class="turn user user-group">
     <div class="turn-rail"><span class="turn-avatar user">${USER_SVG}</span></div>
     <div class="turn-body">
-      <div class="turn-cap"><b>用户输入</b><span>${esc(lbl)} · ${fmtT(e.ts)}</span></div>
-      <div class="ubub">${esc(p.content)}</div>
+      <div class="turn-cap"><b>用户输入</b><span>${list.length} 条 · ${fmtT(list[0].ts)}</span></div>
+      ${list.map(e=>{
+        const p=e.payload||{};
+        const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
+        return `<div class="ubub" data-seq="${e.seq}"><span class="ubub-k">${esc(lbl)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
+      }).join("")}
     </div></div>`;
 }
-function turnCapHTML(items){
-  let th=0,tool=0,file=0,act=0,note=0;
-  for(const i of items){
-    if(i.t==="tool"){i.o.call.payload.tool==="write_file"?file++:tool++}
-    else{
-      const t=i.o.type;
-      if(t==="assistant"||t==="plan_event")th++;
-      else if(t==="finding"||t==="error"||t==="intent_event")act++;
-      else note++;
-    }
-  }
-  const bits=[];
-  if(th)bits.push(`${th} 条思考`);
-  if(tool)bits.push(`${tool} 次终端`);
-  if(file)bits.push(`${file} 个文件`);
-  if(act)bits.push(`${act} 条成果/结算`);
-  if(note)bits.push(`${note} 条状态`);
-  return `<div class="turn-cap"><b>系统响应</b><span>${bits.join(" · ")||"过程记录"}</span></div>`;
+function panelHTML(kind,round,items,open){
+  const work=kind==="work";
+  return `<section class="${work?"work-panel":"tool-panel"} ${open?"":"collapsed"}" data-r="${round}" data-panel="${kind}">
+    <div class="panel-head" data-act="panel-toggle" data-r="${round}" data-panel="${kind}">
+      <span class="panel-ic">${work?BRAIN_SVG:TOOL_SVG}</span>
+      <b>${work?"思考与工作":"工具与结果"}</b>
+      <span class="panel-n">${items.length} ${work?"条记录":"项调用/结果"}</span>
+      <span class="arr">▼</span>
+    </div>
+    <div class="panel-body">${items.map(itemHTML).join("")}</div>
+  </section>`;
 }
 function itemHTML(i){
   if(i.t==="tool")return toolItemHTML(i.o);
   const e=i.o,p=e.payload||{};
   if(e.type==="assistant"){
-    return `<div class="msg-agent thought turn-item"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor(e.actor)}">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
+    return `<div class="msg-agent thought turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
   }
   if(e.type==="user_msg"){
     const kindLabel={coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"系统消息");
-    return `<div class="inject-note turn-item"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
+    return `<div class="inject-note turn-item" data-seq="${e.seq}"><span class="k">${esc(kindLabel)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
   }
   if(e.type==="finding"){
-    return `<div class="milestone turn-item"><span class="mk">${p.kind==="flag"?"🏁":"⚑"}</span><span class="mv">${esc(p.value)}</span>${p.evidence?`<div class="sub">evidence · ${esc(p.evidence)}</div>`:""}</div>`;
+    return `<div class="milestone turn-item" data-seq="${e.seq}"><span class="mk">${p.kind==="flag"?"⚑":"◈"}</span><span class="mv">${esc(p.value)}</span>${p.evidence?`<div class="sub">evidence · ${esc(p.evidence)}</div>`:""}</div>`;
   }
   if(e.type==="error"){
-    return `<div class="milestone finding turn-item"><span class="mk">⚠</span><span class="mv">${esc(p.message||JSON.stringify(p))}</span></div>`;
+    return `<div class="milestone finding turn-item" data-seq="${e.seq}"><span class="mk">⚠</span><span class="mv">${esc(p.message||JSON.stringify(p))}</span></div>`;
   }
   if(e.type==="loop_phase"){
-    return `<div class="sysnote turn-item">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
+    return `<div class="sysnote turn-item" data-seq="${e.seq}">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
   }
   if(e.type==="status_change"){
-    return `<div class="sysnote turn-item">status → ${esc(p.status)}</div>`;
+    return `<div class="sysnote turn-item" data-seq="${e.seq}">status → ${esc(p.status)}</div>`;
   }
   if(e.type==="plan_event"){
     const w=e.payload.wake||{};const wakeTxt=w.detail||w.kind||"常规规划";
     const bits=[`决策 <b>${esc(p.decision||"continue")}</b>`,`派 <b>${p.tasks||0}</b> 个任务`];
     if(p.beliefs)bits.push(`信念结算 ${p.beliefs}`);
     if(p.hypotheses)bits.push(`新假设 ${p.hypotheses}`);
-    if(p.drift_rejected)bits.push(`<span style="color:var(--warn)">防漂移拒收</span>`);
+    if(p.drift_rejected)bits.push(`<span style="color:var(--c-bad)">防漂移拒收</span>`);
     const planned=(p.planned||[]).map(t=>`<li>${esc(t.title)}<span class="lane ${t.lane==="main"?"lane-main":"lane-logistics"}">${t.lane==="main"?"主":"后勤"}</span></li>`).join("");
-    return `<div class="msg-agent thought plan turn-item"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge" style="--ac:${acolor("commander")}">${actorOf({actor:"commander"})}</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--fg3);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
+    return `<div class="msg-agent thought plan turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf({actor:"commander"})}</span><span class="t">${fmtT(e.ts)} · 规划</span></div><div class="a-body">${bits.join(" · ")}<div class="sub" style="color:var(--c-time);font-size:11.5px;margin-top:3px">唤醒：${esc(wakeTxt)}</div>${planned?`<ul class="planlist">${planned}</ul>`:""}</div></div>`;
   }
   if(e.type==="intent_event"){
     const st=e.payload.status;
     const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
     const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
-    return `<div class="msg-agent act turn-item"><div class="a-head"><span class="abadge" style="--ac:${acolor(e.actor||"sentinel")}">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
+    return `<div class="msg-agent act turn-item" data-seq="${e.seq}"><div class="a-head"><span class="abadge">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
   }
   return "";
+}
+/* ── 对话时间线刻度条：用户 / 轮次 / 工具 节点，hover 精确时间+耗时，点击定位 ── */
+function renderTimeline(rounds,now,running){
+  const el=$("#feed-timeline");if(!el)return;
+  const evs=M.events||[];
+  if(!evs.length){el.innerHTML="";return}
+  const t0=Math.min(...evs.map(e=>e.ts));
+  const tLast=Math.max(...evs.map(e=>e.ts));
+  const t1=Math.max(tLast,t0+1,running?now:tLast);
+  const pos=ts=>2+96*Math.max(0,Math.min(1,(ts-t0)/(t1-t0)));
+  const results=new Map(evs.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
+  let nodes="";
+  for(const e of evs){
+    if(e.type==="user_msg"&&isUserEvent(e)){
+      const lbl=USER_KIND_LBL[e.payload.kind]||e.payload.kind||"消息";
+      nodes+=`<button class="tl-node user" style="left:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
+    }
+  }
+  for(const r of rounds){
+    const dur=(running&&r===rounds[rounds.length-1]?now:r.t1)-r.t0;
+    const st=roundStatus(r,r===rounds[rounds.length-1],running,curJob().status,now);
+    nodes+=`<button class="tl-node round ${st.cls}" style="left:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
+  }
+  for(const e of evs){
+    if(e.type!=="tool_call")continue;
+    const res=results.get(e.payload.call_id);
+    const dur=res?Math.max(0,res.ts-e.ts):null;
+    const tip=`${e.payload.tool} · ${fmtT(e.ts)}${dur!=null?` · 用时 ${fmtSec(dur)}`:" · 进行中"}`;
+    nodes+=`<button class="tl-node tool" style="left:${pos(e.ts)}%" data-kind="tool" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(tip)}" aria-label="工具调用"></button>`;
+  }
+  const total=(running?now:tLast)-t0;
+  const bad=["failed","cancelled","stalled"].includes(curJob().status);
+  const totalTxt=running?`进行中 · 累计 ${fmtSec(total)}`:(bad?`✕ 任务结束 · 总耗时 ${fmtSec(total)}`:`✓ 任务完成 · 总耗时 ${fmtSec(total)}`);
+  el.innerHTML=`<div class="tl-wrap">
+    <div class="tl-head">
+      <span class="tl-title">时间线</span>
+      <span class="tl-legend"><i class="lg-user"></i>用户<i class="lg-round"></i>轮次<i class="lg-tool"></i>工具</span>
+      <span class="tl-total ${running?"run":bad?"bad":"done"}">${totalTxt}</span>
+    </div>
+    <div class="tl-track">${nodes}<div class="tl-tip" id="tl-tip"></div></div>
+  </div>`;
+  const track=$(".tl-track",el),tip=$("#tl-tip",el);
+  $$(".tl-node",el).forEach(n=>{
+    n.onmousemove=e=>{
+      const r=track.getBoundingClientRect();
+      tip.textContent=n.dataset.tip||"";
+      tip.style.left=Math.max(8,Math.min(r.width-8,e.clientX-r.left))+"px";
+      tip.classList.add("show");
+      const p=$(`.round-panel[data-round="${n.dataset.round}"]`);
+      if(p)p.classList.add("linked");
+    };
+    n.onmouseleave=()=>{
+      tip.classList.remove("show");
+      const p=$(`.round-panel[data-round="${n.dataset.round}"]`);
+      if(p)p.classList.remove("linked");
+    };
+    n.onclick=()=>locateNode(n.dataset.kind,+n.dataset.round||0,+n.dataset.seq||0);
+  });
+}
+function locateNode(kind,round,seq){
+  const feed=$("#feed");if(!feed)return;
+  if(state.filter!=="all"){  // 过滤态下目标可能被隐藏：定位前恢复全量视图
+    state.filter="all";
+    $$(".chip[data-f]").forEach(x=>x.classList.toggle("on",x.dataset.f==="all"));
+  }
+  state.roundOpen[round]=true;
+  if(kind==="tool")state.toolOpen[round]=true;
+  state.follow=false;
+  const wf=$("#ws-follow");if(wf)wf.checked=false;
+  state.locate={kind,round,seq,until:Date.now()+1800};
+  renderFeed();
+  const panel=$(`.round-panel[data-round="${round}"]`,feed);
+  const target=kind==="round"?panel:(panel?panel.querySelector(`[data-seq="${seq}"]`):null);
+  if(!target){toast("该节点未在当前视图（可能被过滤或未渲染）");return}
+  target.scrollIntoView({behavior:"smooth",block:"center"});
+  target.classList.add("flash");
+  setTimeout(()=>target.classList.remove("flash"),1600);
 }
 /* 文件卡展开：正文按需回源（大段代码不进首屏 DOM） */
 async function toggleFileCard(card){
@@ -479,7 +572,7 @@ function termCardHTML(call,result){
   const out=result?String(result.payload.preview||""):"";
   const key=`${state.jobId}:${call.seq}`;
   COPY_BUF.set(key,`$ ${cmd}\n${out}`);
-  return `<div class="term-card turn-item ${result?"":"pending"}">
+  return `<div class="term-card turn-item ${result?"":"pending"}" data-seq="${call.seq}">
     <div class="term-head">
       <span class="tlights"><i></i><i></i><i></i></span>
       <span class="cmd-name">bash</span>
@@ -518,7 +611,7 @@ function fileCardHTML(call,result){
   const open=state.openKeys.has(key);
   const cached=FILE_BUF.get(key);
   const bodyHTML=open?(cached!=null?`<pre class="code"><code>${esc(cached)}</code></pre>`:`<div class="file-loading">加载文件内容…</div>`):"";
-  return `<div class="file-card turn-item ${open?"open":""}" data-key="${key}" data-sub="${esc(sub)}" data-path="${esc(path)}" data-full="${cached!=null?"1":"0"}">
+  return `<div class="file-card turn-item ${open?"open":""}" data-seq="${call.seq}" data-key="${key}" data-sub="${esc(sub)}" data-path="${esc(path)}" data-full="${cached!=null?"1":"0"}">
     <div class="file-head" data-act="file-toggle">
       <span class="ficon">${FILE_SVG}</span>
       <span class="fpath" title="${esc(path||"(未知路径)")}">${esc(path||"(未知路径)")}</span>
@@ -549,7 +642,7 @@ function toolLogHTML(c){
   const args=c.call.payload.args;
   const key=`${state.jobId}:t:${c.call.seq}`;
   const open=!state.closedKeys.has(key);
-  return `<div class="tlog turn-item ${open?"open":""} ${c.result?"":"pending"}">
+  return `<div class="tlog turn-item ${open?"open":""} ${c.result?"":"pending"}" data-seq="${c.call.seq}">
     <div class="tl-head" data-act="tl-toggle" data-k="${c.call.seq}"><span class="arr">▼</span><span>⚙</span><span class="tname">${esc(c.call.payload.tool)}</span><span class="abadge" style="--ac:${acolor(c.call.actor)}">${AGENT_IC} ${actorOf(c.call)}</span>
       <span class="st ${st}">${stTxt} · ${bytes}B · ${fmtT(c.call.ts)}</span></div>
     <div class="tl-body">
@@ -562,21 +655,23 @@ function applyFilter(){
   $$(".round-panel",feed).forEach(p=>{
     if(f==="all"){
       p.style.display="";
-      $$(".turn.sys",p).forEach(t=>t.style.display="");
+      $$(".work-panel,.tool-panel",p).forEach(x=>x.style.display="");
       $$(".turn-item",p).forEach(x=>x.style.display="");
       return;
     }
     let any=false;
-    $$(".turn.sys",p).forEach(t=>{
+    $$(".work-panel,.tool-panel",p).forEach(panel=>{
+      const isTool=panel.classList.contains("tool-panel");
       let has=false;
-      $$(".turn-item",t).forEach(x=>{
-        const show=(f==="tool"&&x.matches(".tlog,.term-card,.file-card"))||
-                   (f==="agent"&&x.matches(".msg-agent"))||
-                   (f==="milestone"&&x.matches(".milestone"));
+      $$(".turn-item",panel).forEach(x=>{
+        let show=false;
+        if(f==="tool")show=isTool&&x.matches(".tlog,.term-card,.file-card");
+        else if(f==="agent")show=!isTool&&x.matches(".msg-agent");
+        else if(f==="milestone")show=x.matches(".milestone");
         x.style.display=show?"":"none";
         if(show)has=true;
       });
-      t.style.display=has?"":"none";
+      panel.style.display=has?"":"none";
       if(has)any=true;
     });
     p.style.display=any?"":"none";
@@ -641,14 +736,15 @@ function workspaceHTML(){
         <span class="ic">◈</span>
         <span class="title">${esc(title)||"（无标题）"}</span>
         <span class="meta">${esc(j.job_id)} · <b>${esc(j.status)}</b> · ${esc(j.task_type)}</span>
-        <div class="crumb-metrics"><span><b>${rounds.length}</b> rounds</span><span><b>${fmtDur(dur)}</b></span><span><b>${fmtTok(tokens)}</b> tok</span><span><b>${fmtCny(cost)}</b></span><span class="${flags?"gold":""}">🏁 <b>${flags}</b></span></div>
+        <div class="crumb-metrics"><span><b>${rounds.length}</b> rounds</span><span><b>${fmtDur(dur)}</b></span><span><b>${fmtTok(tokens)}</b> tok</span><span><b>${fmtCny(cost)}</b></span><span class="${flags?"gold":""}">⚑ <b>${flags}</b></span></div>
       </div>
       <div class="anchor-bar">
-        <span class="anchor flag">🏁 <span class="n">${flags}</span> 成果</span>
+        <span class="anchor flag">⚑ <span class="n">${flags}</span> 成果</span>
         <span class="anchor err">⚠ <span class="n">${rounds.reduce((a,r)=>a+r.errors,0)}</span> 错误</span>
         ${[["all","全部"],["tool","工具"],["agent","智能体"],["milestone","成果"]].map(([v,l])=>`<button class="chip ${state.filter===v?"on":""}" data-f="${v}">${l}</button>`).join("")}
         <label class="follow"><input type="checkbox" id="ws-follow" ${state.follow?"checked":""}>跟随</label>
       </div>
+      <div class="feed-timeline" id="feed-timeline"></div>
       <div class="feed" id="feed"></div>
       <div class="composer-float">
         <div class="composer">
@@ -685,7 +781,6 @@ function bindWorkspace(){
   if(feedEl)feedEl.addEventListener("scroll",()=>{
     const near=feedEl.scrollHeight-feedEl.scrollTop-feedEl.clientHeight<48;
     if(!near&&state.follow){state.follow=false;if(wf)wf.checked=false}
-    else if(near&&!state.follow){state.follow=true;if(wf)wf.checked=true}
   },{passive:true});
   // 新建模式无 feed：renderFeed/renderTaskPanel 对缺失元素有守卫，安全
   $$(".mode-switch button",body).forEach(b=>b.onclick=()=>{
@@ -849,7 +944,7 @@ function renderDock(){
         <div class="mapsec-cap">待执行</div>
         ${open.slice(0,6).map(intentRow).join("")||'<div class="faint" style="font-size:11px;margin:2px 0 6px">—</div>'}
       </div>
-      <button class="dock-pill" data-act="dock"><span class="dot ${running.length?"running":""}" style="${running.length?"":"background:var(--fg3)"}"></span>作战地图<span class="pv">${running.length?running.length+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
+      <button class="dock-pill map" data-act="dock"><span class="dot ${running.length?"running":""}" style="${running.length?"":"background:var(--fg3)"}"></span>作战地图<span class="pv">${running.length?running.length+" 执行中":intents.length+" 项"}</span><span class="caret-ic">▼</span></button>
     </div>`;
   }
   if(flags.length||finds.length||w.delivery){
@@ -860,7 +955,7 @@ function renderDock(){
         <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
         ${finds.slice(0,8).map(f=>`<div class="hyp" data-f="${f.id}"><div class="h-top"><span class="badge b-${f.severity}">${f.severity}</span><span class="conf">${((f.confidence||0)*100).toFixed(0)}%</span></div><div class="h-title">${esc(f.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">本任务暂无发现</div>'}
       </div>
-      <button class="dock-pill" data-act="dock">🏁 产出成果<span class="pv">${(flags.length?flags.length+" 旗":"")+(flags.length&&finds.length?" · ":"")+(finds.length?finds.length+" 发现":"")}</span><span class="caret-ic">▼</span></button>
+      <button class="dock-pill outcome" data-act="dock">⚑ 产出成果<span class="pv">${(flags.length?flags.length+" 旗":"")+(flags.length&&finds.length?" · ":"")+(finds.length?finds.length+" 发现":"")}</span><span class="caret-ic">▼</span></button>
     </div>`;
   }
   dock.innerHTML=html;
