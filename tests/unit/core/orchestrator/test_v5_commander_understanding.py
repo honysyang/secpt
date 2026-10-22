@@ -50,11 +50,7 @@ class _ScriptedLLM:
 
 
 def _doc(direction: str) -> str:
-    return (
-        "## 当前阶段\n侦察\n## 主攻方向\n"
-        + direction
-        + "\n## 明确不做\n无\n## 转向日志\n- 初始"
-    )
+    return "## 当前阶段\n侦察\n## 主攻方向\n" + direction + "\n## 明确不做\n无\n## 转向日志\n- 初始"
 
 
 _GOAL_PAYLOAD = {
@@ -189,8 +185,7 @@ def test_frontier_first_wake_understands_and_self_executes(env, monkeypatch) -> 
     base = "g5"
     fr = Frontier(frontier_db_path(base))
     payloads = [dict(_GOAL_PAYLOAD)] + [
-        {"decision": "continue", "tasks": [], "strategy": _doc("入口注入面")}
-        for _ in range(6)
+        {"decision": "continue", "tasks": [], "strategy": _doc("入口注入面")} for _ in range(6)
     ]
     summary = _run(
         run_frontier(

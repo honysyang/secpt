@@ -118,6 +118,43 @@ def _classify_output(out: str) -> str:
     return "ok"
 
 
+def next_seq_for(path) -> int:
+    """下一个可用 seq = max(行数, 尾行已有 seq)。
+
+    轮转归档（sustain.compress）后在线文件行数远小于已分配的最大 seq，
+    "行数+1" 会回退撞号——必须看尾行。三写入方（本模块/frontier 的
+    _parent_event/_aggregate_sub_events）统一从这里取。
+    """
+    p = Path(path)
+    n = 0
+    last = 0
+    if p.is_file():
+        try:
+            with open(p, "rb") as bf:
+                for _ in bf:
+                    n += 1
+        except OSError:
+            n = 0
+        # 尾行 seq（最后 8KB 内最后一个可解析 seq）
+        try:
+            with open(p, "rb") as rf:
+                rf.seek(0, 2)
+                size = rf.tell()
+                rf.seek(max(0, size - 8192))
+                tail = rf.read().decode("utf-8", errors="replace")
+            for line in reversed(tail.splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    last = int(json.loads(line).get("seq", 0))
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    last = 0
+                break
+        except OSError:
+            last = 0
+    return max(n, last) + 1
+
+
 class EventSink:
     """写 var/jobs/<job_id>/events.jsonl（append-only）+ 转存 SQLite。"""
 
@@ -142,8 +179,8 @@ class EventSink:
         # _seq 自增与 append 必须原子（PR-A 并发安全）
         self._lock = threading.Lock()
         self._schema_warned: set[str] = set()  # payload 缺键告警去重（每类型一次）
-        # 初始 seq = 已有行数（jsonl 用行号做 seq）
-        self._seq = self._count_lines()
+        # 初始 seq = max(行数, 尾行 seq)——轮转归档后行数 < 尾 seq（见 next_seq_for）
+        self._seq = max(self._count_lines(), self._tail_seq())
 
     # ---------------- 底层写入 ----------------
 

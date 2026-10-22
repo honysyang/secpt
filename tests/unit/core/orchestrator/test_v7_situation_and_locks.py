@@ -54,11 +54,7 @@ class _ScriptedLLM:
 
 
 def _doc(direction: str) -> str:
-    return (
-        "## 当前阶段\n侦察\n## 主攻方向\n"
-        + direction
-        + "\n## 明确不做\n无\n## 转向日志\n- 初始"
-    )
+    return "## 当前阶段\n侦察\n## 主攻方向\n" + direction + "\n## 明确不做\n无\n## 转向日志\n- 初始"
 
 
 _FIRST_WAKE = {
@@ -153,9 +149,7 @@ def test_e2e_multi_signal_single_wake(env, monkeypatch) -> None:
         captured.append(kw.get("signal"))
         return await real_round(objective, fr, tree, llm, **kw)
 
-    monkeypatch.setattr(
-        "secpt.core.orchestrator.commander.commander_round", spy_round
-    )
+    monkeypatch.setattr("secpt.core.orchestrator.commander.commander_round", spy_round)
 
     def fake_budget_signals(self, *, elapsed_s, total_wall_s, used_intents):
         return [
@@ -163,9 +157,7 @@ def test_e2e_multi_signal_single_wake(env, monkeypatch) -> None:
             WakeSignal(kind="consolidation", detail="内务信号乙", priority=4),
         ]
 
-    monkeypatch.setattr(
-        "secpt.core.orchestrator.watch.Watch.budget_signals", fake_budget_signals
-    )
+    monkeypatch.setattr("secpt.core.orchestrator.watch.Watch.budget_signals", fake_budget_signals)
 
     def fake_run_engine(**kw):
         return SimpleNamespace(
@@ -182,8 +174,7 @@ def test_e2e_multi_signal_single_wake(env, monkeypatch) -> None:
     base = "v7e2e"
     fr = Frontier(frontier_db_path(base))
     payloads = [dict(_FIRST_WAKE)] + [
-        {"decision": "continue", "tasks": [], "strategy": _doc("维持")}
-        for _ in range(6)
+        {"decision": "continue", "tasks": [], "strategy": _doc("维持")} for _ in range(6)
     ]
     llm = _ScriptedLLM(payloads)
     _run(
@@ -239,10 +230,7 @@ def test_parent_stream_concurrent_writers_unique_seq(env, monkeypatch) -> None:
     threads = [
         threading.Thread(target=_parent_event, args=(base, "intent_event", {"i": i}))
         for i in range(n_parent)
-    ] + [
-        threading.Thread(target=sink.write, args=("tool_call", {"i": i}))
-        for i in range(n_sink)
-    ]
+    ] + [threading.Thread(target=sink.write, args=("tool_call", {"i": i})) for i in range(n_sink)]
     for t in threads:
         t.start()
     for t in threads:

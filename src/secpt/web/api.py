@@ -240,6 +240,19 @@ def events_payload(job_id: str, after: int = 0, limit: int = 400) -> dict:
     path = _events_file(job_id)
     events: list[dict] = []
     cursor = int(after or 0)
+    # v10 轮转归档回读：游标早于在线文件首 seq 时，从 archive/*.jsonl.gz 补
+    with contextlib.suppress(Exception):
+        from secpt.core.sustain.compress import read_archived_events
+
+        _wm = path.parent / "archive" / "watermark.json"
+        if _wm.is_file():
+            import json as _json
+
+            _min_kept = int(_json.loads(_wm.read_text(encoding="utf-8")).get("min_kept_seq") or 0)
+            if 0 < int(after or 0) < _min_kept:
+                for row in read_archived_events(job_id, int(after), _min_kept):
+                    events.append(row)
+                    cursor = max(cursor, int(row.get("seq") or 0))
     if path.is_file():
         with open(path, encoding="utf-8") as f:
             for line in f:

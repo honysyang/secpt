@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS intents (
     notes TEXT DEFAULT '',              -- 指挥官派单时的注意事项（边界/风险/禁止动作）
     profile TEXT DEFAULT '',            -- 意图级角色（指挥官赋予；空=沿用任务级角色）
     prior TEXT DEFAULT '',              -- 意图级经验文件（knowledge/priors/<name>；空=任务级）
+    skills TEXT DEFAULT '',             -- 意图级技能包（discover_skills 名，逗号分隔；空=不带技能）
     job_id TEXT DEFAULT '',
     result TEXT DEFAULT '',
     attempts INTEGER DEFAULT 0,
@@ -281,6 +282,7 @@ class Intent:
     notes: str = ""  # 指挥官派单时的注意事项（边界/风险/禁止动作）
     profile: str = ""  # 意图级角色（指挥官赋予；空=沿用任务级角色）
     prior: str = ""  # 意图级经验文件（knowledge/priors/<name>；空=任务级）
+    skills: str = ""  # 意图级技能包（discover_skills 名，逗号分隔；空=不带技能）
     fail_reason: str = ""
 
 
@@ -551,10 +553,10 @@ def _aggregate_sub_events(
         # 与 _parent_event / EventSink 同一全局锁：seq 数行→append 跨写入方串行，
         # Web 注入在聚合期间插入不再撞重号
         with _PEV_LOCK:
-            seq = 0
-            if parent_events.is_file():
-                with open(parent_events, encoding="utf-8") as rf:
-                    seq = sum(1 for _ in rf)
+            from secpt.core.job.event import next_seq_for
+
+            # 轮转归档后行数 < 尾行 seq，必须取 max（见 next_seq_for）
+            seq = next_seq_for(parent_events) - 1
             with open(parent_events, "a", encoding="utf-8") as out:
                 for sub in fresh:
                     sub_path = jobs_dir() / sub / "events.jsonl"
@@ -697,7 +699,9 @@ def retro(fr: Frontier, *, base: str = "") -> str:
     return "continue"
 
 
-from secpt.core.job.evlock import PEV_LOCK as _PEV_LOCK  # 父流跨写入方串行锁（evlock 单点）
+from secpt.core.job.evlock import (  # noqa: E402  位置在函数定义后：避免顶层循环导入（evlock 被 job 层多模块引用）
+    PEV_LOCK as _PEV_LOCK,
+)
 
 
 def _parent_event(base: str, etype: str, payload: dict) -> None:
@@ -714,13 +718,12 @@ def _parent_event(base: str, etype: str, payload: dict) -> None:
 
     try:
         with _PEV_LOCK:
+            from secpt.core.job.event import next_seq_for
+
             parent = jobs_dir() / base
             parent.mkdir(parents=True, exist_ok=True)
             f = parent / "events.jsonl"
-            seq = 0
-            if f.is_file():
-                with open(f, encoding="utf-8") as rf:
-                    seq = sum(1 for _ in rf)
+            seq = next_seq_for(f) - 1
             with open(f, "a", encoding="utf-8") as out:
                 out.write(
                     _json.dumps(
@@ -1117,6 +1120,8 @@ class Frontier:
         if "prior" not in cols:
             with contextlib.suppress(sqlite3.Error):
                 c.execute("ALTER TABLE intents ADD COLUMN prior TEXT DEFAULT ''")
+            with contextlib.suppress(sqlite3.OperationalError):
+                c.execute("ALTER TABLE intents ADD COLUMN skills TEXT DEFAULT ''")
 
     def _conn(self) -> sqlite3.Connection:
         # 多 worker 线程会并发认领/结算；给足锁等待（默认 5s 太短：一次长写事务
@@ -1148,6 +1153,7 @@ class Frontier:
         notes: str = "",  # 指挥官派单时的注意事项（边界/风险/禁止动作）
         profile: str = "",  # 意图级角色（指挥官赋予；空=沿用任务级角色）
         prior: str = "",  # 意图级经验文件（knowledge/priors/<name>；空=任务级）
+        skills: str = "",  # 意图级技能包（discover_skills 名，逗号分隔）
     ) -> str:
         iid = f"int-{uuid.uuid4().hex[:8]}"
         now = time.time()
@@ -1156,8 +1162,8 @@ class Frontier:
                 """INSERT INTO intents (id,title,goal,done_criteria,priority,depth,status,
                                         source,depends_on,subgoal,max_steps,max_wall_s,
                                         role,asset_scope,lane,hypothesis,notes,profile,prior,
-                                        tools,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                        skills,tools,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     iid,
                     title[:200],
@@ -1177,6 +1183,7 @@ class Frontier:
                     notes[:500],
                     profile[:40],
                     prior[:80],
+                    skills[:200],
                     tools[:300],
                     now,
                     now,
@@ -1378,6 +1385,7 @@ class Frontier:
             notes=d.get("notes", "") or "",
             profile=d.get("profile", "") or "",
             prior=d.get("prior", "") or "",
+            skills=d.get("skills", "") or "",
             fail_reason=d.get("fail_reason", "") or "",
         )
 
@@ -1388,9 +1396,7 @@ class Frontier:
         """
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            row = c.execute(
-                "SELECT * FROM intents WHERE id=? AND status='open'", (iid,)
-            ).fetchone()
+            row = c.execute("SELECT * FROM intents WHERE id=? AND status='open'", (iid,)).fetchone()
             if row is None:
                 return None
             c.execute(
@@ -1970,6 +1976,25 @@ def build_intent_objective(
             if (getattr(intent, "prior", "") or "").strip()
             else ""
         )
+    # 意图级技能包注入（v10 ZCode 式动态技能）：指挥官按任务挂载的技能正文，
+    # 操作员领到任务即获得该能力包（不改代码、不重发布）
+    skill_ctx = ""
+    _skill_names = [
+        x.strip() for x in (getattr(intent, "skills", "") or "").split(",") if x.strip()
+    ]
+    if _skill_names:
+        try:
+            from secpt.core.skills import load_skill
+
+            _blocks = []
+            for _sn in _skill_names[:3]:
+                _sk = load_skill(_sn)
+                if _sk is not None:
+                    _blocks.append(f"─── 技能 {_sk.name} ───\n{_sk.body[:1200]}")
+            if _blocks:
+                skill_ctx = "\n\n【技能包（指挥官挂载）】\n" + "\n\n".join(_blocks)
+        except Exception:
+            skill_ctx = ""
     focus_ctx = ""
     if focus:
         focus_ctx = (
@@ -1982,7 +2007,7 @@ def build_intent_objective(
 
 【当前意图】{intent.title}
 目标：{intent.goal}
-完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}{dispatch_meta}{focus_ctx}
+完成判据：{intent.done_criteria or "拿到该意图的结论即可"}{role_stage}{hypothesis_ctx}{dispatch_meta}{skill_ctx}{focus_ctx}
 {handoff}{techniques}
 
 【近期相关结果（避免重复踩坑）】
@@ -2077,6 +2102,7 @@ async def run_frontier(
     # 跑分（benchmark）传 False，持续解完所有已入队题目
     role_plan: bool = False,  # 团队模式：预置 recon→exploit×N 角色意图骨架（折叠 Specialist DAG）
     default_assets: list[str] | None = None,  # 团队模式资产兜底（goal 拆解无 asset_scope 时用入口）
+    orch_mode: object | None = None,  # v10 模式收敛：显式模式（缺省 resolve_orch_mode 现场归约）
     stages: object | None = None,  # S6 模式收敛：profile.stages 折叠为线性 depends_on 意图链
     # （原 run_stages 多阶段编排的唯一存续形态；调用方以 max_intents=len(stages) 关闭 planner）
     default_max_steps: int = 0,  # S6：意图未设步数预算时的全局默认（solve --steps 透传；0=profile 预算）
@@ -2090,7 +2116,8 @@ async def run_frontier(
     enable_delivery: bool = False,  # 交付门（dag/solve 主入口开启；直调默认关）
     delivery_max_attempts: int = 1,  # 交付门最多补几次验证任务（防无限追加）
     enable_commander: bool = True,  # v4 Commander（假设树+战略文档+事件唤醒；benchmark/stages 强制关）
-    scope_allow: list[str] | None = None,  # goal asset_scope 白名单（entries+SECPT_SCOPE_ALLOW；空=跳过校验）
+    scope_allow: list[str]
+    | None = None,  # goal asset_scope 白名单（entries+SECPT_SCOPE_ALLOW；空=跳过校验）
     prior: str | None = None,  # 经验文件覆盖（--prior 显式）；auto 模式下可被指挥官选择覆盖
 ) -> dict:
     """意图驱动主循环。返回汇总（chains/flags/wall）。
@@ -2142,6 +2169,43 @@ async def run_frontier(
     # 并发任务互不可见；resume 同 base 续接同一 todolist
     base = base_job_id or f"hunt-{uuid.uuid4().hex[:8]}"
     # 加强④：同任务单编排锁——第二个并发实例直接拒绝（防双方 _recover_stale
+    # v10 模式收敛：编排模式唯一解析点——所有开关在这里归约为一个显式模式，
+    # 歧义组合打告警取确定优先级（不再有隐式行为）
+    from secpt.core.orchestrator.modes import resolve_orch_mode
+
+    _mode = (
+        orch_mode
+        if orch_mode is not None
+        else resolve_orch_mode(
+            stages=stages if isinstance(stages, (list, tuple)) else None,
+            role_plan=bool(role_plan),
+        )
+    )
+    if getattr(_mode, "warnings", None):
+        print(f"[frontier] 模式告警：{_mode.warn()}", flush=True)
+    print(f"[frontier] 编排模式：{_mode.mode}", flush=True)
+
+    # v10 全局目标租约：跨 engagement 目标互斥登记（advisory）。Web 为主要入口
+    # 后多任务并行，任务内租约只防同池撞车——这里登记"目标→job"供并行任务避让。
+    from secpt.core.orchestrator import global_lease as _glease
+
+    _leased: list[str] = []
+
+    def _lease_target(t: str) -> None:
+        t = (t or "").strip()
+        if not t:
+            return
+        ok, note = _glease.acquire(t, base)
+        if ok:
+            if note == "acquired":
+                _leased.append(t)
+        else:
+            # Advisory：不阻塞，告警 + 落事件（规避决策交 CDR 与操作员）
+            print(f"[frontier] 目标 {t[:60]} 已有并行任务持有（{note}）", flush=True)
+            _parent_event(
+                base, "status_change", {"status": f"目标并行占用告警：{t[:60]}（{note}）"}
+            )
+
     # 互重置在途意图）。异常路径由文件对象回收自动释放 flock（CPython 语义）
     _lock = _acquire_task_lock(base)
     fr = frontier or Frontier(frontier_db_path(base))
@@ -2197,6 +2261,8 @@ async def run_frontier(
         elif role_plan or stages:
             goal = await decompose_objective(objective, llm=llm, model=model)
             seed_goal_assets(goal)
+            for _a in list(getattr(goal, "asset_scope", None) or []):
+                _lease_target(_a)
             objective = render_goal_system(goal)
         elif enable_commander and tree is not None:
             need_goal_pending = True  # 指挥官首轮唤醒完成理解+拆分
@@ -2345,14 +2411,16 @@ async def run_frontier(
         nonlocal profile, _run_priors
         signal = None  # 本轮唤醒信号（Commander 分支赋值；legacy planner 兜底 None）
         if fr.has_open_direct():
-            return 0  # 模式②：规划者暂停
-        if delivery_pending or delivery_wait:
-            return 0  # 交付门未收口：暂停产新意图，等复验结算
+            return -1  # 模式②：规划者暂停（-1=未执行规划，主循环不得计轮）
+        # v10：quality 信号穿透交付等待——VRF=质量工程师，否决结论必须送达
+        # CDR（项目经理）裁决；其余信号仍暂停，等复验结算
+        if (delivery_pending or delivery_wait) and not any(
+            getattr(s, "kind", "") == "quality" for s in pending_signals
+        ):
+            return -1  # 交付门未收口：暂停产新意图，等复验结算
         # v8 收敛裁决：convergence 信号必须送达 CDR（值守层只递信号不拍板），
         # 不受意图上限/idle 门挡——这是收口前最后一次读图机会
-        _conv_pending = any(
-            getattr(s, "kind", "") == "convergence" for s in pending_signals
-        )
+        _conv_pending = any(getattr(s, "kind", "") == "convergence" for s in pending_signals)
         if (fr.total() >= max_intents or idle_rounds >= 2) and not _conv_pending:
             return 0
         with fr._conn() as c:
@@ -2402,6 +2470,8 @@ async def run_frontier(
                     )
                 with contextlib.suppress(Exception):
                     seed_goal_assets(outcome.goal)
+                for _a in list(getattr(outcome.goal, "asset_scope", None) or []):
+                    _lease_target(_a)
                 with contextlib.suppress(Exception):
                     from secpt.core.orchestrator.goals import save_goal
 
@@ -2621,9 +2691,7 @@ async def run_frontier(
             # 意图级角色赋予：指挥官派单可带 profile/prior（如 web+pwn 混合任务分派
             # 不同角色）；缺省沿用任务级角色与经验选择
             _iprof = getattr(intent, "profile", "") or profile
-            _iprior = getattr(intent, "prior", "") or (
-                _run_priors[0] if _run_priors else None
-            )
+            _iprior = getattr(intent, "prior", "") or (_run_priors[0] if _run_priors else None)
             return run_engine(
                 objective=obj,
                 profile=_iprof,
@@ -3286,6 +3354,21 @@ async def run_frontier(
             or not decision.followups
         ):
             return True
+        # v10 职责重划：VRF=质量工程师（只评估交付物质量），CDR=项目经理（据反馈
+        # 综合裁决结束/改向）。否决结论必须送达 CDR——质量反馈入信号队列（quality
+        # 信号可穿透 delivery_wait 唤醒 CDR，见 _signal_plan）；复验任务照常入池
+        # 作为 VRF 的修复建议，delivery_wait=True 保证池排空后交付门再裁决、
+        # 复验尝试计数继续推进直至耗尽（否则首轮否决即悬挂，回滚永不触发）。
+        from secpt.core.orchestrator.watch import WakeSignal
+
+        pending_signals.append(
+            WakeSignal(
+                kind="quality",
+                detail=f"VRF 质量评估未通过：{decision.reason[:200]}",
+                priority=9,
+            )
+        )
+        delivery_wait = True
         added = 0
         for followup in decision.followups:
             try:
@@ -3307,7 +3390,6 @@ async def run_frontier(
             return True
         delivery_attempts += 1
         delivery_pending = False
-        delivery_wait = True
         idle_rounds = 0
         with contextlib.suppress(Exception):
             wake_q.put_nowait("delivery-followup")
@@ -3318,6 +3400,8 @@ async def run_frontier(
         if _n0:
             print(f"[watch] 启动修剪：取消 {_n0} 条死假设挂靠任务", flush=True)
 
+    for _a in list(default_assets or []):
+        _lease_target(_a)
     main_workers = [asyncio.create_task(_worker_loop()) for _ in range(max_workers)]
     worker_tasks = list(main_workers)
     if enable_logistics:
@@ -3331,18 +3415,39 @@ async def run_frontier(
     # 原先这类变化最多等巩固定时器（6 轮）才被 CDR 看见；现在当轮插队唤醒。
     _mat_confirmed = tree.counts().get("confirmed", 0) if tree is not None else 0
     _mat_flags = len(flags)
+
+    def _findings_count(_b: str) -> int:
+        try:
+            from secpt.findings.store import FindingStore
+
+            # 只数本 engagement 的 findings（并行任务的新发现不构成本地图质变）
+            return sum(
+                1
+                for f in FindingStore(
+                    Path(os.environ.get("SECPT_VAR", "var")) / "findings.sqlite"
+                ).list(limit=1000)
+                if str(getattr(f, "job_id", "") or "").startswith(_b)
+            )
+        except Exception:
+            return 0
+
+    _mat_findings = _findings_count(base)
     conv_no_deliver = 0  # CDR 连续不交付计数：回退收口保险（SNT 兜底）
 
     def _material_change():
-        nonlocal _mat_confirmed, _mat_flags
+        nonlocal _mat_confirmed, _mat_flags, _mat_findings
         from secpt.core.orchestrator.watch import WakeSignal
 
         _c = tree.counts().get("confirmed", 0) if tree is not None else 0
         _f = len(flags)
-        if _c == _mat_confirmed and _f == _mat_flags:
+        _fd = _findings_count(base)
+        if _c == _mat_confirmed and _f == _mat_flags and _fd == _mat_findings:
             return None
-        _delta = f"confirmed 假设 {_mat_confirmed}→{_c}，真实 flag {_mat_flags}→{_f}"
-        _mat_confirmed, _mat_flags = _c, _f
+        _delta = (
+            f"confirmed 假设 {_mat_confirmed}→{_c}，真实 flag {_mat_flags}→{_f}，"
+            f"findings {_mat_findings}→{_fd}"
+        )
+        _mat_confirmed, _mat_flags, _mat_findings = _c, _f, _fd
         return WakeSignal(
             kind="material_change",
             detail=f"地图质变：{_delta}，请读图重估方向（继续/转向/收兵）",
@@ -3439,15 +3544,19 @@ async def run_frontier(
         # 值守层信号插队：有信号时无视 idle_rounds（停滞/预算/内务必须被 Commander 处理）
         # v8：convergence 信号额外无视意图上限——收口裁决必须送达 CDR
         _has_conv = any(getattr(s, "kind", "") == "convergence" for s in pending_signals)
+        # v10：quality 信号穿透 delivery_wait——VRF 否决已交 CDR 裁决，
+        # 交付等待只屏蔽常规规划，不屏蔽项目经理的质量反馈处理
+        _has_quality = any(getattr(s, "kind", "") == "quality" for s in pending_signals)
         _signal_plan = (
             bool(pending_signals)
             and (fr.total() < max_intents or _has_conv)
-            and not (delivery_pending or delivery_wait)
+            and (not (delivery_pending or delivery_wait) or _has_quality)
         )
         if _signal_plan or (can_plan and (starving or main_open == 0)):
             _open_before_plan = fr.count_open()  # v8：CDR 接住了收敛议题则回退计数清零
-            await _maybe_plan()
-            rounds += 1
+            _pn = await _maybe_plan()
+            if _pn >= 0:
+                rounds += 1  # 暂停轮（-1）不计：-1 时无任何规划消费，计轮会假耗尽 max_rounds
             if fr.count_open() > _open_before_plan:
                 conv_no_deliver = 0  # 有新意图入池：收敛被 CDR 实质回应，重置回退保险
             main_open = fr.count_open(lane="main")
@@ -3587,6 +3696,18 @@ async def run_frontier(
 
     _release_task_lock(_lock)  # 加强④：正常路径显式释放（异常路径 fd 回收兜底）
 
+    with contextlib.suppress(Exception):
+        _n_rel = _glease.release_all(base)
+        if _n_rel:
+            print(f"[frontier] 全局租约释放 {_n_rel} 个目标", flush=True)
+    # v10 产物自动压缩：事件流轮转归档（保 seq 单调）+ SQLite vacuum + 日志打包
+    if os.environ.get("SECPT_COMPRESS", "1") != "0":
+        with contextlib.suppress(Exception):
+            from secpt.core.sustain.compress import compress_job_dir
+
+            _comp = compress_job_dir(base)
+            if any(_comp.values()):
+                print(f"[frontier] 产物压缩：{_comp}", flush=True)
     summary = RunSummary(
         job_id=base,
         mode="frontier",

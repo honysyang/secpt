@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +16,6 @@ from secpt.core.orchestrator.frontier import (
     frontier_db_path,
     run_frontier,
 )
-from secpt.core.orchestrator.hypothesis import HypothesisTree, hypothesis_db_path
 
 
 def _run(coro):
@@ -46,11 +44,7 @@ class _ScriptedLLM:
 
 
 def _doc(direction: str) -> str:
-    return (
-        "## 当前阶段\n侦察\n## 主攻方向\n"
-        + direction
-        + "\n## 明确不做\n无\n## 转向日志\n- 初始"
-    )
+    return "## 当前阶段\n侦察\n## 主攻方向\n" + direction + "\n## 明确不做\n无\n## 转向日志\n- 初始"
 
 
 _FIRST_WAKE = {
@@ -105,8 +99,7 @@ def test_material_change_wakes_commander_same_round(env, monkeypatch) -> None:
     base = "v8mat"
     fr = Frontier(frontier_db_path(base))
     payloads = [dict(_FIRST_WAKE)] + [
-        {"decision": "continue", "tasks": [], "strategy": _doc("维持")}
-        for _ in range(8)
+        {"decision": "continue", "tasks": [], "strategy": _doc("维持")} for _ in range(8)
     ]
     llm = _ScriptedLLM(payloads)
     _run(
@@ -237,9 +230,7 @@ def test_strategy_focus_extracted_and_injected(env) -> None:
         priority=5,
     )
     intent = fr.claim_next()
-    text = build_intent_objective(
-        "拿下目标", intent, [], base=base, focus=_strategy_focus(p)
-    )
+    text = build_intent_objective("拿下目标", intent, [], base=base, focus=_strategy_focus(p))
     assert "【当前主攻方向" in text and "侧翼 Redis 未授权访问" in text
 
 

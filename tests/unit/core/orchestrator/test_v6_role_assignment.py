@@ -49,11 +49,7 @@ class _ScriptedLLM:
 
 
 def _doc(direction: str) -> str:
-    return (
-        "## 当前阶段\n侦察\n## 主攻方向\n"
-        + direction
-        + "\n## 明确不做\n无\n## 转向日志\n- 初始"
-    )
+    return "## 当前阶段\n侦察\n## 主攻方向\n" + direction + "\n## 明确不做\n无\n## 转向日志\n- 初始"
 
 
 _FIRST_WAKE = {
@@ -131,9 +127,15 @@ def test_briefing_includes_role_catalog(env) -> None:
     assert "【角色与经验·待选择】" in text
     for name, _desc, _sc in role_catalog():
         assert f"- {name}：" in text
-    assert "benchmark" not in [
-        ln.split("：", 1)[0].lstrip("- ").strip() for ln in text.splitlines() if ln.startswith("- ")
-    ] or True  # 目录不含内部档案（宽松断言：目录函数已单测）
+    assert (
+        "benchmark"
+        not in [
+            ln.split("：", 1)[0].lstrip("- ").strip()
+            for ln in text.splitlines()
+            if ln.startswith("- ")
+        ]
+        or True
+    )  # 目录不含内部档案（宽松断言：目录函数已单测）
 
 
 def test_dispatch_assigns_per_task_role(env) -> None:
@@ -186,8 +188,7 @@ def test_frontier_auto_mode_role_flow(env, monkeypatch) -> None:
     base = "r4"
     fr = Frontier(frontier_db_path(base))
     payloads = [dict(_FIRST_WAKE)] + [
-        {"decision": "continue", "tasks": [], "strategy": _doc("入口注入面")}
-        for _ in range(6)
+        {"decision": "continue", "tasks": [], "strategy": _doc("入口注入面")} for _ in range(6)
     ]
     summary = _run(
         run_frontier(
@@ -220,7 +221,7 @@ def test_frontier_auto_mode_role_flow(env, monkeypatch) -> None:
 
 def test_frontier_auto_resume_reuses_role(env, monkeypatch) -> None:
     """resume：role.json/goal.json 已落盘 → 不再请求理解，角色直接生效。"""
-    from secpt.core.orchestrator.goals import save_goal, GoalSpec
+    from secpt.core.orchestrator.goals import GoalSpec, save_goal
 
     save_role("r5", "pentest", ["pentest.md"])
     save_goal("r5", GoalSpec(objective="拿下目标", asset_scope=["http://a.local"]))
