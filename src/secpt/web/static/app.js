@@ -140,6 +140,17 @@ function renderFeed(){
   const last=rounds[rounds.length-1];
   const now=Date.now()/1000;
   const running=viewRunning();
+  /* 面包屑与时间线保持同一口径：轮询期间持续更新，避免首屏旧值 */
+  const _evs=M.events||[];
+  if(_evs.length){
+    const _t0=Math.min(..._evs.map(e=>e.ts));
+    const _t1=Math.max(..._evs.map(e=>e.ts));
+    const _set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v};
+    _set("crumb-rounds",rounds.length);
+    _set("crumb-dur",fmtDur((running?Math.max(now,_t1):_t1)-_t0));
+    _set("crumb-tok",fmtTok(rounds.reduce((a,r)=>a+r.tokens,0)));
+    _set("crumb-cost",fmtCny(rounds.reduce((a,r)=>a+r.cost,0)));
+  }
   /* 展开态持久化：轮询每 1.5s 重建 DOM，用户的收起/展开不能被冲掉 */
   rounds.forEach(r=>{r.open=state.roundOpen[r.round]!==undefined?state.roundOpen[r.round]:(r.flags>0||r===last)});
   let html="";
@@ -736,7 +747,7 @@ function workspaceHTML(){
         <span class="ic">◈</span>
         <span class="title">${esc(title)||"（无标题）"}</span>
         <span class="meta">${esc(j.job_id)} · <b>${esc(j.status)}</b> · ${esc(j.task_type)}</span>
-        <div class="crumb-metrics"><span><b>${rounds.length}</b> rounds</span><span><b>${fmtDur(dur)}</b></span><span><b>${fmtTok(tokens)}</b> tok</span><span><b>${fmtCny(cost)}</b></span><span class="${flags?"gold":""}">⚑ <b>${flags}</b></span></div>
+        <div class="crumb-metrics"><span><b id="crumb-rounds">${rounds.length}</b> rounds</span><span>⏱ <b id="crumb-dur">${fmtDur(dur)}</b></span><span><b id="crumb-tok">${fmtTok(tokens)}</b> tok</span><span><b id="crumb-cost">${fmtCny(cost)}</b></span><span class="${flags?"gold":""}">⚑ <b>${flags}</b></span></div>
       </div>
       <div class="anchor-bar">
         <span class="anchor flag">⚑ <span class="n">${flags}</span> 成果</span>
