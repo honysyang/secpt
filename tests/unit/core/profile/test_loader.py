@@ -93,3 +93,28 @@ def test_unknown_profile_falls_back_default():
     assert prof.name == "no_such_profile"
     assert prof.role == Profile(name="x").role  # 默认角色，不崩
     assert prof.terminator.flag_regex is None  # 默认 terminator 无 flag_regex
+
+
+def test_load_profile_md_suffix_alias():
+    """真实运行暴露：指挥官把经验文件名当角色名（assessment.md）——
+    去 .md 后缀应解析到同名 yaml，而不是静默退回空默认值。"""
+    prof = load_profile("assessment.md")
+    assert prof.name == "assessment"
+    assert prof.role == "安全评估员"
+    assert prof.prior == "assessment.md"
+
+
+def test_load_prior_bare_and_suffixed_names():
+    """load_prior 同时接受裸名（CLI 习惯）与带 .md 文件名（指挥官目录）。"""
+    from secpt.core.profile.render import load_prior
+
+    bare = load_prior("saml")
+    suffixed = load_prior("saml.md")
+    assert bare and bare == suffixed
+
+
+def test_load_prior_missing_raises():
+    from secpt.core.profile.render import load_prior
+
+    with pytest.raises(FileNotFoundError):
+        load_prior("no_such_prior_xyz")

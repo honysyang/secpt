@@ -36,11 +36,18 @@ DEFAULT_CONSTRAINTS = "不要扫描题面外的网段。"
 
 @lru_cache(maxsize=16)
 def load_prior(name: str) -> str:
-    """加载 knowledge/priors/<name>.md 的全文。"""
-    path = _PRIORS_DIR / f"{name}.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"profile '{name}' 不存在: {path}")
-    return path.read_text(encoding="utf-8").strip()
+    """加载 knowledge/priors/<name>.md 的全文。
+
+    名字宽容：指挥官的经验目录给出带 .md 的文件名，CLI --prior 习惯给裸名——
+    两种都收（带后缀按原名找，裸名补 .md），避免 assessment.md → assessment.md.md。
+    """
+    n = str(name or "").strip()
+    cands = [n] if n.endswith(".md") else [f"{n}.md", n]
+    for cand in cands:
+        path = _PRIORS_DIR / cand
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    raise FileNotFoundError(f"profile '{name}' 不存在: {_PRIORS_DIR / (n or '?')}")
 
 
 def render_system_extra(

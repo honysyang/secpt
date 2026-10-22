@@ -124,10 +124,16 @@ def load_profile(name: str) -> Profile:
 
     - 内置名：``ctf`` → ``profiles/ctf.yaml``；找不到回退默认值（兼容旧名）
     - YAML 路径：``/…/merged-<job>.yaml`` 或含 ``/`` 的字符串 → 直接读该文件
+
+    名字宽容：指挥官派单可能把经验文件名当角色名（assessment.md）——去 .md
+    后缀再查 yaml，避免静默退回空默认值丢掉角色/工具配置。
     """
-    is_path = name.endswith((".yaml", ".yml")) or "/" in name
-    path = Path(name) if is_path else PROFILES_DIR / f"{name}.yaml"
-    fallback = Path(name).stem if is_path else name
+    n = str(name or "").strip()
+    if n.endswith(".md"):
+        n = n[:-3]
+    is_path = n.endswith((".yaml", ".yml")) or "/" in n
+    path = Path(n) if is_path else PROFILES_DIR / f"{n}.yaml"
+    fallback = Path(n).stem if is_path else n
     if not path.is_file():
         return Profile(name=fallback)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
