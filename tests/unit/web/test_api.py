@@ -362,3 +362,24 @@ def test_run_job_marks_failed_on_exception(env, monkeypatch):
 
     api._run_job("fin-2", JobStore().get_job("fin-2").spec, llm=None)
     assert JobStore().get_job("fin-2").status == "failed"
+
+
+def test_web_host_env_override(monkeypatch) -> None:
+    """SECPT_WEB_HOST 作为默认监听地址（远程部署不必每次带 --host）；显式参数仍优先。"""
+    from typer.testing import CliRunner
+
+    from secpt.cli.app import app
+
+    seen: dict = {}
+    import secpt.web.server as srv
+
+    monkeypatch.setattr(srv, "serve", lambda *, host, port: seen.update(host=host, port=port))
+    monkeypatch.setenv("SECPT_WEB_HOST", "0.0.0.0")
+    r = CliRunner().invoke(app, ["web", "--port", "8081"])
+    assert r.exit_code == 0, r.output
+    assert seen == {"host": "0.0.0.0", "port": 8081}
+
+    seen.clear()
+    r = CliRunner().invoke(app, ["web", "--host", "127.0.0.1"])
+    assert r.exit_code == 0, r.output
+    assert seen["host"] == "127.0.0.1"

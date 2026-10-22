@@ -179,6 +179,13 @@ def serve(host: str = "127.0.0.1", port: int = 8080) -> None:  # pragma: no cove
     server = make_server(host, port)
     bound = server.server_address
     print(f"[web] secpt 控制台: http://{bound[0]}:{bound[1]}（Ctrl-C 退出）", flush=True)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # 面板无认证：非回环监听 = 同网段任何人可下发任务/追问/取消任务
+        print(
+            f"[web] ⚠ 非回环监听（{host}）：控制台无认证，"
+            "仅限可信网络；公网暴露请先加反向代理与访问控制",
+            flush=True,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

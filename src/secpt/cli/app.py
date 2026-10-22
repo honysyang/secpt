@@ -499,13 +499,20 @@ for _name, _fn in [
 
 @app.command("web")
 def web_cmd(
-    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（默认仅本机）"),
+    # 显式 --host 优先；否则 SECPT_WEB_HOST（远程/容器部署放 .env 里）；再否则仅本机。
+    # 注意：面板当前无认证，监听非回环地址等于把任务下发/追问 API 暴露给该网段。
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="监听地址（默认仅本机；SECPT_WEB_HOST 可覆盖）",
+    ),
     port: int = typer.Option(8080, "--port", help="监听端口"),
 ) -> None:
     """启动 Web 控制台（浏览器版工作台：对话/轨迹/作战面板/资产/发现/配置/工具/经验）。"""
     from secpt.web.server import serve
 
-    serve(host=host, port=port)
+    # 运行期解析（不能写成 Option 默认值：那会在 import 时求值，.env 后加载无效）
+    serve(host=host or os.environ.get("SECPT_WEB_HOST", "127.0.0.1"), port=port)
 
 
 @app.command("engage")
