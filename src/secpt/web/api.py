@@ -571,7 +571,10 @@ def delete_job(job_id: str) -> dict:
         rec = None
         with contextlib.suppress(Exception):
             rec = JobStore().get_job(job_id)
-        if rec is not None and rec.status == "running":
+        # 非终态都要先取消：queued/pending 的任务删掉后线程仍会启动，
+        # 会派生出一堆失去父任务的孤儿子任务（web-8d3c345d 实证）
+        _ACTIVE = {"queued", "pending", "running", "awaiting_confirm", "paused"}
+        if rec is not None and rec.status in _ACTIVE:
             cancel_task(job_id)
     try:
         from secpt.core.job.store import JobStore

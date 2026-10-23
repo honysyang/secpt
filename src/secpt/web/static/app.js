@@ -61,7 +61,7 @@ async function loadJobs(){
     const had=!!state.jobId;
     state.jobId="";state.cursor=0;M.events=[];M.workspace={};
     dockState.mapSig="";dockState.outSig="";
-    state.newTaskMode=true;
+    state.newTaskMode=true;state.mode="new";
     if(had&&state.view==="workspace")renderBody();
     return;
   }
@@ -860,6 +860,7 @@ function bindWorkspace(){
   },{passive:true});
   // 新建模式无 feed：renderFeed/renderTaskPanel 对缺失元素有守卫，安全
   $$(".mode-switch button",body).forEach(b=>b.onclick=()=>{
+    if(b.dataset.m==="followup"&&!state.jobId){toast("还没有可追问的任务，请先下达新任务");return}
     state.mode=b.dataset.m;
     if(state.newTaskMode&&b.dataset.m==="followup")state.newTaskMode=false;
     renderBody()});
@@ -942,7 +943,7 @@ async function sendComposer(){
   if(!text){toast("内容为空");return}
   cin.value="";
   try{
-    if(state.mode==="followup"){
+    if(state.mode==="followup"&&state.jobId){
       const r=await api(`/api/jobs/${state.jobId}/message`,{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({content:text})});
@@ -957,7 +958,7 @@ async function sendComposer(){
       const auto=(document.getElementById("c-auto")||{}).checked||false;
       const r=await api("/api/jobs",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({objective:text,profile:curJob().task_type||"ctf",
+        body:JSON.stringify({objective:text,profile:(state.jobId&&curJob().task_type)||"auto",
           files:state.composerFiles,fake:false,auto_dispatch:auto})});
       state.composerFiles=[];
       state.newTaskMode=false;

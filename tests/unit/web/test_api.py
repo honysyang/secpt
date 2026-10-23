@@ -414,3 +414,30 @@ def test_job_file_payload_rejects_escape_and_foreign_subjob(env) -> None:
     assert "error" in api.job_file_payload("job-1", sub="other-job", path="a.txt")
     assert "error" in api.job_file_payload("job-1", sub="job-1-iabcd", path="missing.txt")
     assert "error" in api.job_file_payload("job-1", sub="job-1-iabcd", path="")
+
+
+def test_delete_job_cancels_nonterminal(env, monkeypatch) -> None:
+    """删除 queued/pending 任务也要先取消，否则线程照常启动、派生孤儿子任务。"""
+    from secpt.core.job.resume import jobs_dir
+    from secpt.core.job.store import JobStore
+
+    _mk_record_status("del-1", "queued")
+    (jobs_dir() / "del-1").mkdir(parents=True, exist_ok=True)
+    called: list[str] = []
+    monkeypatch.setattr(api, "cancel_task", lambda jid: called.append(jid) or {"ok": True})
+
+    assert api.delete_job("del-1").get("ok") is True
+    assert called == ["del-1"]
+    assert JobStore().get_job("del-1") is None
+
+
+def test_delete_job_terminal_skips_cancel(env, monkeypatch) -> None:
+    from secpt.core.job.resume import jobs_dir
+
+    _mk_record_status("del-2", "succeeded")
+    (jobs_dir() / "del-2").mkdir(parents=True, exist_ok=True)
+    called: list[str] = []
+    monkeypatch.setattr(api, "cancel_task", lambda jid: called.append(jid) or {"ok": True})
+
+    assert api.delete_job("del-2").get("ok") is True
+    assert called == []
