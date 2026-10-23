@@ -196,7 +196,7 @@ function renderFeed(){
       if(tools.length)body+=panelHTML("tool",r.round,tools,
         state.toolOpen[r.round]!==undefined?state.toolOpen[r.round]:(running&&r===last));
     }
-    html+=`<section class="round-panel ${r.open?"open":""}" data-round="${r.round}">
+    html+=`<section class="round-panel ${r.open?"open":""}" data-round="${r.round}" data-anchor="round-${r.round}">
       <div class="round-head" data-act="r-toggle" data-r="${r.round}">
         <span class="ricon">▤</span><b>ROUND ${r.round}</b>
         <span class="rstat ${st.cls}"><i></i>${esc(st.text)}</span>
@@ -255,10 +255,11 @@ function renderFeed(){
     copyText(t,b.dataset.copyMsg||"已复制到剪贴板");
   });
   applyFilter();
+  scheduleTimelineSpy();
   if(state.locate&&Date.now()<state.locate.until){
     const sel=state.locate.kind==="round"
       ?`.round-panel[data-round="${state.locate.round}"]`
-      :`[data-seq="${state.locate.seq}"]`;
+      :`[data-anchor="${state.locate.seq}"]`;
     const t=$(sel,feed);if(t)t.classList.add("flash");
   }
   if(state.follow)feed.scrollTop=feed.scrollHeight;
@@ -284,7 +285,7 @@ function userGroupHTML(list){
       ${list.map(e=>{
         const p=e.payload||{};
         const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
-        return `<div class="ubub" data-seq="${e.seq}"><span class="ubub-k">${esc(lbl)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
+        return `<div class="ubub" data-seq="${e.seq}" data-anchor="user-${e.seq}"><span class="ubub-k">${esc(lbl)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
       }).join("")}
     </div></div>`;
 }
@@ -335,11 +336,11 @@ function itemHTML(i){
     const st=e.payload.status;
     const verb={claimed:"▸ 领取执行",open:"↩ 复核回队",blocked:"⏸ 挂起",done:"✓ 完成",cancelled:"◼ 已取消",failed:"✗ 失败",exhausted:"▽ 耗尽"}[st]||"✗ 结算";
     const laneTxt=e.payload.lane==="logistics"?" · 后勤":"";
-    return `<div class="msg-agent act turn-item" data-seq="${e.seq}"><div class="a-head"><span class="abadge">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
+    return `<div class="msg-agent act turn-item" data-seq="${e.seq}" data-anchor="intent-${e.payload.iid||e.seq}"><div class="a-head"><span class="abadge">${AGENT_IC} ${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 任务结算</span></div><div class="a-body actline"><b>${verb}</b>「${esc(e.payload.title||"")}」${laneTxt}${e.payload.reason?`<span class="sub"> · ${esc(e.payload.reason)}</span>`:""}</div></div>`;
   }
   return "";
 }
-/* ── 对话时间线刻度条：用户 / 轮次 / 工具 节点，hover 精确时间+耗时，点击定位 ── */
+/* ── 对话时间线（迷你轨）：用户 / 轮次 / 意图 三个层级，工具明细留在对话流 ── */
 function renderTimeline(rounds,now,running){
   const el=$("#feed-timeline");if(!el)return;
   const evs=M.events||[];
@@ -348,25 +349,32 @@ function renderTimeline(rounds,now,running){
   const tLast=Math.max(...evs.map(e=>e.ts));
   const t1=Math.max(tLast,t0+1,running?now:tLast);
   const pos=ts=>2+96*Math.max(0,Math.min(1,(ts-t0)/(t1-t0)));
-  const results=new Map(evs.filter(e=>e.type==="tool_result").map(e=>[e.payload.call_id,e]));
   let nodes="";
   for(const e of evs){
     if(e.type==="user_msg"&&isUserEvent(e)){
       const lbl=USER_KIND_LBL[e.payload.kind]||e.payload.kind||"消息";
-      nodes+=`<button class="tl-node user" style="top:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
+      nodes+=`<button class="tl-node user" style="top:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-anchor="user-${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
     }
   }
   for(const r of rounds){
     const dur=(running&&r===rounds[rounds.length-1]?now:r.t1)-r.t0;
     const st=roundStatus(r,r===rounds[rounds.length-1],running,curJob().status,now);
-    nodes+=`<button class="tl-node round ${st.cls}" style="top:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
+    nodes+=`<button class="tl-node round ${st.cls}" style="top:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-anchor="round-${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
   }
+  /* 意图粒度：同一 iid 的 claimed/done/exhausted 事件聚合为一个节点（首事件定位） */
+  const intents=new Map();
   for(const e of evs){
-    if(e.type!=="tool_call")continue;
-    const res=results.get(e.payload.call_id);
-    const dur=res?Math.max(0,res.ts-e.ts):null;
-    const tip=`${e.payload.tool} · ${fmtT(e.ts)}${dur!=null?` · 用时 ${fmtSec(dur)}`:" · 进行中"}`;
-    nodes+=`<button class="tl-node tool" style="top:${pos(e.ts)}%" data-kind="tool" data-round="${e.round}" data-seq="${e.seq}" data-tip="${esc(tip)}" aria-label="工具调用"></button>`;
+    if(e.type!=="intent_event")continue;
+    const iid=e.payload.iid||("s"+e.seq);
+    const cur=intents.get(iid);
+    if(cur){cur.last=e;if(e.payload.status)cur.status=e.payload.status}
+    else intents.set(iid,{first:e,last:e,status:e.payload.status});
+  }
+  for(const [iid,x] of intents){
+    const f=x.first,p=f.payload||{};
+    const dur=Math.max(0,x.last.ts-f.ts);
+    const tip=`意图 · ${p.title||iid} · ${x.status||""} · ${fmtT(f.ts)}${dur>0.05?` · 用时 ${fmtSec(dur)}`:""}`;
+    nodes+=`<button class="tl-node intent" style="top:${pos(f.ts)}%" data-kind="intent" data-round="${f.round}" data-anchor="intent-${esc(iid)}" data-tip="${esc(tip)}" aria-label="意图"></button>`;
   }
   const total=(running?now:tLast)-t0;
   const bad=["failed","cancelled","stalled"].includes(curJob().status);
@@ -380,7 +388,7 @@ function renderTimeline(rounds,now,running){
       <div class="tl-total ${tCls}" title="${esc(tTitle)}"><span class="tl-total-k">${tK}</span><b>${tV}</b></div>
     </div>
     <div class="tl-track">${nodes}<div class="tl-tip" id="tl-tip"></div></div>
-    <div class="tl-legend"><span><i class="lg-user"></i>用户</span><span><i class="lg-round"></i>轮次</span><span><i class="lg-tool"></i>工具</span></div>
+    <div class="tl-legend"><span><i class="lg-user"></i>用户</span><span><i class="lg-round"></i>轮次</span><span><i class="lg-intent"></i>意图</span></div>
   </div>`;
   const track=$(".tl-track",el),tip=$("#tl-tip",el);
   $$(".tl-node",el).forEach(n=>{
@@ -397,27 +405,57 @@ function renderTimeline(rounds,now,running){
       const p=$(`.round-panel[data-round="${n.dataset.round}"]`);
       if(p)p.classList.remove("linked");
     };
-    n.onclick=()=>locateNode(n.dataset.kind,+n.dataset.round||0,+n.dataset.seq||0);
+    n.onclick=()=>locateTimelineNode(n);
   });
+  requestAnimationFrame(updateTimelineActive);
 }
-function locateNode(kind,round,seq){
+/* ── 迷你轨 scroll spy：随对话流滚动高亮当前锚点（不联动滚动，天然无同步问题） ── */
+let _tlRaf=0;
+function scheduleTimelineSpy(){
+  if(_tlRaf)return;
+  _tlRaf=requestAnimationFrame(()=>{_tlRaf=0;updateTimelineActive()});
+}
+function updateTimelineActive(){
+  const feed=$("#feed"),rail=$("#feed-timeline");
+  if(!feed||!rail)return;
+  const nodes=$$(".tl-node",rail);if(!nodes.length)return;
+  const anchors=$$("[data-anchor]",feed);if(!anchors.length)return;
+  const line=feed.getBoundingClientRect().top+80;
+  let key=anchors[0].dataset.anchor;
+  for(const a of anchors){
+    const r=a.getBoundingClientRect();
+    if(!r.width&&!r.height)continue;  // 折叠面板内的隐藏锚点不参与高亮
+    if(r.top<=line)key=a.dataset.anchor;
+    else break;
+  }
+  if(feed.scrollTop+feed.clientHeight>=feed.scrollHeight-4)key=anchors[anchors.length-1].dataset.anchor;
+  if(state.tlPin){
+    if(Date.now()<state.tlPin.until)key=state.tlPin.anchor;
+    else state.tlPin=null;
+  }
+  nodes.forEach(n=>n.classList.toggle("active",n.dataset.anchor===key));
+}
+function locateTimelineNode(n){
   const feed=$("#feed");if(!feed)return;
+  const kind=n.dataset.kind,round=+n.dataset.round||0,anchor=n.dataset.anchor||"";
   if(state.filter!=="all"){  // 过滤态下目标可能被隐藏：定位前恢复全量视图
     state.filter="all";
     $$(".chip[data-f]").forEach(x=>x.classList.toggle("on",x.dataset.f==="all"));
   }
   state.roundOpen[round]=true;
-  if(kind==="tool")state.toolOpen[round]=true;
+  if(kind==="intent")state.workOpen[round]=true;
   state.follow=false;
   const wf=$("#ws-follow");if(wf)wf.checked=false;
-  state.locate={kind,round,seq,until:Date.now()+1800};
+  state.locate={kind,round,seq:anchor,until:Date.now()+1800};
+  state.tlPin={anchor,until:Date.now()+1500};
   renderFeed();
-  const panel=$(`.round-panel[data-round="${round}"]`,feed);
-  const target=kind==="round"?panel:(panel?panel.querySelector(`[data-seq="${seq}"]`):null);
+  const target=feed.querySelector(`[data-anchor="${anchor}"]`)
+    ||(kind==="round"?feed.querySelector(`.round-panel[data-round="${round}"]`):null);
   if(!target){toast("该节点未在当前视图（可能被过滤或未渲染）");return}
   target.scrollIntoView({behavior:"smooth",block:"center"});
   target.classList.add("flash");
   setTimeout(()=>target.classList.remove("flash"),1600);
+  setTimeout(updateTimelineActive,450);
 }
 /* 文件卡展开：正文按需回源（大段代码不进首屏 DOM） */
 async function toggleFileCard(card){
@@ -818,6 +856,7 @@ function bindWorkspace(){
   if(feedEl)feedEl.addEventListener("scroll",()=>{
     const near=feedEl.scrollHeight-feedEl.scrollTop-feedEl.clientHeight<48;
     if(!near&&state.follow){state.follow=false;if(wf)wf.checked=false}
+    scheduleTimelineSpy();
   },{passive:true});
   // 新建模式无 feed：renderFeed/renderTaskPanel 对缺失元素有守卫，安全
   $$(".mode-switch button",body).forEach(b=>b.onclick=()=>{
