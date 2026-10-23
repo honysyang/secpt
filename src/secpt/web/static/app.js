@@ -56,7 +56,16 @@ async function loadJobs(){
   const d=await api("/api/jobs");
   M.jobs=(d.jobs||[]).map(j=>({job_id:j.job_id,status:j.status,task_type:j.task_type||"",
     objective:j.objective||"",created_at:j.created_at?new Date(j.created_at).getTime()/1000:0}));
-  if(!state.jobId&&M.jobs.length){
+  if(!M.jobs.length){
+    // 列表被清空（删光任务）：重置选中态，回到"新建任务"空工作台
+    const had=!!state.jobId;
+    state.jobId="";state.cursor=0;M.events=[];M.workspace={};
+    dockState.mapSig="";dockState.outSig="";
+    state.newTaskMode=true;
+    if(had&&state.view==="workspace")renderBody();
+    return;
+  }
+  if(!state.jobId){
     // 默认选中"对话根任务"：子任务（-iXXXX 意图段/-r2 续段/-rs）与父任务共享同一张
     // 作战地图，选中子任务会让地图/成果面板变空——对话视角应落在父任务上
     const root=M.jobs.find(j=>!_CHILD_RE.test(j.job_id));
@@ -696,6 +705,8 @@ function applyFilter(){
 function workspaceHTML(){
   if(state.newTaskMode){
     $("#k-run").textContent=M.jobs.filter(x=>x.status==="running").length;
+    $("#k-flag").textContent=0;
+    $("#k-cost").textContent=fmtCny(0);
     $("#k-model").textContent=M.config.effective.model_primary||"model";
     return `<div class="ws2">
     <aside class="hist">
