@@ -73,13 +73,15 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .nav{background:var(--bg0);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 .nav-cap{font-size:10.5px;color:var(--fg3);letter-spacing:.1em;padding:14px 14px 7px;text-transform:uppercase;display:flex;align-items:center}
 .nav-cap .sp{flex:1}
-.nav-btns{padding:0 8px;display:flex;flex-direction:column;gap:1px;border-bottom:1px solid var(--line);padding-bottom:10px}
+.nav-btns{padding:8px 8px 10px;display:flex;flex-direction:column;gap:1px;border-bottom:1px solid var(--line)}
 .nav-btn{display:flex;align-items:center;gap:10px;height:32px;border-radius:var(--rs);padding:0 10px;color:var(--fg2);font-size:13px;transition:background .1s}
 .nav-btn .ic{width:18px;text-align:center;font-size:13.5px;flex:none}
 .nav-btn:hover{background:var(--bg2);color:var(--fg)}
 .nav-btn.active{background:var(--bg3);color:var(--fg);font-weight:550}
 .nav-btn .bdg{margin-left:auto;font:10px var(--mono);color:var(--fg3)}
 .nav-btn .bdg.hot{color:var(--fg);background:var(--bg3);border-radius:8px;padding:0 6px;line-height:16px}
+.nav-btn .bdg.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent);border-radius:8px;padding:0 6px;line-height:16px}
+.nav-group-cap{font-size:10px;color:var(--fg3);letter-spacing:.12em;padding:14px 10px 5px;text-transform:uppercase}
 .nav .spacer{flex:1}
 .nav-foot{font:10px var(--mono);color:var(--fg3);padding:12px 14px;border-top:1px solid var(--line);line-height:1.7}
 .tfilters{display:flex;gap:5px;padding:6px 14px 8px}
@@ -626,6 +628,7 @@ input:focus,textarea:focus{border-color:var(--line2)}
   .nav-btns{flex-direction:row;gap:4px;padding:6px 8px;border-bottom:0;overflow-x:auto;flex:none}
   .nav-btn{height:30px;padding:0 10px;white-space:nowrap;font-size:12px}
   .nav-btn .bdg{display:none}
+  .nav-group-cap{display:none}
   .ws2{flex-direction:column;min-height:0}
   .hist{width:100%;max-height:128px;border-right:0;border-bottom:1px solid var(--line);flex:none}
   .hist .newtask{margin:8px 10px 0;padding:6px 10px;font-size:12px}

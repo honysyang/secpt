@@ -92,21 +92,30 @@ async function loadExperience(){
 async function loadConfig(){M.config=await api("/api/config")}
 
 /* ── 侧栏导航 ── */
-function navCounts(){
+function navGroups(){
   const running=M.jobs.filter(j=>j.status==="running").length;
-  return [["workspace","◈","工作台",running],
-    ["dashboard","◱","总览",0],
-    ["assets","▣","资产",M.assets.length],
-    ["findings","⚑","发现",M.findings.length],
-    ["tools","⚒","工具",0],
-    ["experience","❄","经验",M.experiences.length],
-    ["config","⚙","配置",0]];
+  return [
+    {title:"", items:[["workspace","◈","工作台",running,""]]},
+    {title:"运营", items:[
+      ["dashboard","◱","总览",0,""],
+      ["assets","▣","资产",M.assets.length,""],
+      ["findings","⚑","发现",M.findings.length,"warn"],
+    ]},
+    {title:"能力", items:[
+      ["tools","⚒","工具",0,""],
+      ["experience","❄","经验",M.experiences.length,""],
+    ]},
+    {title:"系统", items:[["config","⚙","配置",0,""]]},
+  ];
 }
+function navCounts(){return navGroups().flatMap(g=>g.items).map(([id,ic,label,n])=>[id,ic,label,n])}
 function renderNav(){
-  $("#navbtns").innerHTML=navCounts().map(([id,ic,label,n])=>`
-    <button class="nav-btn ${state.view===id?"active":""}" data-v="${id}">
-      <span class="ic">${ic}</span>${label}${n?`<span class="bdg ${id==="findings"?"hot":""}">${n>99?"99+":n}</span>`:""}
-    </button>`).join("");
+  $("#navbtns").innerHTML=navGroups().map(g=>`
+    ${g.title?`<div class="nav-group-cap">${g.title}</div>`:""}
+    ${g.items.map(([id,ic,label,n,badge])=>`
+      <button class="nav-btn ${state.view===id?"active":""}" data-v="${id}">
+        <span class="ic">${ic}</span>${label}${n?`<span class="bdg ${badge}">${n>99?"99+":n}</span>`:""}
+      </button>`).join("")}`).join("");
   $$("#navbtns .nav-btn").forEach(b=>b.onclick=()=>setView(b.dataset.v));
 }
 function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;
