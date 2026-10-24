@@ -679,3 +679,9 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .resultbox{border:1px solid var(--line2);border-left:3px solid var(--c-ok);border-radius:9px;margin-bottom:12px;overflow:hidden;background:var(--bg2)}
 .resultbox .rb-cap{font:10.5px var(--mono);color:var(--c-ok);letter-spacing:.08em;padding:7px 11px;border-bottom:1px solid var(--line)}
 .resultbox pre{margin:0;padding:11px 13px;font:12px/1.65 var(--mono);color:var(--fg);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}
+
+/* 系统响应 turn 头：机器人头像 + 本轮返回摘要 */
+.sys-head{margin:2px 0 10px}
+.sys-head .turn-avatar{color:var(--agent);border-color:color-mix(in srgb,var(--agent) 40%,var(--line));background:color-mix(in srgb,var(--agent) 10%,var(--bg2))}
+.sys-head .turn-cap b{color:var(--agent)}
+.sys-return{background:color-mix(in srgb,var(--agent) 7%,var(--bg2));border:1px solid color-mix(in srgb,var(--agent) 25%,var(--line));border-left:3px solid var(--agent);border-radius:4px 10px 10px 4px;padding:9px 13px;font-size:12.5px;line-height:1.6;color:var(--fg);white-space:pre-wrap}

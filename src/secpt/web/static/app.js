@@ -190,7 +190,8 @@ function renderFeed(){
         else if(i.t==="tool"||(i.t==="ev"&&["finding","error"].includes(i.o.type)))tools.push(i);
         else work.push(i);
       }
-      if(users.length)body+=userGroupHTML(users);
+      if(users.length||r===rounds[0])body+=userGroupHTML(users);
+      body+=sysTurnHeader(r,tools,work);
       if(work.length)body+=panelHTML("work",r.round,work,
         state.workOpen[r.round]!==undefined?state.workOpen[r.round]:true);
       if(tools.length)body+=panelHTML("tool",r.round,tools,
@@ -278,15 +279,47 @@ function isUserEvent(e){
 }
 const USER_KIND_LBL={direct:"追问/指令",new_task:"下达任务",steer:"操舵",msg:"消息"};
 function userGroupHTML(list){
+  const w=M.workspace||{};
+  const items=list.map(e=>{
+    const p=e.payload||{};
+    const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
+    return `<div class="ubub" data-seq="${e.seq}" data-anchor="user-${e.seq}"><span class="ubub-k">${esc(lbl)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
+  });
+  /* 归档/续接任务本轮没有 user_msg：回填任务目标，保证"用户输入"始终可见 */
+  if(!items.length){
+    const obj=(w.goal&&w.goal.objective)||curJob().objective||"";
+    if(obj)items.push(`<div class="ubub"><span class="ubub-k">任务目标</span>${esc(String(obj).replace(/^【任务目标】\n?/,"").slice(0,400))}</div>`);
+  }
+  if(!items.length)return "";
   return `<div class="turn user user-group">
     <div class="turn-rail"><span class="turn-avatar user">${USER_SVG}</span></div>
     <div class="turn-body">
-      <div class="turn-cap"><b>用户输入</b><span>${list.length} 条 · ${fmtT(list[0].ts)}</span></div>
-      ${list.map(e=>{
-        const p=e.payload||{};
-        const lbl=USER_KIND_LBL[p.kind]||(p.kind||"消息");
-        return `<div class="ubub" data-seq="${e.seq}" data-anchor="user-${e.seq}"><span class="ubub-k">${esc(lbl)} · ${fmtT(e.ts)}</span>${esc(p.content)}</div>`;
-      }).join("")}
+      <div class="turn-cap"><b>用户输入</b><span>${items.length} 条</span></div>
+      ${items.join("")}
+    </div></div>`;
+}
+/* 系统响应 turn 头：机器人头像 +「本轮返回了什么」一句话摘要（ANSWER/成果/交付判定） */
+function sysTurnHeader(round,tools,work){
+  let out="";
+  for(let i=work.length-1;i>=0;i--){
+    const e=work[i].o,p=e.payload||{};
+    if(e.type==="assistant"&&p.content){out=p.content;break}
+  }
+  if(!out){
+    for(let i=tools.length-1;i>=0;i--){
+      const it=tools[i];
+      if(it.t==="ev"&&it.o.type==="finding"){out=`⚑ ${it.o.payload.value}`;break}
+    }
+  }
+  const w=M.workspace||{};
+  if(!out&&w.delivery)out=`交付判定：${w.delivery.accepted?"通过":"未通过"} — ${w.delivery.reason||""}`;
+  if(!out&&round.round===0&&w.goal)out=`开始执行：${String(w.goal.objective||"").replace(/^【任务目标】\n?/,"").slice(0,120)}`;
+  if(!out)out="";
+  return `<div class="turn sys sys-head">
+    <div class="turn-rail"><span class="turn-avatar sys">${ROBOT_SVG}</span></div>
+    <div class="turn-body">
+      <div class="turn-cap"><b>系统响应</b><span>${tools.length+work.length} 条过程记录</span></div>
+      ${out?`<div class="sys-return">${esc(out.slice(0,300))}</div>`:""}
     </div></div>`;
 }
 function panelHTML(kind,round,items,open){
@@ -294,7 +327,7 @@ function panelHTML(kind,round,items,open){
   return `<section class="${work?"work-panel":"tool-panel"} ${open?"":"collapsed"}" data-r="${round}" data-panel="${kind}">
     <div class="panel-head" data-act="panel-toggle" data-r="${round}" data-panel="${kind}">
       <span class="panel-ic">${work?BRAIN_SVG:TOOL_SVG}</span>
-      <b>${work?"思考与工作":"工具与结果"}</b>
+      <b>${work?"系统响应 · 推理与规划":"系统响应 · 工具与结果"}</b>
       <span class="panel-n">${items.length} ${work?"条记录":"项调用/结果"}</span>
       <span class="arr">▼</span>
     </div>
