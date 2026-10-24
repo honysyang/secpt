@@ -684,7 +684,7 @@ function termCardHTML(call,result){
   const a=parseArgs(call.payload.args);
   const cmd=String(a.command||(typeof call.payload.args==="string"?call.payload.args:"")||"");
   const st=result?(result.payload.status==="ok"?"ok":"err"):"wait";
-  const stTxt=result?(result.payload.status==="ok"?"done":result.payload.status):"running…";
+  const stTxt=result?(result.payload.status==="ok"?"完成":result.payload.status):"执行中…";
   const bytes=result?(result.payload.bytes||0):0;
   const out=result?String(result.payload.preview||""):"";
   const key=`${state.jobId}:${call.seq}`;
@@ -695,7 +695,7 @@ function termCardHTML(call,result){
       <span class="cmd-name">bash</span>
       <span class="term-st ${st}">${esc(stTxt)}${result?` · ${bytes}B`:""}</span>
       <span class="term-time">${fmtT(call.ts)}</span>
-      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="终端内容已复制">Copy</button>
+      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="终端内容已复制">复制</button>
     </div>
     <pre class="term-cmd"><span class="ps1">$</span>${esc(cmd)}</pre>
     ${result?`<pre class="term-out">${esc(out||"(无输出)")}</pre>`:`<div class="term-wait"><span class="dots"><i></i><i></i><i></i></span>执行中…</div>`}
@@ -724,7 +724,7 @@ function fileCardHTML(call,result){
     }
   }
   const ok=!!result&&result.payload.status==="ok";
-  const stTxt=result?(ok?"Success":"Failed"):"Writing…";
+  const stTxt=result?(ok?"成功":"失败"):"写入中…";
   const open=state.openKeys.has(key);
   const cached=FILE_BUF.get(key);
   const bodyHTML=open?(cached!=null?`<pre class="code"><code>${esc(cached)}</code></pre>`:`<div class="file-loading">加载文件内容…</div>`):"";
@@ -734,7 +734,7 @@ function fileCardHTML(call,result){
       <span class="fpath" title="${esc(path||"(未知路径)")}">${esc(path||"(未知路径)")}</span>
       <span class="fstat ${ok?"ok":"err"}">${esc(stTxt)}</span>
       <span class="fmeta">${size!=null?size+"B":"—"} · ${fmtT(call.ts)}</span>
-      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="文件内容已复制">Copy</button>
+      <button class="copy-btn" data-copy-key="${key}" data-copy-msg="文件内容已复制">复制</button>
       <span class="arr">▼</span>
     </div>
     <div class="file-body" data-filled="${cached!=null?"1":"0"}">${bodyHTML}</div>
@@ -754,7 +754,7 @@ async function fetchFileCard(card){
 }
 function toolLogHTML(c){
   const st=c.result?(c.result.payload.status==="ok"?"ok":"err"):"wait";
-  const stTxt=c.result?c.result.payload.status:"running…";
+  const stTxt=c.result?c.result.payload.status:"执行中…";
   const bytes=c.result?(c.result.payload.bytes||0):0;
   const args=c.call.payload.args;
   const key=`${state.jobId}:t:${c.call.seq}`;
@@ -811,9 +811,9 @@ function workspaceHTML(){
       <div class="center-hero">
         <div class="hero-brand">${AGENT_IC} secpt <span class="muted">· 下达新任务</span></div>
         <div class="composer center">
-          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>Agent is generating…</span></div>
+          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>智能体生成中…</span></div>
           <div class="attach-strip" id="attach-strip"></div>
-          <textarea id="c-in" rows="3" placeholder="Enter your security task or reply to the Agent..." title="目标 / 范围 / 约束 / 交付要求…（附件点 ＋，Ctrl+Enter 发送）"></textarea>
+          <textarea id="c-in" rows="3" placeholder="输入安全任务，或回复智能体…（Enter 发送，Shift+Enter 换行）" title="目标 / 范围 / 约束 / 交付要求…（附件点 ＋，Ctrl+Enter 发送）"></textarea>
           <div class="composer-foot">
             <button class="cbtn" id="btn-attach" title="附件 / 图片">＋</button>
             <input type="file" id="c-files" multiple hidden>
@@ -823,8 +823,8 @@ function workspaceHTML(){
             </div>
             <label class="follow" title="默认勾选：任务确认后立即派单执行；取消勾选=指挥官先产《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto" checked>自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
-            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
-            <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
+            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">中断任务</button>
+            <button class="cbtn send" id="btn-send" title="Enter 发送 · Shift+Enter 换行">发送</button>
           </div>
         </div>
         <div class="hero-hint">任务流：接战受理（接战单确认）→ Commander 编成派单 → 执行体 ReAct 并行 → 后勤后台 → 交付门验收 → 经验沉淀</div>
@@ -869,9 +869,9 @@ function workspaceHTML(){
       </div>
       <div class="composer-float">
         <div class="composer">
-          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>Agent is generating…</span></div>
+          <div class="gen-dots" id="gen-dots"><i></i><i></i><i></i><span>智能体生成中…</span></div>
           <div class="attach-strip" id="attach-strip"></div>
-          <textarea id="c-in" rows="3" placeholder="Enter your security task or reply to the Agent..." title="${state.mode==="followup"?(taskRunning(j.job_id)?"追问当前任务：发送即入作战地图（人工直投，规划让路）…":"任务已收敛 · 发送将以同一张作战地图续接编排（不新开任务）…"):"目标 / 范围 / 约束 / 交付要求…（将新建独立任务）"}"></textarea>
+          <textarea id="c-in" rows="3" placeholder="输入安全任务，或回复智能体…（Enter 发送，Shift+Enter 换行）" title="${state.mode==="followup"?(taskRunning(j.job_id)?"追问当前任务：发送即入作战地图（人工直投，规划让路）…":"任务已收敛 · 发送将以同一张作战地图续接编排（不新开任务）…"):"目标 / 范围 / 约束 / 交付要求…（将新建独立任务）"}"></textarea>
           <div class="composer-foot">
             <button class="cbtn" id="btn-attach" title="附件（下达新任务时随任务上传）">＋</button>
             <input type="file" id="c-files" multiple hidden>
@@ -881,8 +881,8 @@ function workspaceHTML(){
             </div>
             <label class="follow" title="默认勾选：任务确认后立即派单执行；取消勾选=指挥官先产《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto" checked>自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
-            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
-            <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
+            <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">中断任务</button>
+            <button class="cbtn send" id="btn-send" title="Enter 发送 · Shift+Enter 换行">发送</button>
           </div>
         </div>
       </div>
@@ -912,7 +912,7 @@ function bindWorkspace(){
     renderBody()});
   const cin=$("#c-in");
   cin.addEventListener("keydown",e=>{
-    if((e.ctrlKey||e.metaKey)&&e.key==="Enter")sendComposer();
+    if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendComposer()}
   });
   $("#btn-send").onclick=()=>sendComposer();
   const bi=$("#btn-interrupt");if(bi)bi.onclick=()=>stopComposer();
