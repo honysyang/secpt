@@ -35,7 +35,7 @@ const M={jobs:[],events:[],workspace:{},findings:[],assets:[],
   tools:{builtin:[],plugins:[],skills:[]},experiences:[],config:{saved:{},effective:{}}};
 const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"followup",taskFilter:"all",
   labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
-  assetTypes:[],assetQ:"",assetPage:1,findSev:["critical","high","medium","low"],findQ:"",
+  assetTypes:[],assetQ:"",assetPage:1,findSev:["critical","high","medium","low"],findQ:"",findPage:1,
   expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false,
   openKeys:new Set(),closedKeys:new Set(),roundOpen:{},workOpen:{},toolOpen:{}};
 const AGENT_IC="⬡";
@@ -1564,10 +1564,13 @@ function renderBody(){
     const sevAll=["critical","high","medium","low"];
     const sev={critical:0,high:0,medium:0,low:0};M.findings.forEach(f=>{if(sev[f.severity]!=null)sev[f.severity]++});
     const sevColor={critical:"bad",high:"high",medium:"warn",low:"fg3"};
-    body.innerHTML=`<div class="view"><h2>发现 / 风险</h2><div class="view-sub">${M.findings.length} 条 · 点击图例筛选严重度 · 点击行查看详情</div>
-      <div class="card" style="padding:13px 16px">
-        <div class="sevbar">${sevAll.map(k=>`<i style="width:${sev[k]/(M.findings.length||1)*100}%;background:var(--${sevColor[k]})"></i>`).join("")}</div>
-        <div class="legend" style="margin-top:10px">${sevAll.map(k=>`<span class="lg ${state.findSev.includes(k)?"":"off"}" data-sev="${k}"><i style="background:var(--${sevColor[k]})"></i>${k} ${sev[k]}</span>`).join("")}</div></div>
+    const sevZh={critical:"严重",high:"高危",medium:"中危",low:"低危"};
+    body.innerHTML=`<div class="view"><h2>发现 / 风险</h2><div class="view-sub">${M.findings.length} 条 · 点击徽标筛选严重度 · 点击行查看详情与流量证据</div>
+      <div class="sevgrid">${sevAll.map(k=>`
+        <button class="sevcard ${state.findSev.includes(k)?"on":""}" data-sev="${k}">
+          <span class="sev-n" style="color:var(--${sevColor[k]})">${sev[k]}</span>
+          <span class="sev-k"><i style="background:var(--${sevColor[k]})"></i>${sevZh[k]} ${k}</span>
+        </button>`).join("")}</div>
       <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
         <input id="f-search" placeholder="搜索标题 / CWE / 目标…" style="flex:1;max-width:340px" value="${esc(state.findQ)}">
         <span class="faint mono" style="font-size:11.5px" id="f-count"></span></div>
@@ -1589,13 +1592,23 @@ function renderBody(){
     const q=(state.toolQ||"").toLowerCase();
     const row=(t)=>{const n=usage[t.name]||0;
       if(q&&!((t.name+" "+(t.description||"")+" "+(t.summary||"")).toLowerCase().includes(q)))return"";
-      return `<div class="trow2" data-tool="${esc(t.name)}"><span class="tname2">${esc(t.name)}</span>
+      return `<div class="trow2" data-tool="${esc(t.name)}"><span class="dot ${n?"running":"off"}" style="margin-top:2px"></span><span class="tname2">${esc(t.name)}</span>
         <span class="tdesc">${esc(((t.description||t.summary)||"(无描述)").slice(0,86))}</span>
         ${n?`<span class="badge b-type mono" style="flex:none">${n} 次</span>`:`<span class="faint mono" style="font-size:10.5px;flex:none">未调用</span>`}</div>`};
+    if(state.toolGroups===undefined)state.toolGroups=new Set();
     body.innerHTML=`<div class="view"><h2>工具与技能</h2><div class="view-sub">调用次数来自当前任务事件流 · 点击工具查看它的调用记录（参数与响应）</div>
       <input id="t-search" placeholder="搜索工具 / 技能…" style="width:280px;margin-bottom:16px" value="${esc(state.toolQ)}">
-      ${groups.map(([title,arr])=>`<div class="card"><div class="card-t">${title} <span class="faint mono" style="font-size:11px">${arr.length}</span></div>${arr.map(row).join("")}</div>`).join("")}</div>`;
+      ${groups.map(([title,arr],gi)=>{const gk="g"+gi;const open=!state.toolGroups.has(gk);
+        return `<div class="card toolgroup ${open?"open":""}">
+          <div class="tg-head" data-tg="${gk}"><span class="arr">▸</span><b>${title}</b><span class="faint mono" style="font-size:11px">${arr.length}</span></div>
+          <div class="tg-body" style="display:${open?"block":"none"}">${arr.map(row).join("")}</div></div>`}).join("")}</div>`;
     $("#t-search").oninput=e=>{state.toolQ=e.target.value;renderBody();$("#t-search").focus()};
+    $$("[data-tg]",body).forEach(h=>h.onclick=()=>{
+      const gk=h.dataset.tg;
+      if(state.toolGroups.has(gk))state.toolGroups.delete(gk);else state.toolGroups.add(gk);
+      h.closest(".toolgroup").classList.toggle("open",!state.toolGroups.has(gk));
+      h.closest(".toolgroup").querySelector(".tg-body").style.display=state.toolGroups.has(gk)?"none":"block";
+    });
     $$("[data-tool]",body).forEach(el=>el.onclick=()=>openTool(el.dataset.tool));
     return;
   }
@@ -1620,16 +1633,38 @@ function renderBody(){
     const groups=[["模型",["model_primary","model_fallback"]],["编排",["orch_commander","orch_delivery","orch_logistics","role_templates","mentor","delegate","tool_pool"]],["后勤",["logistics_workers"]]];
     body.innerHTML=`<div class="view" style="max-width:720px"><h2>配置</h2>
       <div class="view-sub">运行时覆盖 · 优先级低于 shell export、高于内置默认、不改 .env · <span id="cfg-mod" style="color:var(--warn)"></span></div>
-      ${groups.map(([g,keys])=>`<div class="card"><div class="card-t">${g}</div>${keys.map(k=>`
-        <div style="margin-bottom:13px"><label class="faint" style="font:10.5px var(--mono);display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase">${L[k]||k} · ${k}</label>
-        <input data-cfg="${k}" data-def="${esc(M.config.saved[k]||"")}" value="${esc(cfg[k]||"")}" placeholder="生效值：${esc(M.config.saved[k]||"(内置默认)")}" style="width:100%"></div>`).join("")}</div>`).join("")}
+      ${groups.map(([g,keys])=>`<div class="card"><div class="card-t">${g}</div>${keys.map(k=>{
+        const isBool=["orch_commander","orch_delivery","orch_logistics","role_templates","mentor","delegate","tool_pool"].includes(k);
+        const cur=String(cfg[k]??""),def=String(M.config.saved[k]??"");
+        if(isBool){
+          // 生效语义：非 "0" 即开启（引擎 SECPT_X!="0" 判定）；"" 表示跟随默认（默认=1 开启）
+          const on=cur!=="0";
+          return `<div style="margin-bottom:13px"><label class="faint" style="font:10.5px var(--mono);display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase">${L[k]||k} · ${k}</label>
+          <div class="tglrow" data-cfg-k="${k}">
+            <button type="button" class="tglbtn ${on?"on":""}" data-tgl="1">开启</button>
+            <button type="button" class="tglbtn ${!on?"on":""}" data-tgl="0">关闭</button>
+            <input data-cfg="${k}" data-def="${esc(def)}" value="${esc(cur)}" hidden>
+            <span class="faint mono" style="font-size:10.5px;margin-left:8px">生效值：${esc(cur||def||"1（默认）")}${cur?"（覆盖）":"（默认）"}</span>
+          </div></div>`;
+        }
+        return `<div style="margin-bottom:13px"><label class="faint" style="font:10.5px var(--mono);display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase">${L[k]||k} · ${k}</label>
+        <input data-cfg="${k}" data-def="${esc(def)}" value="${esc(cur)}" placeholder="生效值：${esc(def||"(内置默认)")}" style="width:100%"></div>`;
+      }).join("")}</div>`).join("")}
       <div style="display:flex;gap:10px"><button class="btn primary" id="cfg-save">保存配置</button><button class="btn" id="cfg-reset">恢复上次保存</button></div></div>`;
     const inputs=$$("[data-cfg]",body);
     const upd=()=>{
       const mod=inputs.filter(i=>i.value!==i.dataset.def);
       $("#cfg-mod").textContent=mod.length?`已修改 ${mod.length} 项（未保存）`:"";
-      inputs.forEach(i=>i.style.borderColor=mod.includes(i)?"var(--warn)":"");
+      inputs.forEach(i=>{
+        i.style.borderColor=mod.includes(i)?"var(--warn)":"";
+        const row=i.closest(".tglrow");
+        if(row)row.querySelectorAll(".tglbtn").forEach(b=>b.classList.toggle("on",(b.dataset.tgl==="1")===(i.value!=="0")));
+      });
     };
+    $$(".tglbtn",body).forEach(b=>b.onclick=()=>{
+      const input=b.closest(".tglrow").querySelector("input[data-cfg]");
+      input.value=b.dataset.tgl;upd();
+    });
     inputs.forEach(i=>i.addEventListener("input",upd));
     $("#cfg-save").onclick=async()=>{
       const w=inputs.find(i=>i.dataset.cfg==="logistics_workers");
@@ -1684,11 +1719,21 @@ function renderFindings(){
   const list=M.findings.filter(f=>state.findSev.includes(f.severity)&&(!q||(f.title+" "+f.target+" "+(f.cwe||"")).toLowerCase().includes(q)))
     .sort((a,b)=>(order[a.severity]??9)-(order[b.severity]??9));
   $("#f-count").textContent=`${list.length} 条匹配`;
-  el.innerHTML=list.map(f=>`<div class="row-find" data-id="${esc(f.id)}">
+  const per=50,pages=Math.max(1,Math.ceil(list.length/per));
+  const pg=Math.min(Math.max(1,state.findPage||1),pages);
+  state.findPage=pg;
+  const view=list.slice((pg-1)*per,pg*per);
+  const statusZh={confirmed:"已确认",inferred:"待复验",verified:"已复核"};
+  el.innerHTML=view.map(f=>`<div class="row-find" data-id="${esc(f.id)}">
     <div class="sevline" style="background:var(--${{critical:"bad",high:"high",medium:"warn",low:"fg3"}[f.severity]||"fg3"})"></div>
-    <div style="flex:1;min-width:0"><div class="t">${esc(f.title)}</div><div class="m">${f.cwe?esc(f.cwe)+" · ":""}${esc(f.target)} · ${esc(f.job_id)}</div></div>
+    <div style="flex:1;min-width:0"><div class="t">${esc(f.title)}</div><div class="m">${f.cwe?esc(f.cwe)+" · ":""}${esc(f.target)} · ${esc(f.job_id)}${f.status?` · ${statusZh[f.status]||f.status}`:""}</div></div>
     <span class="badge b-${f.severity}">${f.severity}</span></div>`).join("")
-    ||`<div class="empty"><b>◌</b>无匹配发现 · 可点击图例放宽严重度筛选</div>`;
+    +(pages>1?`<div style="text-align:center;padding:10px 0">
+      <button class="chip" data-fpg="${pg-1}" ${pg<=1?"disabled":""}>‹ 上一页</button>
+      <span class="mono faint" style="margin:0 12px;font-size:11.5px">第 ${pg} / ${pages} 页 · 共 ${list.length} 条</span>
+      <button class="chip" data-fpg="${pg+1}" ${pg>=pages?"disabled":""}>下一页 ›</button></div>`
+    :`<div class="empty"><b>◌</b>无匹配发现 · 可点击上方徽标放宽严重度筛选</div>`);
+  $$("[data-fpg]",el).forEach(b=>b.onclick=()=>{state.findPage=+b.dataset.fpg;renderFindings()});
   $$("[data-id]",el).forEach(r=>r.onclick=()=>openFinding(M.findings.find(x=>x.id===r.dataset.id)));
 }
 
@@ -1697,13 +1742,16 @@ function renderExperience(){
   const el=$("#e-list");if(!el)return;
   const q=(state.expQ||"").toLowerCase();
   const list=M.experiences.filter(x=>(!state.expTech||x.technique===state.expTech)&&(!q||(x.title+" "+x.what_worked+" "+x.technique).toLowerCase().includes(q)));
-  el.innerHTML=list.map(x=>`<div class="card link" data-eid="${esc(x.id)}">
+  el.innerHTML=list.map(x=>{
+    const rate=x.hits/Math.max(1,x.injections);
+    const rc=rate>=0.5?"var(--c-ok)":rate>0?"var(--c-tool)":"var(--fg3)";
+    return `<div class="card link exp-card" data-eid="${esc(x.id)}">
     <div style="display:flex;gap:10px;align-items:center"><b style="font-size:13.5px">${esc(x.title)}</b><span class="badge b-type" style="margin-left:auto">${esc(x.technique||"generic")}</span></div>
     <div class="muted" style="font-size:12.5px;margin:8px 0;line-height:1.65">${esc(x.what_worked)}</div>
     <div style="display:flex;gap:10px;align-items:center;font-size:11.5px"><span class="faint">命中率</span>
-      <div style="flex:1;height:3px;border-radius:2px;background:var(--bg3)"><i style="display:block;height:100%;width:${x.hits/Math.max(1,x.injections)*100}%;background:var(--ok);border-radius:2px"></i></div>
-      <span class="mono faint">${x.hits}/${x.injections}</span></div></div>`).join("")
-    ||`<div class="empty"><b>◌</b>无匹配经验</div>`;
+      <div style="flex:1;height:3px;border-radius:2px;background:var(--bg3)"><i style="display:block;height:100%;width:${Math.round(rate*100)}%;background:${rc};border-radius:2px"></i></div>
+      <span class="mono faint">${x.hits}/${x.injections}</span></div></div>`}).join("")
+    ||`<div class="empty"><b>◌</b>暂无经验 · 任务收口时由学习层自动蒸馏（solve 链路），成功路径下次同类任务自动回灌</div>`;
   $$("[data-eid]",el).forEach(c=>c.onclick=()=>openExperience(M.experiences.find(x=>x.id===c.dataset.eid)));
 }
 

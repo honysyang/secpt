@@ -832,3 +832,28 @@ pre.detail-full{max-height:420px}
 .ev-item .ev-req,.ev-item .ev-res{margin:0;padding:9px 12px;font:11.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto}
 .ev-item .ev-req{background:var(--term-bg);color:#9DA7B3;border-top:1px solid var(--line)}
 .ev-item .ev-res{background:#0D1117;color:#C9D1D9;border-top:1px dashed var(--line)}
+
+/* 发现页：严重度徽标卡（可点筛选） */
+.sevgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.sevcard{background:var(--bg1);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;text-align:left;display:flex;flex-direction:column;gap:4px;cursor:pointer;transition:border-color .12s,background .12s}
+.sevcard:hover{border-color:var(--line2)}
+.sevcard.on{border-color:var(--fg3);background:var(--bg2)}
+.sevcard.off{opacity:.4}
+.sevcard .sev-n{font:600 22px var(--mono);font-variant-numeric:tabular-nums}
+.sevcard .sev-k{font-size:11.5px;color:var(--fg2);display:flex;align-items:center;gap:6px}
+.sevcard .sev-k i{width:8px;height:8px;border-radius:3px;display:inline-block}
+@media (max-width:1100px){.sevgrid{grid-template-columns:repeat(2,1fr)}}
+
+/* 工具页：分组折叠 */
+.toolgroup .tg-head{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none;padding:2px 0}
+.toolgroup .tg-head .arr{font-size:9px;color:var(--fg3);transition:transform .15s}
+.toolgroup.open .tg-head .arr{transform:rotate(90deg)}
+.toolgroup .tg-head b{font-size:13px}
+
+/* 配置页：布尔开关按钮组 */
+.tglrow{display:flex;align-items:center;gap:0}
+.tglbtn{font-size:12px;padding:6px 18px;border:1px solid var(--line2);background:var(--bg2);color:var(--fg3);cursor:pointer}
+.tglbtn:first-child{border-radius:8px 0 0 8px}
+.tglbtn:last-child{border-radius:0 8px 8px 0;border-left:0}
+.tglbtn.on{background:var(--primary);color:var(--primary-t);border-color:var(--primary)}
+.tglbtn.on+.tglbtn{border-left-color:var(--primary)}

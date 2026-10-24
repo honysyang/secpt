@@ -152,7 +152,16 @@ def tools_payload() -> dict:
     from secpt.core.profile.loader import CORE_TOOLS
     from secpt.tools.plugin_loader import discover_plugins
 
-    builtin = [{"name": t, "kind": "builtin", "description": ""} for t in sorted(CORE_TOOLS)]
+    _BUILTIN_DESC = {
+        "bash": "执行 shell 命令（白名单内）；扫描、探测、脚本运行的主通道",
+        "read_file": "读工作区文件（支持 offset/limit 分页），取大输出细节用",
+        "list_dir": "列工作区目录内容，定位已有产物",
+        "write_file": "写工作区文件——侦察清单、脚本、报告的落盘通道",
+    }
+    builtin = [
+        {"name": t, "kind": "builtin", "description": _BUILTIN_DESC.get(t, "")}
+        for t in sorted(CORE_TOOLS)
+    ]
     try:
         yaml_plugins, python_tools = discover_plugins()
     except Exception:
