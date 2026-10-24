@@ -349,19 +349,24 @@ function renderTimeline(rounds,now,running){
   const tLast=Math.max(...evs.map(e=>e.ts));
   const t1=Math.max(tLast,t0+1,running?now:tLast);
   const pos=ts=>2+96*Math.max(0,Math.min(1,(ts-t0)/(t1-t0)));
+  /* 刻度样式：节点=横线段（子任务刻度），长度按时长缩放；hover 提示，点击定位 */
+  const scale=d=>{  // 时长→线宽：0-8px 短刻度，长任务最长 30px（右对齐伸出）
+    if(d<=0.05)return 8;
+    return Math.min(30,8+Math.sqrt(d)*3);
+  };
   let nodes="";
   for(const e of evs){
     if(e.type==="user_msg"&&isUserEvent(e)){
       const lbl=USER_KIND_LBL[e.payload.kind]||e.payload.kind||"消息";
-      nodes+=`<button class="tl-node user" style="top:${pos(e.ts)}%" data-kind="user" data-round="${e.round}" data-anchor="user-${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
+      nodes+=`<button class="tl-node user tick" style="top:${pos(e.ts)}%;width:${scale(0)}px" data-kind="user" data-round="${e.round}" data-anchor="user-${e.seq}" data-tip="${esc(`用户 · ${fmtT(e.ts)} · ${lbl}`)}" aria-label="用户输入"></button>`;
     }
   }
   for(const r of rounds){
     const dur=(running&&r===rounds[rounds.length-1]?now:r.t1)-r.t0;
     const st=roundStatus(r,r===rounds[rounds.length-1],running,curJob().status,now);
-    nodes+=`<button class="tl-node round ${st.cls}" style="top:${pos(r.t0)}%" data-kind="round" data-round="${r.round}" data-anchor="round-${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
+    nodes+=`<button class="tl-node round tick ${st.cls}" style="top:${pos(r.t0)}%;width:${scale(dur)}px" data-kind="round" data-round="${r.round}" data-anchor="round-${r.round}" data-tip="${esc(`ROUND ${r.round} · ${fmtT(r.t0)}–${fmtT(r.t1)} · ${st.text}`)}" aria-label="轮次"></button>`;
   }
-  /* 意图粒度：同一 iid 的 claimed/done/exhausted 事件聚合为一个节点（首事件定位） */
+  /* 子任务刻度：同一 iid 的 claimed/done/exhausted 聚合；线宽=时长，末态决定颜色 */
   const intents=new Map();
   for(const e of evs){
     if(e.type!=="intent_event")continue;
@@ -373,8 +378,9 @@ function renderTimeline(rounds,now,running){
   for(const [iid,x] of intents){
     const f=x.first,p=f.payload||{};
     const dur=Math.max(0,x.last.ts-f.ts);
+    const stCls=x.status==="done"?"ok":x.status==="exhausted"||x.status==="failed"?"bad":x.status==="running"?"run":"";
     const tip=`意图 · ${p.title||iid} · ${x.status||""} · ${fmtT(f.ts)}${dur>0.05?` · 用时 ${fmtSec(dur)}`:""}`;
-    nodes+=`<button class="tl-node intent" style="top:${pos(f.ts)}%" data-kind="intent" data-round="${f.round}" data-anchor="intent-${esc(iid)}" data-tip="${esc(tip)}" aria-label="意图"></button>`;
+    nodes+=`<button class="tl-node intent tick ${stCls}" style="top:${pos(f.ts)}%;width:${scale(dur)}px" data-kind="intent" data-round="${f.round}" data-anchor="intent-${esc(iid)}" data-tip="${esc(tip)}" aria-label="意图"></button>`;
   }
   const total=(running?now:tLast)-t0;
   const bad=["failed","cancelled","stalled"].includes(curJob().status);
