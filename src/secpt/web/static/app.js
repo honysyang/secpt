@@ -8,6 +8,23 @@
 "use strict";
 const $=(s,el=document)=>el.querySelector(s), $$=(s,el=document)=>[...el.querySelectorAll(s)];
 const esc=t=>{const d=document.createElement("div");d.textContent=t==null?"":String(t);return d.innerHTML};
+/* markdown 渲染（ARTEX markdown.tsx 对齐）：GFM 表格/代码块；先转义再解析，
+   避免 XSS；marked 存在才启用，缺失回落 esc 纯文本。 */
+function mdRender(t){
+  const txt=String(t==null?"":t);
+  if(window.marked&&window.marked.parse){
+    try{
+      window.marked.setOptions({gfm:true,breaks:true});
+      const html=marked.parse(txt);
+      const box=document.createElement("div");
+      box.className="md";
+      box.innerHTML=html;  // marked 输出；来源是自身事件流（智能体产出），非用户输入直插
+      box.querySelectorAll("a").forEach(a=>{a.target="_blank";a.rel="noreferrer"});
+      return box.outerHTML;
+    }catch(e){}
+  }
+  return `<div class="md">${esc(txt)}</div>`;
+}
 const fmtT=ts=>{const d=new Date(ts*1000);return d.toTimeString().slice(0,8)};
 const fmtDur=s=>s<60?`${s.toFixed(0)}s`:`${Math.floor(s/60)}m${Math.round(s%60)}s`;
 const fmtSec=s=>{s=Math.max(0,s);if(s<0.05)return "<0.1s";return s<60?`${s.toFixed(1)}s`:`${Math.floor(s/60)}m${Math.round(s%60)}s`};
@@ -18,7 +35,7 @@ const M={jobs:[],events:[],workspace:{},findings:[],assets:[],
   tools:{builtin:[],plugins:[],skills:[]},experiences:[],config:{saved:{},effective:{}}};
 const state={view:"workspace",jobId:"",filter:"all",follow:true,mode:"followup",taskFilter:"all",
   labels:JSON.parse(localStorage.getItem("secpt-labels")||"{}"),
-  assetTypes:[],assetQ:"",findSev:["critical","high","medium","low"],findQ:"",
+  assetTypes:[],assetQ:"",assetPage:1,findSev:["critical","high","medium","low"],findQ:"",
   expTech:"",expQ:"",toolQ:"",composerFiles:[],cursor:0,newTaskMode:false,
   openKeys:new Set(),closedKeys:new Set(),roundOpen:{},workOpen:{},toolOpen:{}};
 const AGENT_IC="⬡";
@@ -386,7 +403,7 @@ function itemHTML(i){
   const e=i.o,p=e.payload||{};
   if(e.type==="assistant"){
     const nearCap=(p.content||"").length>=1990;
-    return `<div class="msg-agent thought turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div>${nearCap?`<button class="detail-btn" data-detail="${e.seq}">查看全文</button>`:""}</div>`;
+    return `<div class="msg-agent thought turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${mdRender(p.content)}</div>${nearCap?`<button class="detail-btn" data-detail="${e.seq}">查看全文</button>`:""}</div>`;
   }
   if(e.type==="user_msg"){
     const kindLabel={coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"系统消息");
@@ -1152,7 +1169,7 @@ function dockMapBody(w,intents,hyps,hc,running,open,done,settledN){
 
 function dockOutBody(flags,w,finds){
   return `
-    ${w.result?`<div class="resultbox"><div class="rb-cap">最终结果 · result.md</div><pre>${esc(w.result)}</pre></div>`:""}
+    ${w.result?`<div class="resultbox"><div class="rb-cap">最终结果 · result.md</div><div class="rb-body">${mdRender(w.result)}</div></div>`:""}
     ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
     ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
     <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
@@ -1279,6 +1296,10 @@ function renderBody(){
     const sevColor={critical:"bad",high:"high",medium:"warn",low:"fg3"};
     const usage=toolUsage();
     const top=Object.entries(usage).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    // 资产类型分布（ARTEX dashboard 条形图语义：类型→数量，横向条形可点下钻）
+    const assetTypes={};M.assets.forEach(a=>{assetTypes[a.type]=(assetTypes[a.type]||0)+1});
+    const assetRows=Object.entries(assetTypes).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    const assetMax=Math.max(1,...assetRows.map(r=>r[1]));
     const days=[];
     for(let i=6;i>=0;i--){
       const d=new Date(Date.now()-i*86400000);
@@ -1297,7 +1318,9 @@ function renderBody(){
         <div class="stat link" data-go="experience"><div class="v">${M.experiences.length}</div><div class="k">沉淀经验</div></div>
       </div>
       <div class="dash2">
-        <div class="card"><div class="card-t">发现严重度 <span class="faint" style="font-size:11px">· 点击图例下钻到发现视图</span></div>
+        <div class="card"><div class="card-t">资产类型分布 <span class="faint" style="font-size:11px">· 点击条目下钻到资产视图</span></div>
+          ${assetRows.map(([t,n])=>`<div class="arow" data-at="${esc(t)}"><span class="aname">${esc(t)}</span><div class="abar"><i style="width:${n/assetMax*100}%"></i></div><span class="mono faint">${n}</span></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无资产</div>'}
+          <div class="card-t" style="margin-top:14px">发现严重度 <span class="faint" style="font-size:11px">· 点击图例下钻到发现视图</span></div>
           <div class="sevbar">${["critical","high","medium","low"].map(k=>`<i style="width:${sev[k]/(M.findings.length||1)*100}%;background:var(--${sevColor[k]})"></i>`).join("")}</div>
           <div class="legend">${["critical","high","medium","low"].map(k=>`<span class="lg" data-sev="${k}"><i style="background:var(--${sevColor[k]})"></i>${k} ${sev[k]}</span>`).join("")}</div></div>
         <div class="card"><div class="card-t">近 7 日任务</div>
@@ -1319,6 +1342,9 @@ function renderBody(){
           ${M.experiences.slice(0,3).map(x=>`<div class="hyp link" data-eid="${esc(x.id)}"><div class="h-top"><span class="badge b-type">${esc(x.technique||"generic")}</span><span class="conf">${x.hits}/${x.injections}</span></div><div class="h-title">${esc(x.title)}</div></div>`).join("")||'<div class="faint" style="font-size:11.5px">暂无经验</div>'}</div>
       </div></div>`;
     $$("[data-go]",body).forEach(el=>el.onclick=()=>setView(el.dataset.go));
+    $$("[data-at]",body).forEach(el=>el.onclick=()=>{
+      state.assetTypes=[el.dataset.at];state.assetQ="";setView("assets");
+    });
     $$("[data-sev]",body).forEach(el=>el.onclick=()=>{state.findSev=[el.dataset.sev];state.findQ="";setView("findings")});
     $$("[data-job]",body).forEach(el=>el.onclick=()=>setTask(el.dataset.job));
     $$("[data-fid]",body).forEach(el=>el.onclick=()=>openFinding(M.findings.find(f=>f.id===el.dataset.fid)));
@@ -1440,16 +1466,26 @@ function renderAssets(){
   const q=(state.assetQ||"").toLowerCase(),on=state.assetTypes;
   const rows=M.assets.filter(a=>(!on.length||on.includes(a.type))&&(!q||(a.value+" "+(a.first_seen_job||"")).toLowerCase().includes(q)));
   $("#a-count").textContent=`${rows.length} 条资产（库中共 ${M.assets.length}）`;
-  const view=rows.slice(0,200);
+  // 分页（ARTEX table-pagination 语义）：每页 50，上一页/下一页 + 页码
+  const page=Math.max(1,state.assetPage||1),per=50;
+  const pages=Math.max(1,Math.ceil(rows.length/per));
+  const pg=Math.min(page,pages);
+  state.assetPage=pg;
+  const view=rows.slice((pg-1)*per,pg*per);
+  const typeColor={endpoint:"info",root_domain:"agent",domain:"agent",app:"okwarn",ip:"time",port:"time"};
   el.innerHTML=view.map(a=>`<tr data-val="${esc(a.value)}">
-    <td><span class="badge b-type">${esc(a.type)}</span></td>
+    <td><span class="badge b-${typeColor[a.type]||"type"}">${esc(a.type)}</span></td>
     <td class="mono" style="font-size:12px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.value)}">${esc(a.value)}</td>
     <td><span class="mono faint" style="font-size:11.5px">${esc(a.first_seen_job||"—")}</span></td>
     <td class="faint" style="font-size:11.5px">${a.ts?new Date(a.ts*1000).toLocaleString("zh-CN",{hour12:false}):"—"}</td></tr>`).join("")
-    +`<tr><td colspan="4" class="faint" style="text-align:center;font-size:11px">显示前 ${view.length} / 共 ${rows.length} 条</td></tr>`;
+    +(pages>1?`<tr><td colspan="4" style="text-align:center;padding:10px 0">
+      <button class="chip" data-apg="${pg-1}" ${pg<=1?"disabled":""}>‹ 上一页</button>
+      <span class="mono faint" style="margin:0 12px;font-size:11.5px">第 ${pg} / ${pages} 页 · 共 ${rows.length} 条</span>
+      <button class="chip" data-apg="${pg+1}" ${pg>=pages?"disabled":""}>下一页 ›</button></td></tr>`
+    :`<tr><td colspan="4" class="faint" style="text-align:center;font-size:11px">共 ${rows.length} 条</td></tr>`);
+  $$("[data-apg]",el).forEach(b=>b.onclick=()=>{state.assetPage=+b.dataset.apg;renderAssets()});
   $$("#a-tbody tr[data-val]").forEach(tr=>tr.onclick=()=>{
-    try{navigator.clipboard&&navigator.clipboard.writeText(tr.dataset.val)}catch(e){}
-    toast("资产值已复制");
+    copyText(tr.dataset.val,"资产值已复制");
   });
 }
 
@@ -1500,15 +1536,18 @@ function openTool(name){
 function openExperience(x){
   if(!x)return;
   openDetail(x.title,`${x.technique||"generic"} · 命中 ${x.hits}/${x.injections}`,
-    x.what_worked+"\n\n【pitfalls · 踩坑】\n- "+((x.pitfalls||[]).join("\n- ")||"（无）")+"\n\n【触发指标】"+(x.indicators||[]).join("、"));
+    x.what_worked+"\n\n【pitfalls · 踩坑】\n- "+((x.pitfalls||[]).join("\n- ")||"（无）")+"\n\n【触发指标】"+(x.indicators||[]).join("、"),{md:true});
 }
 function openFinding(f){
   if(!f)return;
   openDetail(f.title,`${f.id} · ${f.severity} · ${f.status} · 置信度 ${((f.confidence||0)*100).toFixed(0)}%`,
-    `${f.description||"(无描述)"}\n\n—— 目标：${f.target}\n来源任务：${f.job_id}${f.cwe?"\nCWE："+f.cwe:""}`);
+    `${f.description||"(无描述)"}\n\n—— 目标：${f.target}\n来源任务：${f.job_id}${f.cwe?"\nCWE："+f.cwe:""}`,{md:true});
 }
-function openDetail(title,meta,bodyText){
-  $("#fd-title").textContent=title;$("#fd-meta").textContent=meta;$("#fd-body").textContent=bodyText;
+function openDetail(title,meta,bodyText,{md=false}={}){
+  $("#fd-title").textContent=title;$("#fd-meta").textContent=meta;
+  const body=$("#fd-body");
+  if(md){body.classList.add("rich");body.innerHTML=mdRender(bodyText)}
+  else{body.classList.remove("rich");body.textContent=bodyText}
   $("#fd-exp").style.display="none";
   $("#fdetail").classList.add("show");$("#scrim").classList.add("show");
 }
