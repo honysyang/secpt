@@ -494,3 +494,53 @@ def test_delete_child_cancels_tree_root(env, monkeypatch) -> None:
     # 不在这次删除范围（用户点子任务的 ⋯ 菜单删的是该子任务所在树）
     assert JobStore().get_job("troot") is not None
     assert JobStore().get_job("troot-i00cc") is None
+
+
+def test_stream_endpoint_sse_format(server) -> None:
+    """SSE 流式接口：text/event-stream 响应，事件行带 id/data，收口发 bye。"""
+    import json as _json
+    import socket
+    import time as _t
+
+    host, port = server.split("//")[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=5)
+    s.sendall(b"GET /api/jobs/sse-none/stream?after=0 HTTP/1.1\r\nHost: x\r\n\r\n")
+    time.sleep(0.5)
+    buf = s.recv(65536).decode("utf-8", errors="replace")
+    s.close()
+    assert "200" in buf.splitlines()[0]
+    assert "text/event-stream" in buf
+    # 无该任务目录 → 无事件、无 bye（保持连接），只可能有 keep-alive 注释
+    assert "data:" not in buf or "bye" not in buf
+
+
+def test_stream_endpoint_emits_events(server, env, monkeypatch) -> None:
+    """有事件的任务：SSE 按 seq 顺序输出，after 游标生效。"""
+    import socket
+    import time as _t
+
+    _mk_record_status("sse-job", "succeeded")
+    _write_events(
+        env,
+        "sse-job",
+        [{"type": "user_msg", "payload": {"kind": "new_task", "content": "hi"}},
+         {"type": "status_change", "payload": {"status": "succeeded"}}],
+    )
+    host, port = server.split("//")[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=5)
+    s.sendall(b"GET /api/jobs/sse-job/stream?after=0 HTTP/1.1\r\nHost: x\r\n\r\n")
+    time.sleep(0.8)
+    s.settimeout(2)
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except (socket.timeout, OSError):
+        pass
+    s.close()
+    text = buf.decode("utf-8", errors="replace")
+    assert "id: 1" in text and "id: 2" in text
+    assert "user_msg" in text and "event: bye" in text

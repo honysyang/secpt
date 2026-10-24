@@ -544,9 +544,18 @@ def _aggregate_sub_events(
 
     seen = aggregated if aggregated is not None else set()
     try:
+        # 流式增量：offsets 记录每个子 job 已读行数，运行中 follow 新增行。
+        # 以 aggregated 集合身份（id）为键——同一 run 的多次调用共享一份 offset，
+        # 不同 run（含测试）互不串扰；run 结束（final）即释放。
+        if aggregated is None:
+            offsets: dict[str, int] = {}
+        else:
+            all_offs: dict[int, dict[str, int]] = getattr(_aggregate_sub_events, "_offsets", {})
+            offsets = all_offs.setdefault(id(aggregated), {})
+            _aggregate_sub_events._offsets = all_offs  # dict 就地改，但首绑后要回写
         fresh = [s for s in sub_jobs if s and s not in seen]
-        if not fresh and not final:
-            return  # 增量调用无新子 job：跳过（防重复聚合）
+        if not fresh and not final and not offsets:
+            return  # 增量调用且尚无 follow 状态：跳过（防空转）
         parent_dir = jobs_dir() / base
         parent_dir.mkdir(parents=True, exist_ok=True)
         parent_events = parent_dir / "events.jsonl"
@@ -558,12 +567,20 @@ def _aggregate_sub_events(
             # 轮转归档后行数 < 尾行 seq，必须取 max（见 next_seq_for）
             seq = next_seq_for(parent_events) - 1
             with open(parent_events, "a", encoding="utf-8") as out:
-                for sub in fresh:
+                # follow 集合：fresh 从头读，已聚合过的子 job 从上次 offset 续读
+                # （流式输出：运行中子 job 的新事件持续并入父流，幂等靠 offset）
+                follow = list(
+                    dict.fromkeys(fresh + [s for s in sub_jobs if s in offsets or s in seen])
+                )
+                for sub in follow:
                     sub_path = jobs_dir() / sub / "events.jsonl"
                     if not sub_path.is_file():
-                        continue  # 子 job 事件未生成（engine 异常早退）→ 下次收尾再试
+                        continue  # 子 job 事件未生成（engine 异常早退）→ 下次再试
+                    off = offsets.get(sub, 0)
                     with open(sub_path, encoding="utf-8") as rf:
-                        for line in rf:
+                        for i, line in enumerate(rf):
+                            if i < off:
+                                continue  # 已聚合过的行
                             line = line.strip()
                             if not line:
                                 continue
@@ -578,8 +595,12 @@ def _aggregate_sub_events(
                             if isinstance(payload, dict):
                                 ev["payload"] = {"subjob": sub, **payload}
                             out.write(_json.dumps(ev, ensure_ascii=False) + "\n")
-                    seen.add(sub)  # 已聚合标记（幂等：下次调用跳过）
+                    offsets[sub] = i + 1 if i >= off else off
+                    seen.add(sub)  # 已聚合标记（收尾 round_end 用）
                 if final:
+                    if aggregated is not None:
+                        with contextlib.suppress(Exception):
+                            getattr(_aggregate_sub_events, "_offsets", {}).pop(id(aggregated), None)
                     seq += 1
                     out.write(
                         _json.dumps(
@@ -2692,6 +2713,13 @@ async def run_frontier(
 
             hook_factory = _make_yield_hook
         _job = f"{base}-i{intent.id[-4:]}"
+        # 流式输出：意图一被认领就登记子 job（其事件流随引擎运行逐步产生，
+        # SSE 尾随可实时看到；aggregated 幂等，settle 时重复聚合自动去重）
+        with contextlib.suppress(Exception):
+            async with chains_lock:
+                if _job not in sub_jobs:
+                    sub_jobs.append(_job)
+                aggregated.discard(_job)
         # M1：同资产跨意图交接（通用：recon→exploit→verify、benchmark 多段、多轮重试）——
         # 上一意图的产出工作区产物复制到本工作区，并注入确定性 handoff（工作区清单 +
         # 上一轮结论）。没有这一步，每个新意图都是冷启动（1323 b 族每段重搭脚手架）。
@@ -3735,6 +3763,19 @@ async def run_frontier(
             timeout = float(os.environ.get("SECPT_FRONTIER_HEARTBEAT", "60"))
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(wake_q.get(), timeout=timeout)
+        # 流式输出：每轮唤醒后做一次增量聚合——运行中子 job 的新事件持续并入
+        # 父事件流（幂等：_aggregate_sub_events 内部按行追加、sub_jobs 去重）
+        if sub_jobs:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    _aggregate_sub_events,
+                    base,
+                    sub_jobs,
+                    chains,
+                    flags,
+                    aggregated=aggregated,
+                    final=False,
+                )
 
     stop_ev.set()
     await asyncio.gather(*worker_tasks, return_exceptions=True)

@@ -81,6 +81,38 @@ async function loadEvents(full){
   state.cursor=d.cursor;
 }
 async function loadWorkspace(){if(state.jobId)M.workspace=await api(`/api/jobs/${state.jobId}/workspace`)}
+/* ── 流式输出：SSE 实时订阅事件流，轮询降级为兜底 ──
+   EventSource 断线自动重连（Last-Event-ID 续传）；连接成功后停用 1.5s 事件
+   轮询（新事件即时到达、即时渲染），workspace/任务列表仍走低频轮询。 */
+const stream={es:null,jobId:"",live:false};
+function streamRender(){
+  if(state.view==="workspace")renderFeed();
+  renderDock();
+}
+function streamStop(){if(stream.es){try{stream.es.close()}catch(e){}stream.es=null}stream.live=false}
+function streamStart(jid){
+  if(stream.es&&stream.jobId===jid)return;      // 已在订阅
+  streamStop();stream.jobId=jid;if(!jid)return;
+  if(typeof EventSource==="undefined")return;   // 老浏览器回落轮询
+  try{
+    const es=new EventSource(`/api/jobs/${encodeURIComponent(jid)}/stream?after=${state.cursor||0}`);
+    stream.es=es;
+    es.onopen=()=>{stream.live=true};
+    es.onmessage=ev=>{
+      try{
+        const e=JSON.parse(ev.data);
+        if(!e||!(e.seq>0))return;
+        if(state.jobId!==jid)return;             // 已切走：丢弃
+        if(e.seq<=state.cursor)return;
+        state.cursor=e.seq;
+        M.events.push(e);
+        streamRender();
+      }catch(err){}
+    };
+    es.addEventListener("bye",()=>{streamStop();refreshJobData(true)});
+    es.onerror=()=>{/* EventSource 自动重连；期间 1.5s 轮询兜底 */}
+  }catch(e){stream.live=false}
+}
 async function loadAssets(){M.assets=(await api("/api/assets")).assets||[]}
 async function loadFindings(){M.findings=(await api("/api/findings")).findings||[]}
 async function loadTools(){const d=await api("/api/tools");
@@ -121,6 +153,7 @@ function renderNav(){
 function setTask(jid){state.jobId=jid;state.cursor=0;M.events=[];state.newTaskMode=false;
   state.openKeys.clear();state.closedKeys.clear();state.roundOpen={};state.workOpen={};state.toolOpen={};FILE_BUF.clear();COPY_BUF.clear();
   M.workspace={};dockState.mapSig="";dockState.outSig="";
+  streamStart(jid);
   renderDock();
   if(state.view!=="workspace")setView("workspace");else renderBody();refreshJobData(true)}
 function setView(v){state.view=v;renderNav();renderBody()}
@@ -980,6 +1013,7 @@ function openTaskMenu(row){
         toast("已删除（整树）");await loadJobs();
         // 选中态可能落在被删树的任一成员上（父/子）：全部清空重置
         if(state.jobId===jid||state.jobId.startsWith(jid+"-")||jid.startsWith(state.jobId+"-")){
+          streamStop();
           state.jobId=M.jobs[0]?M.jobs[0].job_id:"";state.cursor=0;M.events=[];refreshJobData(true);
         }
         else renderTaskPanel();
@@ -1512,7 +1546,10 @@ async function boot(){
   await loadWorkspace();
   bindDockEvents();
   renderNav();setView("workspace");renderDock();
-  setInterval(async()=>{try{await loadEvents(false);
+  if(state.jobId)streamStart(state.jobId);
+  setInterval(async()=>{try{
+    if(stream.live&&stream.jobId===state.jobId){syncSendBtn();return}  // 流式在线：事件即时达，跳过轮询
+    await loadEvents(false);
     if(state.view==="workspace"){renderFeed();renderTaskPanel()}
     syncSendBtn();renderDock()}catch(e){}},1500);
   setInterval(async()=>{try{

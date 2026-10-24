@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +27,14 @@ from urllib.parse import parse_qs, urlparse
 from secpt.web import api
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _var() -> Path:
+    import os
+
+    return Path(os.environ.get("SECPT_VAR", "var"))
+
+
 _MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
@@ -108,13 +117,80 @@ class SecptWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/jobs/") and path.endswith("/workspace"):
                 job_id = path[len("/api/jobs/") : -len("/workspace")]
                 self._send_json(api.workspace_payload(job_id))
+            elif path.startswith("/api/jobs/") and path.endswith("/stream"):
+                job_id = path[len("/api/jobs/") : -len("/stream")]
+                qs = parse_qs(parsed.query)
+                after = int((qs.get("after") or ["0"])[0] or 0)
+                self._serve_event_stream(job_id, after=after)
             else:
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:  # API 层故障不炸连接（观测层纪律）
             self._send_json({"error": str(e)[:300]}, status=500)
 
+    def _serve_event_stream(self, job_id: str, *, after: int = 0) -> None:
+        """SSE 实时事件流（流式输出核心）：tail-follow 该 job 的 events.jsonl。
+
+        协议：text/event-stream；事件行 data=<完整事件 JSON>；游标推进靠事件自带
+        seq。续传：客户端 Last-Event-ID / ?after=N。job 收口（终态）或客户端断开
+        即结束。30s 一条 keep-alive 注释防中间层断链。多客户端互不影响——
+        每连接独立文件游标，只读不写。
+        """
+        import time as _time
+
+        from secpt.core.job.store import JOB_STATUSES, JobStore
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        last_id = self.headers.get("Last-Event-ID") or ""
+        if last_id.strip().isdigit():
+            after = max(after, int(last_id))
+        evpath = _var() / "jobs" / job_id / "events.jsonl"
+        last_beat = 0.0
+        try:
+            while True:
+                sent_any = False
+                if evpath.is_file():
+                    with open(evpath, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                ev = json.loads(line)
+                            except Exception:
+                                continue
+                            seq = int(ev.get("seq") or 0)
+                            if seq <= after:
+                                continue
+                            after = seq
+                            payload = json.dumps(ev, ensure_ascii=False)
+                            self.wfile.write(f"id: {seq}\ndata: {payload}\n\n".encode())
+                            sent_any = True
+                self.wfile.flush()
+                if sent_any:
+                    last_beat = _time.monotonic()
+                # job 收口 → 发 bye 并结束（前端回落轮询做最终刷新）
+                status = ""
+                with contextlib.suppress(Exception):
+                    _rec = JobStore().get_job(job_id)
+                    status = _rec.status if _rec is not None else ""
+                if status and status in JOB_STATUSES - {"running", "awaiting_confirm", "paused"}:
+                    self.wfile.write(b"event: bye\ndata: {}\n\n")
+                    self.wfile.flush()
+                    return
+                if _time.monotonic() - last_beat > 30:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+                    last_beat = _time.monotonic()
+                _time.sleep(0.5)
+        except (ConnectionError, BrokenPipeError, OSError):
+            return  # 客户端断开：正常退出，不写日志
+
     def _serve_static(self, name: str) -> None:
-        name = name.lstrip("/")
         target = (_STATIC_DIR / name).resolve()
         try:
             target.relative_to(_STATIC_DIR.resolve())
