@@ -144,7 +144,7 @@ function actorOf(e){return esc(actorName(e.actor||"agent"))}
 /* 职名映射（ARCHITECTURE.md 规范）：actor 原始串 → 职名·说明；未知 actor 视为操作员实例（A/B/C…并行班次） */
 function actorName(raw){
   const r=String(raw).toLowerCase();
-  if(r.includes("commander"))return "CDR 指挥官";
+  if(r.includes("commander"))return "指挥官";
   if(r.includes("sentinel")||r==="orchestrator")return "SNT 值守";
   if(r.includes("logistics")||r.includes("quartermaster"))return "QM 军需";
   if(r.includes("coach"))return "COH 教练";
@@ -775,7 +775,7 @@ function workspaceHTML(){
               <button data-m="followup" class="${state.mode==="followup"?"on":""}">追问当前任务</button>
               <button data-m="new" class="on">下达新任务</button>
             </div>
-            <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
+            <label class="follow" title="默认勾选：任务确认后立即派单执行；取消勾选=指挥官先产《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto" checked>自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
             <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
             <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
@@ -833,7 +833,7 @@ function workspaceHTML(){
               <button data-m="followup" class="${state.mode==="followup"?"on":""}" title="消息进入当前任务的作战地图：运行中=人工直探；已收敛=自动续接编排">对话中发布</button>
               <button data-m="new" class="${state.mode==="new"?"on":""}" title="新建独立任务（新对话、新地图）">下达新任务</button>
             </div>
-            <label class="follow" title="勾选=跳过接战确认直接开打；不勾=指挥官先出《接战单》，确认后才派单"><input type="checkbox" id="c-auto">自动下发</label>
+            <label class="follow" title="默认勾选：任务确认后立即派单执行；取消勾选=指挥官先产《接战单》，你在作战地图确认后才派单"><input type="checkbox" id="c-auto" checked>自动下发</label>
             <span class="cmodel">${AGENT_IC} ${esc(M.config.effective.model_primary||"model")}</span>
             <button class="btn-interrupt" id="btn-interrupt" title="停止任务（协作式取消，引擎下一步优雅退出）">Interrupt Task</button>
             <button class="cbtn send" id="btn-send" title="Ctrl+Enter 发送">Send</button>
@@ -1054,6 +1054,7 @@ function dockMapBody(w,intents,hyps,hc,running,open,done,settledN){
 
 function dockOutBody(flags,w,finds){
   return `
+    ${w.result?`<div class="resultbox"><div class="rb-cap">最终结果 · result.md</div><pre>${esc(w.result)}</pre></div>`:""}
     ${flags.map(f=>`<div class="flagbox"><span>${esc(f.payload.value)}</span><button data-act="copy">复制</button></div>`).join("")}
     ${w.delivery?`<div class="deliveryline ${w.delivery.accepted?"ok":"bad"}">交付判定：${esc((w.delivery.reason||"").slice(0,80))}</div>`:""}
     <h5 style="${flags.length?"margin-top:15px;":""}">FINDINGS · 本任务 ${finds.length}</h5>
@@ -1072,7 +1073,7 @@ function renderDock(force=false){
   const flags=(M.events||[]).filter(e=>e.type==="finding"&&e.payload.kind==="flag");
   const finds=(M.findings||[]).filter(f=>f.job_id===state.jobId||String(f.job_id||"").startsWith((state.jobId||"⌂")+"-"));
   const hasMap=!!(intents.length||hyps.length||w.focus||w.status==="awaiting_confirm");
-  const hasOut=!!(flags.length||finds.length||w.delivery);
+  const hasOut=!!(flags.length||finds.length||w.delivery||w.result);
 
   const mapItem=dock.querySelector('[data-d="tasks"]');
   const outItem=dock.querySelector('[data-d="outcome"]');
@@ -1085,7 +1086,7 @@ function renderDock(force=false){
     intents.map(i=>[i.id,i.title,i.status,i.lane,i.hypothesis,i.fail_reason,i.source]),
     hyps.map(h=>[h.id,h.state,h.title,h.test,Math.round((h.confidence||0)*100)]),hc]);
   const outSig=JSON.stringify([flags.map(f=>f.payload.value),w.delivery,
-    finds.map(f=>[f.id,f.severity,f.title,f.confidence])]);
+    finds.map(f=>[f.id,f.severity,f.title,f.confidence]),w.result||""]);
 
   if(hasMap&&(force||mapSig!==dockState.mapSig)){
     const dot=$("#dock-map-dot",dock),meta=$("#dock-map-meta",dock),st=$("#dock-map-state",dock);
@@ -1104,7 +1105,7 @@ function renderDock(force=false){
 
   if(hasOut&&(force||outSig!==dockState.outSig)){
     const meta=$("#dock-out-meta",dock),st=$("#dock-out-state",dock);
-    if(meta)meta.textContent=[flags.length?`${flags.length} 旗`:"",finds.length?`${finds.length} 发现`:""].filter(Boolean).join(" · ")||"—";
+    if(meta)meta.textContent=[w.result?"结果就绪":"",flags.length?`${flags.length} 旗`:"",finds.length?`${finds.length} 发现`:""].filter(Boolean).join(" · ")||"—";
     if(st){
       st.textContent=w.delivery?(w.delivery.accepted?"已交付":"未通过"):"收集中";
       st.className="dp-state "+(w.delivery?(w.delivery.accepted?"done":"bad"):"run");

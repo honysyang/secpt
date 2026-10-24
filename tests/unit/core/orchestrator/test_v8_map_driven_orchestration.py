@@ -84,7 +84,7 @@ def _engine_flag(**kw):
 
 
 def test_material_change_wakes_commander_same_round(env, monkeypatch) -> None:
-    """操作员拿下 flag（地图质变）→ 当轮 CDR 收到 material_change 信号。"""
+    """操作员拿下 flag（地图质变）→ 当轮 指挥官 收到 material_change 信号。"""
     from secpt.core.orchestrator.commander import commander_round as real_round
 
     captured: list[object] = []
@@ -129,11 +129,11 @@ def test_material_change_wakes_commander_same_round(env, monkeypatch) -> None:
     assert any("地图质变" in p for p in llm.prompts)
 
 
-# ── 收敛裁决归 CDR：SNT 递 convergence，CDR 可交付可补产；不交付有回退 ──────
+# ── 收敛裁决归 指挥官：SNT 递 convergence，指挥官 可交付可补产；不交付有回退 ──────
 
 
 def test_convergence_signal_goes_to_commander(env, monkeypatch) -> None:
-    """子目标全结算 → CDR 收到 convergence 信号并裁决 deliver → 直接收口。"""
+    """子目标全结算 → 指挥官 收到 convergence 信号并裁决 deliver → 直接收口。"""
     from secpt.core.orchestrator.commander import commander_round as real_round
 
     captured: list[object] = []
@@ -176,8 +176,8 @@ def test_convergence_signal_goes_to_commander(env, monkeypatch) -> None:
     for sig in captured:
         items = sig if isinstance(sig, list) else [sig]
         convs += [x for x in items if x and x.get("kind") == "convergence"]
-    assert convs, f"收敛未递交 CDR：{captured!r}"
-    # CDR 交付裁决被尊重：正常收口而非 max_rounds 耗尽
+    assert convs, f"收敛未递交 指挥官：{captured!r}"
+    # 指挥官 交付裁决被尊重：正常收口而非 max_rounds 耗尽
     assert summary["open_remaining"] == 0
     assert summary["chains"], "任务应正常结算"
     # 收敛议题呈现在简报中
@@ -185,7 +185,7 @@ def test_convergence_signal_goes_to_commander(env, monkeypatch) -> None:
 
 
 def test_convergence_backstop_terminates_when_commander_idle(env, monkeypatch) -> None:
-    """回退保险：CDR 连续不交付（空响应）→ SNT 兜底收口，绝不悬挂。"""
+    """回退保险：指挥官 连续不交付（空响应）→ SNT 兜底收口，绝不悬挂。"""
     monkeypatch.setattr("secpt.cli.engine_runner.run_engine", _engine_flag)
     base = "v8back"
     fr = Frontier(frontier_db_path(base))

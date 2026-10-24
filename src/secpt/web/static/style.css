@@ -681,3 +681,8 @@ input:focus,textarea:focus{border-color:var(--line2)}
 @media (min-width:1400px){
   .anchor-bar{padding-right:430px}
 }
+
+/* 结果卡：最终结果（result.md）渲染块 */
+.resultbox{border:1px solid var(--line2);border-left:3px solid var(--c-ok);border-radius:9px;margin-bottom:12px;overflow:hidden;background:var(--bg2)}
+.resultbox .rb-cap{font:10.5px var(--mono);color:var(--c-ok);letter-spacing:.08em;padding:7px 11px;border-bottom:1px solid var(--line)}
+.resultbox pre{margin:0;padding:11px 13px;font:12px/1.65 var(--mono);color:var(--fg);white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto}

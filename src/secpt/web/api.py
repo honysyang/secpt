@@ -323,6 +323,7 @@ def workspace_payload(job_id: str) -> dict:
         "flags": [],
         "findings": [],
         "delivery": None,
+        "result": "",
         "status": "",
     }
     with contextlib.suppress(Exception):
@@ -408,6 +409,13 @@ def workspace_payload(job_id: str) -> dict:
                 if fl not in seen:
                     seen.add(fl)
                     out["flags"].append(fl)
+    # 最终结果（面向交付）：任务收口时编排层落 result.md，前端结果卡直接展示
+    with contextlib.suppress(Exception):
+        _rp = jobs_dir() / job_id / "result.md"
+        if _rp.is_file():
+            out["result"] = _rp.read_text(encoding="utf-8")
+        else:
+            out["result"] = ""
     with contextlib.suppress(Exception):
         # delivery.json（job 目录）优先；旧版 web 配置键兜底
         import json
@@ -720,7 +728,7 @@ def create_task(
     fake: bool = False,
     budget_steps: int = 0,
     budget_wall_s: float = 0.0,
-    auto_dispatch: bool = True,  # False=接战确认闸：CDR 先产《接战单》，人工确认后才编成派单
+    auto_dispatch: bool = True,  # 默认下发即跑；False=可选确认闸：指挥官先产《接战单》，人工确认后才派单
 ) -> dict:
     """提交任务：附件落盘 → TaskSpec → 后台线程执行 → 立即返回 job_id。"""
     import os

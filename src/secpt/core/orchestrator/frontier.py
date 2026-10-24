@@ -772,7 +772,7 @@ def _write_retro(
             c for c in chains if str(getattr(c, "status", "")) in ("exhausted", "blocked", "failed")
         ]
         lines = [
-            "# 任务复盘（主智能体自动生成）",
+            "# 任务结果",
             "",
             f"- 任务：{base}",
             f"- 目标：{objective[:1200]}",
@@ -812,6 +812,11 @@ def _write_retro(
             "",
         ]
         path.write_text("\n".join(lines), encoding="utf-8")
+        # 最终结果（面向用户交付）：同内容落 job 目录 result.md，控制台结果卡直接读取
+        with contextlib.suppress(Exception):
+            (path.parent / "result.md").write_text(
+                path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
         return path
     except Exception:
         return None
@@ -2202,7 +2207,7 @@ async def run_frontier(
             if note == "acquired":
                 _leased.append(t)
         else:
-            # Advisory：不阻塞，告警 + 落事件（规避决策交 CDR 与操作员）
+            # Advisory：不阻塞，告警 + 落事件（规避决策交 指挥官 与操作员）
             print(f"[frontier] 目标 {t[:60]} 已有并行任务持有（{note}）", flush=True)
             _parent_event(
                 base, "status_change", {"status": f"目标并行占用告警：{t[:60]}（{note}）"}
@@ -2415,12 +2420,12 @@ async def run_frontier(
         if fr.has_open_direct():
             return -1  # 模式②：规划者暂停（-1=未执行规划，主循环不得计轮）
         # v10：quality 信号穿透交付等待——VRF=质量工程师，否决结论必须送达
-        # CDR（项目经理）裁决；其余信号仍暂停，等复验结算
+        # 指挥官（项目经理）裁决；其余信号仍暂停，等复验结算
         if (delivery_pending or delivery_wait) and not any(
             getattr(s, "kind", "") == "quality" for s in pending_signals
         ):
             return -1  # 交付门未收口：暂停产新意图，等复验结算
-        # v8 收敛裁决：convergence 信号必须送达 CDR（值守层只递信号不拍板），
+        # v8 收敛裁决：convergence 信号必须送达 指挥官（值守层只递信号不拍板），
         # 不受意图上限/idle 门挡——这是收口前最后一次读图机会
         _conv_pending = any(getattr(s, "kind", "") == "convergence" for s in pending_signals)
         if (fr.total() >= max_intents or idle_rounds >= 2) and not _conv_pending:
@@ -3399,9 +3404,9 @@ async def run_frontier(
             or not decision.followups
         ):
             return True
-        # v10 职责重划：VRF=质量工程师（只评估交付物质量），CDR=项目经理（据反馈
-        # 综合裁决结束/改向）。否决结论必须送达 CDR——质量反馈入信号队列（quality
-        # 信号可穿透 delivery_wait 唤醒 CDR，见 _signal_plan）；复验任务照常入池
+        # v10 职责重划：VRF=质量工程师（只评估交付物质量），指挥官=项目经理（据反馈
+        # 综合裁决结束/改向）。否决结论必须送达 指挥官——质量反馈入信号队列（quality
+        # 信号可穿透 delivery_wait 唤醒 指挥官，见 _signal_plan）；复验任务照常入池
         # 作为 VRF 的修复建议，delivery_wait=True 保证池排空后交付门再裁决、
         # 复验尝试计数继续推进直至耗尽（否则首轮否决即悬挂，回滚永不触发）。
         from secpt.core.orchestrator.watch import WakeSignal
@@ -3457,7 +3462,7 @@ async def run_frontier(
             worker_tasks.append(asyncio.create_task(_logistics_loop()))
 
     # v8 质变快照：confirmed 假设数 / 真实 flag 数变化 = 地图质变。
-    # 原先这类变化最多等巩固定时器（6 轮）才被 CDR 看见；现在当轮插队唤醒。
+    # 原先这类变化最多等巩固定时器（6 轮）才被 指挥官 看见；现在当轮插队唤醒。
     _mat_confirmed = tree.counts().get("confirmed", 0) if tree is not None else 0
     _mat_flags = len(flags)
 
@@ -3477,7 +3482,7 @@ async def run_frontier(
             return 0
 
     _mat_findings = _findings_count(base)
-    conv_no_deliver = 0  # CDR 连续不交付计数：回退收口保险（SNT 兜底）
+    conv_no_deliver = 0  # 指挥官 连续不交付计数：回退收口保险（SNT 兜底）
 
     def _material_change():
         nonlocal _mat_confirmed, _mat_flags, _mat_findings
@@ -3572,7 +3577,7 @@ async def run_frontier(
             )
             if _stall is not None:
                 pending_signals.append(_stall)
-            # v8 质变检测：confirmed 假设 / 真实 flag 变化当轮插队唤醒 CDR。
+            # v8 质变检测：confirmed 假设 / 真实 flag 变化当轮插队唤醒 指挥官。
             # 队列里已有 material_change 则跳过（一次唤醒处理一次质变即可）
             _mat = _material_change()
             if _mat is not None and not any(
@@ -3587,9 +3592,9 @@ async def run_frontier(
             and not delivery_wait
         )
         # 值守层信号插队：有信号时无视 idle_rounds（停滞/预算/内务必须被 Commander 处理）
-        # v8：convergence 信号额外无视意图上限——收口裁决必须送达 CDR
+        # v8：convergence 信号额外无视意图上限——收口裁决必须送达 指挥官
         _has_conv = any(getattr(s, "kind", "") == "convergence" for s in pending_signals)
-        # v10：quality 信号穿透 delivery_wait——VRF 否决已交 CDR 裁决，
+        # v10：quality 信号穿透 delivery_wait——VRF 否决已交 指挥官 裁决，
         # 交付等待只屏蔽常规规划，不屏蔽项目经理的质量反馈处理
         _has_quality = any(getattr(s, "kind", "") == "quality" for s in pending_signals)
         _signal_plan = (
@@ -3598,12 +3603,12 @@ async def run_frontier(
             and (not (delivery_pending or delivery_wait) or _has_quality)
         )
         if _signal_plan or (can_plan and (starving or main_open == 0)):
-            _open_before_plan = fr.count_open()  # v8：CDR 接住了收敛议题则回退计数清零
+            _open_before_plan = fr.count_open()  # v8：指挥官 接住了收敛议题则回退计数清零
             _pn = await _maybe_plan()
             if _pn >= 0:
                 rounds += 1  # 暂停轮（-1）不计：-1 时无任何规划消费，计轮会假耗尽 max_rounds
             if fr.count_open() > _open_before_plan:
-                conv_no_deliver = 0  # 有新意图入池：收敛被 CDR 实质回应，重置回退保险
+                conv_no_deliver = 0  # 有新意图入池：收敛被 指挥官 实质回应，重置回退保险
             main_open = fr.count_open(lane="main")
             # 指挥官自执行的简单任务：派单入池后立即按 id 自取内联跑掉——
             # 不占操作员名额，走与操作员完全相同的 _run_one 结算路径（含假设信念更新）
@@ -3654,15 +3659,15 @@ async def run_frontier(
                     )
                     continue
                 if delivery_pending and not enable_delivery:
-                    break  # v8：CDR 已裁决交付且未启用交付门 → 直接收口
+                    break  # v8：指挥官 已裁决交付且未启用交付门 → 直接收口
                 if enable_delivery and not delivery_decision:
                     if await _run_delivery_gate():
                         stop = True
                         stop_ev.set()
                         break
                     continue
-                # v8 收敛裁决归 CDR：SNT 只递 convergence 信号不亲自拍板；
-                # CDR 连续两次不交付 → SNT 回退收口（不可悬挂的兜底）
+                # v8 收敛裁决归 指挥官：SNT 只递 convergence 信号不亲自拍板；
+                # 指挥官 连续两次不交付 → SNT 回退收口（不可悬挂的兜底）
                 if conv_no_deliver < 2:
                     conv_no_deliver += 1
                     pending_signals.append(
@@ -3672,7 +3677,7 @@ async def run_frontier(
                         )
                     )
                     continue
-                break  # 回退收口：CDR 两轮收敛唤醒均未交付（覆盖度兜底）
+                break  # 回退收口：指挥官 两轮收敛唤醒均未交付（覆盖度兜底）
             # 复盘会 retro()（设计 §4.1）：空队列时先确定性路由——失败驱动局部递归
             # （§4.2）优先于"规划两轮无产出就收敛"。阶段由状态定：recurse 时编排层
             # 直接产结构化子意图（不经 planner LLM），防"planner 忘了展开"时系统卡死
@@ -3706,15 +3711,15 @@ async def run_frontier(
                     pending_signals.append(_stall_signal_now("规划无产出，但假设树仍有未决方向"))
                     continue
                 if delivery_pending and not enable_delivery:
-                    break  # v8：CDR 已裁决交付且未启用交付门 → 直接收口
+                    break  # v8：指挥官 已裁决交付且未启用交付门 → 直接收口
                 if enable_delivery and not delivery_decision:
                     if await _run_delivery_gate():
                         stop = True
                         stop_ev.set()
                         break
                     continue
-                # v8 收敛裁决归 CDR（同覆盖度收口）：池空且无法再规划时
-                # 由 CDR 读图裁决收兵或给新方向；连续两次不交付 → SNT 回退收口
+                # v8 收敛裁决归 指挥官（同覆盖度收口）：池空且无法再规划时
+                # 由 指挥官 读图裁决收兵或给新方向；连续两次不交付 → SNT 回退收口
                 if conv_no_deliver < 2:
                     conv_no_deliver += 1
                     pending_signals.append(
@@ -3724,7 +3729,7 @@ async def run_frontier(
                         )
                     )
                     continue
-                break  # 回退收口：空队列 + 无法再规划 + CDR 两轮未交付
+                break  # 回退收口：空队列 + 无法再规划 + 指挥官 两轮未交付
             timeout = 2.0  # 空队列短心跳（测试友好；实战 2s 无害）
         else:
             timeout = float(os.environ.get("SECPT_FRONTIER_HEARTBEAT", "60"))

@@ -441,3 +441,19 @@ def test_delete_job_terminal_skips_cancel(env, monkeypatch) -> None:
 
     assert api.delete_job("del-2").get("ok") is True
     assert called == []
+
+
+def test_workspace_payload_includes_result_md(env) -> None:
+    """任务收口落 result.md → workspace 载荷直接可读（前端结果卡展示）。"""
+    from secpt.core.job.resume import jobs_dir
+
+    jdir = jobs_dir() / "res-1"
+    jdir.mkdir(parents=True, exist_ok=True)
+    (jdir / "result.md").write_text("# 任务结果\n- 战果：FLAG{x}", encoding="utf-8")
+    out = api.workspace_payload("res-1")
+    assert "FLAG{x}" in (out.get("result") or "")
+
+
+def test_workspace_payload_result_empty_when_missing(env) -> None:
+    out = api.workspace_payload("res-missing")
+    assert out.get("result") == ""
