@@ -394,7 +394,6 @@ function renderTimeline(rounds,now,running){
       <div class="tl-total ${tCls}" title="${esc(tTitle)}"><span class="tl-total-k">${tK}</span><b>${tV}</b></div>
     </div>
     <div class="tl-track">${nodes}<div class="tl-tip" id="tl-tip"></div></div>
-    <div class="tl-legend"><span><i class="lg-user"></i>用户</span><span><i class="lg-round"></i>轮次</span><span><i class="lg-intent"></i>意图</span></div>
   </div>`;
   const track=$(".tl-track",el),tip=$("#tl-tip",el);
   $$(".tl-node",el).forEach(n=>{

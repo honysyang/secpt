@@ -585,12 +585,7 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .tl-node.bad{background:var(--c-bad)}
 .tl-tip{position:absolute;left:52px;top:0;transform:translateY(-50%);background:var(--bg2);border:1px solid var(--line2);border-radius:6px;padding:4px 9px;font:10px var(--mono);color:var(--fg);white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .1s;z-index:6;box-shadow:0 8px 24px rgba(0,0,0,.35)}
 .tl-tip.show{opacity:1}
-.tl-legend{display:flex;flex-direction:column;gap:4px;padding-top:9px;font:9px var(--mono);color:var(--c-time)}
-.tl-legend span{display:flex;align-items:center;gap:5px}
-.tl-legend i{display:inline-block;flex:none}
-.lg-user{width:14px;height:2px;border-radius:1px;background:var(--c-think)}
-.lg-round{width:18px;height:2px;border-radius:1px;background:var(--fg)}
-.lg-intent{width:12px;height:2px;border-radius:1px;background:var(--c-tool)}
+
 .round-panel.linked{border-color:color-mix(in srgb,var(--c-tool) 55%,var(--line))}
 .flash{animation:locflash 1.6s ease}
 @keyframes locflash{0%,100%{box-shadow:none}20%,60%{box-shadow:0 0 0 2px color-mix(in srgb,var(--c-tool) 55%,transparent)}}
@@ -606,7 +601,6 @@ input:focus,textarea:focus{border-color:var(--line2)}
   .tl-node{left:12px;height:2px}
   .tl-node.user,.tl-node.round{width:14px!important}
   .tl-tip{left:38px;font-size:9px;max-width:72vw;white-space:normal}
-  .tl-legend{display:none}
   .feed{padding:8px 16px 170px}
   .composer-float{padding:24px 16px 14px}
   .round-head{gap:6px;padding:8px 11px}
