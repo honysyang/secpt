@@ -534,6 +534,14 @@ function buildTaskTree(jobs){
     if(parent&&pid!==j.job_id){
       if(!groups.has(pid)){groups.set(pid,{parent,children:[]});order.push(pid)}
       groups.get(pid).children.push(j);
+    }else if(pid!==j.job_id){
+      // 孤儿子任务（父任务已删除）：不再平铺成独立任务——跟随"删除整树"语义隐藏。
+      // 兜底：若它已是当前选中任务，仍归属到祖先根下展示。
+      const gp=byId.get(pid)?null:pid;
+      if(gp&&state.jobId===j.job_id){
+        if(!groups.has(j.job_id)){groups.set(j.job_id,{parent:j,children:[]});order.push(j.job_id)}
+      }
+      // 其余孤儿直接不渲染（历史已随树删除；这里只是列表残留的防御）
     }else{
       if(!groups.has(j.job_id)){groups.set(j.job_id,{parent:j,children:[]});order.push(j.job_id)}
     }
@@ -967,10 +975,13 @@ function openTaskMenu(row){
       catch(err){toast(`停止失败：${err.message}`)}
     }
     else if(act==="del"){
-      if(!confirm(`删除任务 ${jid}？运行中会先停止；仅从列表移除，历史目录保留。`))return;
+      if(!confirm(`删除任务 ${jid}？运行中会先停止；将整树移除（含派生子任务），历史目录保留。`))return;
       try{await api(`/api/jobs/${jid}`,{method:"DELETE"});
-        toast("已删除");await loadJobs();
-        if(state.jobId===jid){state.jobId=M.jobs[0]?M.jobs[0].job_id:"";state.cursor=0;M.events=[];refreshJobData(true)}
+        toast("已删除（整树）");await loadJobs();
+        // 选中态可能落在被删树的任一成员上（父/子）：全部清空重置
+        if(state.jobId===jid||state.jobId.startsWith(jid+"-")||jid.startsWith(state.jobId+"-")){
+          state.jobId=M.jobs[0]?M.jobs[0].job_id:"";state.cursor=0;M.events=[];refreshJobData(true);
+        }
         else renderTaskPanel();
       }catch(err){toast(`删除失败：${err.message}`)}
     }

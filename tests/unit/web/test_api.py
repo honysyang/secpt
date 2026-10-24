@@ -457,3 +457,40 @@ def test_workspace_payload_includes_result_md(env) -> None:
 def test_workspace_payload_result_empty_when_missing(env) -> None:
     out = api.workspace_payload("res-missing")
     assert out.get("result") == ""
+
+
+def test_delete_tree_removes_children(env, monkeypatch) -> None:
+    """删除父任务必须整树移除（root + -iXXXX 子任务），否则列表平铺出孤儿。"""
+    from secpt.core.job.resume import jobs_dir
+    from secpt.core.job.store import JobStore
+
+    _mk_record_status("tree-1", "succeeded")
+    _mk_record_status("tree-1-i00aa", "succeeded")
+    _mk_record_status("tree-1-i00bb", "failed")
+    for jid in ("tree-1", "tree-1-i00aa", "tree-1-i00bb"):
+        (jobs_dir() / jid).mkdir(parents=True, exist_ok=True)
+
+    r = api.delete_job("tree-1")
+    assert r.get("ok") is True and r.get("deleted") == 3
+    for jid in ("tree-1", "tree-1-i00aa", "tree-1-i00bb"):
+        assert JobStore().get_job(jid) is None
+
+
+def test_delete_child_cancels_tree_root(env, monkeypatch) -> None:
+    """删除子任务时按树根取消（协作式取消沿任务树传播），并整树删除。"""
+    from secpt.core.job.resume import jobs_dir
+    from secpt.core.job.store import JobStore
+
+    _mk_record_status("troot", "running")
+    _mk_record_status("troot-i00cc", "running")
+    (jobs_dir() / "troot").mkdir(parents=True, exist_ok=True)
+    (jobs_dir() / "troot-i00cc").mkdir(parents=True, exist_ok=True)
+    called: list[str] = []
+    monkeypatch.setattr(api, "cancel_task", lambda jid: called.append(jid) or {"ok": True})
+
+    assert api.delete_job("troot-i00cc").get("ok") is True
+    assert called == ["troot"]
+    # delete_tree 以传入 id 为根：删子任务 → 子任务树；父任务本体由 cancel 标记收口，
+    # 不在这次删除范围（用户点子任务的 ⋯ 菜单删的是该子任务所在树）
+    assert JobStore().get_job("troot") is not None
+    assert JobStore().get_job("troot-i00cc") is None

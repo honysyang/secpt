@@ -167,6 +167,24 @@ class JobStore:
             conn.execute("DELETE FROM events WHERE job_id=?", (job_id,))
             conn.execute("DELETE FROM findings WHERE job_id=?", (job_id,))
 
+    def delete_tree(self, root_id: str) -> int:
+        """删除任务树：root 本体 + 全部派生子任务（<root>-iXXXX/-r2/-rs…）。
+
+        只删父记录会把意图段子任务留在列表里（删除后前端平铺出 N 条
+        web-xxx-iXXXX），必须整树删除。返回删除的记录数。
+        """
+        prefix = root_id + "-"
+        with self._conn() as conn:
+            rows = [r[0] for r in conn.execute("SELECT job_id FROM jobs").fetchall()]
+            ids = [root_id] + [j for j in rows if j.startswith(prefix)]
+            n = 0
+            for jid in ids:
+                conn.execute("DELETE FROM jobs WHERE job_id=?", (jid,))
+                conn.execute("DELETE FROM events WHERE job_id=?", (jid,))
+                conn.execute("DELETE FROM findings WHERE job_id=?", (jid,))
+                n += 1
+            return n
+
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> JobRecord:
         spec = TaskSpec.model_validate_json(row["spec_json"])

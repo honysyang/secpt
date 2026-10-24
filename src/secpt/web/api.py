@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import re
 import sys
 import threading
 import time
@@ -571,7 +572,7 @@ def resume_task(job_id: str) -> dict:
 
 
 def delete_job(job_id: str) -> dict:
-    """删除任务：运行中先协作式取消，再从任务列表移除（目录留存可归档）。"""
+    """删除任务：运行中先协作式取消，再整树移除（root + 派生子任务；目录留存可归档）。"""
     from secpt.core.job.store import JobStore
 
     jdir = _var() / "jobs"
@@ -583,14 +584,20 @@ def delete_job(job_id: str) -> dict:
         # 会派生出一堆失去父任务的孤儿子任务（web-8d3c345d 实证）
         _ACTIVE = {"queued", "pending", "running", "awaiting_confirm", "paused"}
         if rec is not None and rec.status in _ACTIVE:
-            cancel_task(job_id)
+            # 树根定位：剥 -iXXXX/-r2/-rs 后缀（取消沿任务树传播）。
+            # 只剥一层即 break——再剥一次结果不变会被误判为"剥不动"而重置回子任务 id
+            root = re.sub(r"-(?:i[0-9a-fA-F]{4,8}|r\d+|rs)$", "", job_id) or job_id
+            if root != job_id and JobStore().get_job(root) is not None:
+                cancel_task(root)
+            else:
+                cancel_task(job_id)
     try:
         from secpt.core.job.store import JobStore
 
-        JobStore().delete_job(job_id)
+        n = JobStore().delete_tree(job_id)
     except Exception as e:
         return {"error": f"删除失败: {e}"}
-    return {"ok": True}
+    return {"ok": True, "deleted": n}
 
 
 def cancel_task(job_id: str) -> dict:
