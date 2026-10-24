@@ -498,9 +498,7 @@ def test_delete_child_cancels_tree_root(env, monkeypatch) -> None:
 
 def test_stream_endpoint_sse_format(server) -> None:
     """SSE 流式接口：text/event-stream 响应，事件行带 id/data，收口发 bye。"""
-    import json as _json
     import socket
-    import time as _t
 
     host, port = server.split("//")[1].split(":")
     s = socket.create_connection((host, int(port)), timeout=5)
@@ -517,14 +515,15 @@ def test_stream_endpoint_sse_format(server) -> None:
 def test_stream_endpoint_emits_events(server, env, monkeypatch) -> None:
     """有事件的任务：SSE 按 seq 顺序输出，after 游标生效。"""
     import socket
-    import time as _t
 
     _mk_record_status("sse-job", "succeeded")
     _write_events(
         env,
         "sse-job",
-        [{"type": "user_msg", "payload": {"kind": "new_task", "content": "hi"}},
-         {"type": "status_change", "payload": {"status": "succeeded"}}],
+        [
+            {"type": "user_msg", "payload": {"kind": "new_task", "content": "hi"}},
+            {"type": "status_change", "payload": {"status": "succeeded"}},
+        ],
     )
     host, port = server.split("//")[1].split(":")
     s = socket.create_connection((host, int(port)), timeout=5)
@@ -538,7 +537,7 @@ def test_stream_endpoint_emits_events(server, env, monkeypatch) -> None:
             if not chunk:
                 break
             buf += chunk
-    except (socket.timeout, OSError):
+    except (TimeoutError, OSError):
         pass
     s.close()
     text = buf.decode("utf-8", errors="replace")
