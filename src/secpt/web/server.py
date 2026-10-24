@@ -103,7 +103,9 @@ class SecptWebHandler(BaseHTTPRequestHandler):
                 job_id = path[len("/api/jobs/") : -len("/events")]
                 qs = parse_qs(parsed.query)
                 after = int((qs.get("after") or ["0"])[0] or 0)
-                self._send_json(api.events_payload(job_id, after=after))
+                before = int((qs.get("before") or ["0"])[0] or 0)
+                limit = int((qs.get("limit") or ["400"])[0] or 400)
+                self._send_json(api.events_payload(job_id, after=after, before=before, limit=limit))
             elif path.startswith("/api/jobs/") and path.endswith("/file"):
                 job_id = path[len("/api/jobs/") : -len("/file")]
                 qs = parse_qs(parsed.query)
@@ -117,6 +119,11 @@ class SecptWebHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/jobs/") and path.endswith("/workspace"):
                 job_id = path[len("/api/jobs/") : -len("/workspace")]
                 self._send_json(api.workspace_payload(job_id))
+            elif "/event/" in path and path.split("/event/")[0].startswith("/api/jobs/"):
+                # 单事件全量详情：/api/jobs/{id}/event/{seq}（summary 进流、detail 懒加载）
+                job_id, seq = path.split("/event/", 1)
+                job_id = job_id[len("/api/jobs/") :]
+                self._send_json(api.event_detail_payload(job_id, int(seq or 0)))
             elif path.startswith("/api/jobs/") and path.endswith("/stream"):
                 job_id = path[len("/api/jobs/") : -len("/stream")]
                 qs = parse_qs(parsed.query)

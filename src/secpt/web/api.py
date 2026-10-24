@@ -231,17 +231,45 @@ def _events_file(job_id: str) -> Path:
     return jobs_dir() / job_id / "events.jsonl"
 
 
-def events_payload(job_id: str, after: int = 0, limit: int = 400) -> dict:
-    """读取 events.jsonl 中 seq > after 的事件（执行轨迹的数据源）。
+def events_payload(job_id: str, after: int = 0, limit: int = 400, *, before: int = 0) -> dict:
+    """读取 events.jsonl 中的事件（执行轨迹的数据源）。
 
     轨迹分层在 前端 做：finding/flag/status → 对话里程碑；tool_call/tool_result →
     工具轨迹（配对）；intent 相关（frontier 聚合的 status_change/loop_phase）→ 智能体活动。
+
+    游标双向（ARTEX history 语义）：
+    - after=N：正向增量（N 之后的 seq），cursor=已读到的最大 seq——流式/轮询用
+    - before=N：反向分页（N 之前、含 N 往前数 limit 条），cursor=本页最小 seq-1——
+      历史回翻用；配合 has_more 让前端"加载更早"逐页上翻，不必拉全量
     """
     import json
 
     path = _events_file(job_id)
     events: list[dict] = []
     cursor = int(after or 0)
+    has_more = False
+    if int(before or 0) > 0 and path.is_file():
+        # 反向分页：读全部匹配行取尾部 limit 条（事件文件单任务可控；归档回读
+        # 不支持 before——历史深翻以在线段为准）
+        rows: list[dict] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                with contextlib.suppress(Exception):
+                    row = json.loads(line)
+                if not isinstance(row, dict):
+                    continue
+                seq = int(row.get("seq") or 0)
+                if 0 < seq < int(before or 0):
+                    rows.append(row)
+        rows.sort(key=lambda r: int(r.get("seq") or 0))
+        page = rows[-int(limit or 400) :]
+        has_more = len(rows) > len(page)
+        for row in page:
+            row.setdefault("actor", row.get("agent_id") or row.get("job_id") or "agent")
+            events.append(row)
+        cursor = (int(page[0].get("seq") or 1) - 1) if page else 0
+        return {"events": events, "cursor": cursor, "has_more": has_more}
+    # 正向增量（原语义）
     # v10 轮转归档回读：游标早于在线文件首 seq 时，从 archive/*.jsonl.gz 补
     with contextlib.suppress(Exception):
         from secpt.core.sustain.compress import read_archived_events
@@ -271,6 +299,38 @@ def events_payload(job_id: str, after: int = 0, limit: int = 400) -> dict:
                 row.setdefault("actor", row.get("agent_id") or row.get("job_id") or "agent")
                 events.append(row)
     return {"events": events, "cursor": cursor, "has_more": len(events) >= limit}
+
+
+def event_detail_payload(job_id: str, seq: int) -> dict:
+    """单事件全量详情（ARTEX activity/{seq} 语义）：summary 进流、detail 懒加载。
+
+    detail 源自 SQLite events.detail 列（on_result/on_assistant 写入全量正文）；
+    SQLite 无记录（老库/镜像缺失）时回落 jsonl 行 payload。
+    """
+    from secpt.core.job.store import JobStore
+
+    with contextlib.suppress(Exception):
+        rec = JobStore().get_event_detail(job_id, int(seq))
+        if rec is not None and (rec.get("detail") or "").strip():
+            return {"ok": True, "seq": int(seq), "type": rec["type"], "detail": rec["detail"]}
+    # 回落：jsonl 行（无 detail 列时返回 payload 原文）
+    import json
+
+    path = _events_file(job_id)
+    if path.is_file():
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                row: dict | None = None
+                with contextlib.suppress(Exception):
+                    row = json.loads(line)
+                if isinstance(row, dict) and int(row.get("seq") or 0) == int(seq):
+                    return {
+                        "ok": True,
+                        "seq": int(seq),
+                        "type": row.get("type"),
+                        "detail": json.dumps(row.get("payload") or {}, ensure_ascii=False),
+                    }
+    return {"error": "事件不存在"}
 
 
 # ---------------------------------------------------------------------------

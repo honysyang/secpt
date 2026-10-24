@@ -224,7 +224,9 @@ class EventSink:
         except OSError:
             return 0
 
-    def write(self, etype: str, payload: dict, round_: int = 0) -> int:
+    def write(self, etype: str, payload: dict, round_: int = 0, *, detail: str = "") -> int:
+        """落事件。detail=全量正文（可选）：只转存 SQLite detail 列，jsonl 行
+        保持轻量（ARTEX activity 双轨语义——summary 进流、detail 懒加载）。"""
         if etype not in EVENT_TYPES:
             raise ValueError(f"unknown event type: {etype!r}")
         # 结构化校验（缺键告警每类型一次，不阻断——事件流是观测层）
@@ -284,10 +286,10 @@ class EventSink:
                 else:
                     f.write(data)
                     f.flush()
-            # 次写：SQLite（失败不阻断）
+            # 次写：SQLite（失败不阻断）；detail 全量正文随行落库
             if self.store is not None:
                 try:
-                    self.store.add_event(self.job_id, etype, payload, round_)
+                    self.store.add_event(self.job_id, etype, payload, round_, detail=detail)
                 except Exception as e:
                     print(f"[sink] sqlite event failed (ignored): {e}")
             return self._seq
@@ -303,10 +305,11 @@ class EventSink:
         self.write("step", {"n": idx, "elapsed_s": round(elapsed_s, 1)})
 
     def on_assistant(self, msg_dict: dict) -> None:
+        content_full = str(msg_dict.get("content") or "")
         self.write(
             "assistant",
             {
-                "content": (msg_dict.get("content") or "")[:2000],
+                "content": content_full[:2000],
                 "reasoning": (msg_dict.get("reasoning_content") or "")[:800],
                 "tool_calls": [
                     {
@@ -317,6 +320,7 @@ class EventSink:
                     for tc in msg_dict.get("tool_calls") or []
                 ],
             },
+            detail=content_full,  # 完整思考/结论进 detail（结果报告的证据源）
         )
 
     def on_tool(self, call_id: str, name: str, args: dict) -> None:
@@ -331,14 +335,16 @@ class EventSink:
         )
 
     def on_result(self, call_id: str, out: str) -> None:
+        out_str = str(out or "")
         self.write(
             "tool_result",
             {
                 "call_id": call_id,
                 "status": _classify_output(out),
-                "bytes": len(str(out or "")),
-                "preview": str(out or "")[:500],
+                "bytes": len(out_str),
+                "preview": out_str[:500],
             },
+            detail=out_str,  # 全量输出落 detail 列（审计/报告可回放）
         )
 
     def on_round_end(self, round_: int, messages: list[dict]) -> None:

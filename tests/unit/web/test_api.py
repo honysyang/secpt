@@ -543,3 +543,39 @@ def test_stream_endpoint_emits_events(server, env, monkeypatch) -> None:
     text = buf.decode("utf-8", errors="replace")
     assert "id: 1" in text and "id: 2" in text
     assert "user_msg" in text and "event: bye" in text
+
+
+def test_events_before_reverse_pagination(env) -> None:
+    """before=seq 反向分页：返回之前的尾部 limit 条，cursor=页首-1，has_more 正确。"""
+    evs = [
+        {"type": "user_msg", "payload": {"kind": "new_task", "content": f"任务{i}"}}
+        for i in range(1, 13)
+    ]
+    _write_events(env, "rev-1", evs)
+
+    # before=13（最后一页之前）→ 取 seq 8..12
+    d = api.events_payload("rev-1", after=0, before=13, limit=5)
+    seqs = [e["seq"] for e in d["events"]]
+    assert seqs == [8, 9, 10, 11, 12] and d["has_more"] is True and d["cursor"] == 7
+    # 继续上翻（cursor=7 → 取 seq<7 的尾部 5 条：2..6）
+    d2 = api.events_payload("rev-1", after=0, before=d["cursor"], limit=5)
+    assert [e["seq"] for e in d2["events"]] == [2, 3, 4, 5, 6] and d2["has_more"] is True
+    # 正向语义不受影响
+    df = api.events_payload("rev-1", after=10)
+    assert [e["seq"] for e in df["events"]] == [11, 12]
+
+
+def test_event_detail_lazy_load(env) -> None:
+    """事件 detail 双轨：SQLite 有 detail 返回全文；无记录回落 jsonl payload。"""
+
+    from secpt.core.job.event import EventSink
+    from secpt.core.job.resume import jobs_dir
+    from secpt.core.job.store import JobStore
+
+    sink = EventSink("det-1", jobs_dir(), store=JobStore())
+    sink.on_result("call-1", "x" * 2000)  # 全量 2000 字进 detail，preview 500
+
+    d = api.event_detail_payload("det-1", sink._seq)
+    assert d["ok"] is True and len(d["detail"]) == 2000
+    # 无记录 seq → 报错
+    assert "error" in api.event_detail_payload("det-1", 999)

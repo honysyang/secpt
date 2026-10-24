@@ -109,6 +109,12 @@ class JobStore:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
             if "restarts" not in cols:
                 conn.execute("ALTER TABLE jobs ADD COLUMN restarts INTEGER NOT NULL DEFAULT 0")
+            # detail 双轨（ARTEX activity 表语义）：事件行 payload 只带 summary
+            # （截断预览），全量正文落 detail 列——列表查询不取该列，详情接口
+            # 按 seq 懒加载。老库补列，新库直接建。
+            ecols = {r["name"] for r in conn.execute("PRAGMA table_info(events)").fetchall()}
+            if "detail" not in ecols:
+                conn.execute("ALTER TABLE events ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
 
     # ---------------- jobs ----------------
 
@@ -203,14 +209,45 @@ class JobStore:
 
     # ---------------- events ----------------
 
-    def add_event(self, job_id: str, etype: str, payload: dict, round_: int = 0) -> int:
-        """返回 SQLite seq。payload 必须是 JSON 可序列化。"""
+    def add_event(
+        self,
+        job_id: str,
+        etype: str,
+        payload: dict,
+        round_: int = 0,
+        detail: str = "",
+    ) -> int:
+        """返回 SQLite seq。payload 必须是 JSON 可序列化。
+
+        detail=全量正文（ARTEX activity 双轨语义）：事件行 payload 只放截断
+        summary，长内容（工具全输出/完整思考）落这里，按 seq 懒加载。
+        """
         with self._conn() as conn:
             cur = conn.execute(
-                "INSERT INTO events (job_id, ts, round, type, payload_json) VALUES (?,?,?,?,?)",
-                (job_id, _ts(), round_, etype, json.dumps(payload, ensure_ascii=False)),
+                "INSERT INTO events (job_id, ts, round, type, payload_json, detail)"
+                " VALUES (?,?,?,?,?,?)",
+                (job_id, _ts(), round_, etype, json.dumps(payload, ensure_ascii=False), detail),
             )
             return int(cur.lastrowid)
+
+    def get_event_detail(self, job_id: str, seq: int) -> dict | None:
+        """按 seq 取事件 + 全量 detail（详情接口懒加载用）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT seq, ts, round, type, payload_json, detail FROM events"
+                " WHERE job_id=? AND seq=?",
+                (job_id, int(seq)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "seq": row["seq"],
+            "ts": row["ts"],
+            "round": row["round"],
+            "type": row["type"],
+            "payload": json.loads(row["payload_json"]),
+            "detail": row["detail"] or "",
+        }
 
     def search_traces(
         self, query: str, *, limit: int = 10, exclude_job: str | None = None

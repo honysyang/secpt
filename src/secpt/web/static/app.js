@@ -271,6 +271,20 @@ function renderFeed(){
     if(e.target.closest("[data-copy-key]"))return;
     toggleFileCard(h.closest(".file-card"));
   });
+  $$("[data-detail]",feed).forEach(b=>b.onclick=async()=>{
+    const seq=+b.dataset.detail;
+    b.disabled=true;
+    try{
+      const d=await api(`/api/jobs/${encodeURIComponent(state.jobId)}/event/${seq}`);
+      if(d.ok){
+        const box=b.previousElementSibling;
+        const pre=document.createElement("pre");
+        pre.className="term-out detail-full";
+        pre.textContent=d.detail||"(空)";
+        b.replaceWith(pre);
+      }else toast(d.error||"读取失败");
+    }catch(err){toast("读取失败："+err.message);b.disabled=false}
+  });
   $$("[data-copy-key]",feed).forEach(b=>b.onclick=e=>{
     e.stopPropagation();
     const card=b.closest(".file-card");
@@ -371,7 +385,8 @@ function itemHTML(i){
   if(i.t==="tool")return toolItemHTML(i.o);
   const e=i.o,p=e.payload||{};
   if(e.type==="assistant"){
-    return `<div class="msg-agent thought turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div></div>`;
+    const nearCap=(p.content||"").length>=1990;
+    return `<div class="msg-agent thought turn-item" data-seq="${e.seq}"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(e)}</span><span class="t">${fmtT(e.ts)} · 思考</span></div><div class="a-body">${esc(p.content)}</div>${nearCap?`<button class="detail-btn" data-detail="${e.seq}">查看全文</button>`:""}</div>`;
   }
   if(e.type==="user_msg"){
     const kindLabel={coach:"教练注入",budget:"预算警告",info:"系统注入"}[p.kind]||(p.kind||"系统消息");
@@ -731,7 +746,7 @@ function termCardHTML(call,result){
       <button class="copy-btn" data-copy-key="${key}" data-copy-msg="终端内容已复制">复制</button>
     </div>
     <pre class="term-cmd"><span class="ps1">$</span>${esc(cmd)}</pre>
-    ${result?`<pre class="term-out">${esc(out||"(无输出)")}</pre>`:`<div class="term-wait"><span class="dots"><i></i><i></i><i></i></span>执行中…</div>`}
+    ${result?`<pre class="term-out">${esc(out||"(无输出)")}</pre>${(result.payload.bytes||0)>480?`<button class="detail-btn" data-detail="${call.seq}">查看全文（${result.payload.bytes}B，输出已截断）</button>`:""}`:`<div class="term-wait"><span class="dots"><i></i><i></i><i></i></span>执行中…</div>`}
   </div>`;
 }
 /* 写文件：可折叠卡片（头部=路径+状态，正文=代码块，默认收起）

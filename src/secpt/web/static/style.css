@@ -685,3 +685,8 @@ input:focus,textarea:focus{border-color:var(--line2)}
 .sys-head .turn-avatar{color:var(--agent);border-color:color-mix(in srgb,var(--agent) 40%,var(--line));background:color-mix(in srgb,var(--agent) 10%,var(--bg2))}
 .sys-head .turn-cap b{color:var(--agent)}
 .sys-return{background:color-mix(in srgb,var(--agent) 7%,var(--bg2));border:1px solid color-mix(in srgb,var(--agent) 25%,var(--line));border-left:3px solid var(--agent);border-radius:4px 10px 10px 4px;padding:9px 13px;font-size:12.5px;line-height:1.6;color:var(--fg);white-space:pre-wrap}
+
+/* 查看全文按钮 + 全文块 */
+.detail-btn{display:block;margin:-6px 0 8px;margin-left:14px;font:10.5px var(--mono);color:var(--c-time);border:1px solid var(--line2);border-radius:6px;padding:2px 9px;background:transparent;cursor:pointer;transition:color .12s,border-color .12s}
+.detail-btn:hover{color:var(--fg);border-color:var(--fg3)}
+pre.detail-full{max-height:420px}
