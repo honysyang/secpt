@@ -242,7 +242,7 @@ function renderFeed(){
       }
       if(users.length||r===rounds[0])body+=userGroupHTML(users);
       body+=sysTurnHeader(r,tools,work);
-      if(work.length)body+=panelHTML("work",r.round,work,
+      if(work.length)body+=workPanelHTML(r,work,
         state.workOpen[r.round]!==undefined?state.workOpen[r.round]:true);
       if(tools.length)body+=panelHTML("tool",r.round,tools,
         state.toolOpen[r.round]!==undefined?state.toolOpen[r.round]:(running&&r===last));
@@ -261,7 +261,8 @@ function renderFeed(){
       ${r.open?`<div class="round-body">${body||'<div class="faint" style="font-size:12px">（本轮无展开内容）</div>'}</div>`:""}
     </section>`;
   }
-  feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>`;
+  feed.innerHTML=`<div class="feed-inner">${html||`<div class="empty"><b>暂无轨迹</b>该任务尚未产生事件</div>`}</div>
+    <div class="feed-live" id="feed-live"><span class="dots"><i></i><i></i><i></i></span>实时流式中…</div>`;
   renderTimeline(rounds,now,running);
   $$("[data-act=r-toggle]",feed).forEach(h=>h.onclick=()=>{
     const rid=+h.dataset.r,panel=h.closest(".round-panel");
@@ -278,11 +279,20 @@ function renderFeed(){
     panel.classList.toggle("collapsed",!open);
     if(kind==="work")state.workOpen[rid]=open;else state.toolOpen[rid]=open;
   });
-  $$("[data-act=tl-toggle]",feed).forEach(h=>h.onclick=()=>{
-    const k=state.jobId+":t:"+h.dataset.k;
-    const tl=h.closest(".tlog");
-    if(tl.classList.contains("open")){tl.classList.remove("open");state.closedKeys.add(k)}
-    else{tl.classList.add("open");state.closedKeys.delete(k)}
+  $$("[data-act=msgg]",feed).forEach(h=>h.onclick=e=>{
+    const k=h.dataset.key;
+    const box=h.closest(".msg-group");
+    const open=!box.classList.contains("open");
+    box.classList.toggle("open",open);
+    if(open)state.openKeys.add(k);else state.openKeys.delete(k);
+  });
+  $$("[data-act=trow3]",feed).forEach(h=>h.onclick=e=>{
+    if(e.target.closest("[data-copy-key],[data-detail]"))return;
+    const k=h.dataset.key;
+    const box=h.closest(".term-card,.trow3");
+    const open=!box.classList.contains("open");
+    box.classList.toggle("open",open);
+    if(open)state.openKeys.add(k);else state.openKeys.delete(k);
   });
   $$("[data-act=file-toggle]",feed).forEach(h=>h.onclick=e=>{
     if(e.target.closest("[data-copy-key]"))return;
@@ -319,6 +329,9 @@ function renderFeed(){
     if(t==null)return;
     copyText(t,b.dataset.copyMsg||"已复制到剪贴板");
   });
+  /* ARTEX live 指示：流式在线且任务运行中 → feed 底部三点跳动"实时流式中…" */
+  const liveEl=$("#feed-live");
+  if(liveEl)liveEl.classList.toggle("show",!!(stream.live&&stream.jobId===state.jobId&&viewRunning()));
   applyFilter();
   scheduleTimelineSpy();
   if(state.locate&&Date.now()<state.locate.until){
@@ -356,11 +369,12 @@ function userGroupHTML(list){
   }
   if(!items.length)return "";
   return `<div class="turn user user-group">
-    <div class="turn-rail"><span class="turn-avatar user">${USER_SVG}</span></div>
     <div class="turn-body">
-      <div class="turn-cap"><b>用户输入</b><span>${items.length} 条</span></div>
+      <div class="turn-cap right"><b>用户输入</b><span>${items.length} 条</span></div>
       ${items.join("")}
-    </div></div>`;
+    </div>
+    <div class="turn-rail"><span class="turn-avatar user">${USER_SVG}</span></div>
+  </div>`;
 }
 /* 系统响应 turn 头：机器人头像 +「本轮返回了什么」一句话摘要（ANSWER/成果/交付判定） */
 function sysTurnHeader(round,tools,work){
@@ -396,6 +410,52 @@ function panelHTML(kind,round,items,open){
       <span class="arr">▼</span>
     </div>
     <div class="panel-body">${items.map(itemHTML).join("")}</div>
+  </section>`;
+}
+/* ── ARTEX MessageBlock 语义：同一 worker 连续 assistant 事件合并为单个
+   消息块（正文取最后一条结论），块头"· 含思考"提示；点击展开全部逐条。
+   相比逐条平铺，长任务对话从 44 行折叠成十余个可扫读的消息块。 ── */
+function workPanelHTML(round,items,open){
+  /* 重排：把连续 assistant（同 worker 相邻、中间无工具/结算/规划事件）合并 */
+  const groups=[];
+  for(const i of items){
+    const isAsst=i.t==="ev"&&i.o.type==="assistant";
+    const last=groups[groups.length-1];
+    if(isAsst&&last&&last.type==="msg"&&last.items[last.items.length-1].o.actor===i.o.actor)
+      last.items.push(i);
+    else groups.push(isAsst?{type:"msg",items:[i]}:{type:"one",item:i});
+  }
+  const html=groups.map(g=>{
+    if(g.type==="one")return itemHTML(g.item);
+    const its=g.items, last=its[its.length-1].o, first=its[0].o;
+    const key=`${state.jobId}:msg:${first.seq}`;
+    const open2=state.openKeys.has(key);
+    const body=last.payload||{};
+    const nearCap=(body.content||"").length>=1990||its.some(x=>(x.o.payload.content||"").length>=1990);
+    return `<div class="msg-group" data-key="${key}">
+      <button class="msgg-head" data-act="msgg" data-key="${key}">
+        <span class="arr">▸</span>
+        <span class="robot">${ROBOT_SVG}</span>
+        <span class="abadge">${actorOf(last)}</span>
+        <span class="t">${fmtT(first.ts)}${its.length>1?`–${fmtT(last.ts)}`:""} · ${its.length} 段思考</span>
+        <span class="msgg-sum">${esc((body.content||"").split("\n")[0].slice(0,110))}</span>
+        <span class="hint">· 含推理</span>
+      </button>
+      <div class="msgg-body">
+        ${its.map(x=>{const p=x.o.payload||{};
+          return `<div class="msgg-item"><div class="a-head"><span class="robot">${ROBOT_SVG}</span><span class="abadge">${actorOf(x.o)}</span><span class="t">${fmtT(x.o.ts)} · 思考</span></div><div class="a-body">${mdRender(p.content)}</div>${(p.content||"").length>=1990?`<button class="detail-btn" data-detail="${x.o.seq}">查看全文</button>`:""}</div>`}).join("")}
+      </div>
+      ${nearCap?`<button class="detail-btn" data-detail="${last.seq}">查看末段全文</button>`:""}
+    </div>`;
+  }).join("");
+  return `<section class="work-panel ${open?"":"collapsed"}" data-r="${round.round}" data-panel="work">
+    <div class="panel-head" data-act="panel-toggle" data-r="${round.round}" data-panel="work">
+      <span class="panel-ic">${BRAIN_SVG}</span>
+      <b>系统响应 · 推理与规划</b>
+      <span class="panel-n">${items.length} 条记录</span>
+      <span class="arr">▼</span>
+    </div>
+    <div class="panel-body">${html}</div>
   </section>`;
 }
 function itemHTML(i){
@@ -740,9 +800,70 @@ function renderTaskPanel(){
 /* ── 对话条目分派：bash→终端卡 / write_file→文件卡 / 其余→通用工具日志 ── */
 function toolItemHTML(o){
   const name=o.call.payload.tool;
-  if(name==="bash")return termCardHTML(o.call,o.result);
+  if(name==="bash")return termRowHTML(o.call,o.result);
   if(name==="write_file")return fileCardHTML(o.call,o.result);
-  return toolLogHTML(o);
+  return toolRowHTML(o.call,o.result,name);
+}
+/* 工具命令摘要（ARTEX toolInputText 语义）：bash 抽 command 字段显示命令本身 */
+function toolCmdText(tool,args){
+  const a=parseArgs(args);
+  if(tool==="bash")return String(a.command||"");
+  if(tool==="read_file"||tool==="list_dir")return String(a.path||"");
+  return "";
+}
+/* 单行工具行（ARTEX ToolBlock 语义）：收起时一行摘要，点击展开参数+输出全文 */
+function toolRowHTML(call,result,tool){
+  const name=tool||call.payload.tool;
+  const key=`${state.jobId}:tl:${call.seq}`;
+  const open=state.openKeys.has(key);
+  const a=parseArgs(call.payload.args);
+  const cmd=toolCmdText(name,a);
+  const st=result?(result.payload.status==="ok"?"ok":"err"):"wait";
+  const stTxt=result?(result.payload.status==="ok"?"完成":result.payload.status):"执行中…";
+  const bytes=result?(result.payload.bytes||0):0;
+  const argsTxt=tryFmt(typeof call.payload.args==="string"?call.payload.args:JSON.stringify(call.payload.args));
+  const out=result?String(result.payload.preview||""):"";
+  const full=result?(result.payload.detail!=null?String(result.payload.detail):out):"";
+  COPY_BUF.set(key,`$ ${cmd}\n${out}`);
+  return `<div class="trow3 ${open?"open":""} ${result?"":"pending"}" data-key="${key}" data-seq="${call.seq}">
+    <button class="trow3-head" data-act="trow3" data-key="${key}">
+      <span class="arr">▸</span>
+      <span class="tname">${esc(name)}</span>
+      ${cmd?`<span class="tcmd" title="${esc(cmd)}">${esc(cmd)}</span>`:""}
+      <span class="tstat ${st}">${esc(stTxt)}${result?` · ${bytes}B`:""}</span>
+    </button>
+    <div class="trow3-body">
+      <span class="lbl">args · 调用参数</span><pre>${esc(argsTxt)}</pre>
+      ${result?`<span class="lbl">output · 响应结果</span><pre>${esc(out||"(空)")}</pre>${(result.payload.bytes||0)>480?`<button class="detail-btn" data-detail="${call.seq}">查看全文（${result.payload.bytes}B）</button>`:""}`:`<span class="lbl">executing · 执行中</span><pre>等待工具返回…</pre>`}
+    </div>
+  </div>`;
+}
+/* 终端执行行：与 toolRow 同一单行语义，但保留黑底终端体 */
+function termRowHTML(call,result){
+  const key=`${state.jobId}:tm:${call.seq}`;
+  const open=state.openKeys.has(key);
+  const a=parseArgs(call.payload.args);
+  const cmd=String(a.command||(typeof call.payload.args==="string"?call.payload.args:"")||"");
+  const st=result?(result.payload.status==="ok"?"ok":"err"):"wait";
+  const stTxt=result?(result.payload.status==="ok"?"完成":result.payload.status):"执行中…";
+  const bytes=result?(result.payload.bytes||0):0;
+  const out=result?String(result.payload.preview||""):"";
+  COPY_BUF.set(key,`$ ${cmd}\n${out}`);
+  return `<div class="term-card ${open?"open":""} ${result?"":"pending"}" data-key="${key}" data-seq="${call.seq}">
+    <button class="term-head" data-act="trow3" data-key="${key}">
+      <span class="arr">▸</span>
+      <span class="tlights"><i></i><i></i><i></i></span>
+      <span class="cmd-name">bash</span>
+      <span class="tcmd" title="${esc(cmd)}">${esc(cmd)}</span>
+      <span class="term-st ${st}">${esc(stTxt)}${result?` · ${bytes}B`:""}</span>
+      <span class="term-time">${fmtT(call.ts)}</span>
+      <span class="copy-btn" data-copy-key="${key}" data-copy-msg="终端内容已复制">复制</span>
+    </button>
+    <div class="term-body">
+      <pre class="term-cmd"><span class="ps1">$</span>${esc(cmd)}</pre>
+      ${result?`<pre class="term-out">${esc(out||"(无输出)")}</pre>${(result.payload.bytes||0)>480?`<button class="detail-btn" data-detail="${call.seq}">查看全文（${result.payload.bytes}B，输出已截断）</button>`:""}`:`<div class="term-wait"><span class="dots"><i></i><i></i><i></i></span>执行中…</div>`}
+    </div>
+  </div>`;
 }
 /* 终端执行：黑底 + 绿色左边框 + 等宽字体 + Copy（#0d1117 / font-mono） */
 function termCardHTML(call,result){

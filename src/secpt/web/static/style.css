@@ -738,3 +738,59 @@ pre.detail-full{max-height:420px}
 /* 详情抽屉富渲染 */
 .detail .dbody.rich{white-space:normal}
 .detail .dbody.rich .md{font-size:13.5px}
+
+/* ═══ ARTEX 交互对齐：单行工具行（收起一行摘要 / 点击展开全文） ═══ */
+.trow3{max-width:860px;margin:2px 0;border-radius:8px;font-size:12.5px;overflow:hidden}
+.trow3:hover{background:color-mix(in srgb,var(--bg3) 30%,transparent)}
+.trow3-head{display:flex;align-items:center;gap:8px;width:100%;padding:5px 12px;text-align:left;cursor:pointer;font-size:12.5px;color:var(--fg2);user-select:none}
+.trow3-head .arr{font-size:9px;color:var(--fg3);flex:none;transition:transform .15s}
+.trow3.open .trow3-head .arr{transform:rotate(90deg)}
+.trow3-head .tname{font-weight:600;color:var(--info);flex:none}
+.trow3-head .tcmd{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px var(--mono);color:var(--fg3)}
+.trow3-head .tstat{margin-left:auto;flex:none;font:10.5px var(--mono)}
+.trow3-head .tstat.ok{color:var(--c-ok)}
+.trow3-head .tstat.err{color:var(--c-bad)}
+.trow3-head .tstat.wait{color:var(--c-tool)}
+.trow3-body{display:none;border-top:1px solid var(--line);padding-bottom:6px}
+.trow3.open .trow3-body{display:block}
+.trow3-body .lbl{display:block;font:9.5px var(--mono);color:var(--fg3);letter-spacing:.12em;padding:8px 14px 0}
+.trow3-body pre{margin:0;padding:6px 14px 8px;font:11.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-all;color:var(--fg2);max-height:240px;overflow:auto}
+.trow3.pending{opacity:.75}
+
+/* 终端行：单行头部 + 可展开终端体 */
+.term-card .term-head{cursor:pointer}
+.term-card .term-head .arr{font-size:9px;color:#7D8590;flex:none;transition:transform .15s}
+.term-card.open .term-head .arr{transform:rotate(90deg)}
+.term-card .term-body{display:none}
+.term-card.open .term-body{display:block}
+.term-card.open{border-left-color:var(--c-tool)}
+.term-card:not(.open){border-left-color:color-mix(in srgb,var(--c-tool) 45%,transparent)}
+
+/* 用户气泡右对齐（ARTEX UserRow 语义） */
+.turn.user{flex-direction:row-reverse}
+.turn.user .turn-body{display:flex;flex-direction:column;align-items:flex-end}
+.turn.user .turn-cap.right{flex-direction:row-reverse;width:100%;justify-content:flex-start}
+.turn.user .ubub{border-left:0;border-right:3px solid var(--c-think);border-radius:12px 4px 4px 12px;text-align:left;max-width:85%}
+/* feed 底部实时流式指示（ARTEX live dots） */
+.feed-live{display:none;align-items:center;gap:8px;padding:4px 44px 0;font:10.5px var(--mono);color:var(--info);max-width:880px;margin:0 auto}
+.feed-live.show{display:flex}
+.feed-live .dots{display:inline-flex;gap:3px}
+.feed-live .dots i{width:4px;height:4px;border-radius:50%;background:var(--info);animation:bounce 1.2s infinite}
+.feed-live .dots i:nth-child(2){animation-delay:.15s}
+.feed-live .dots i:nth-child(3){animation-delay:.3s}
+
+/* ═══ ARTEX MessageBlock 对齐：连续思考合并块 ═══ */
+.msg-group{margin:2px 0;border-radius:8px}
+.msg-group:hover{background:color-mix(in srgb,var(--bg3) 25%,transparent)}
+.msgg-head{display:flex;align-items:center;gap:8px;width:100%;padding:5px 12px;text-align:left;cursor:pointer;font-size:12.5px;color:var(--fg2);user-select:none;background:none;border:0}
+.msgg-head .arr{font-size:9px;color:var(--fg3);flex:none;transition:transform .15s}
+.msg-group.open .msgg-head .arr{transform:rotate(90deg)}
+.msgg-head .robot{display:inline-flex;color:var(--c-think);flex:none}
+.msgg-head .abadge{flex:none}
+.msgg-head .t{flex:none;font:10.5px var(--mono);color:var(--c-time)}
+.msgg-head .msgg-sum{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
+.msgg-head .hint{flex:none;font-size:10px;color:var(--fg3)}
+.msgg-body{display:none;border-top:1px solid var(--line);padding:6px 0 4px}
+.msg-group.open .msgg-body{display:block}
+.msgg-item{padding:2px 12px}
+.msgg-item .a-body{font-size:13px;line-height:1.65;color:var(--fg)}
