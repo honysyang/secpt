@@ -72,6 +72,8 @@ EVENT_TYPES = {
     "loop_phase",  # 三档止损状态机档位迁移（nudged/wrapping/stalled，见 runtime/engine.py）
     "plan_event",  # v4 编排：Commander/规划轮结果（信念结算/决策/派单数）
     "intent_event",  # v4 编排：意图生命周期（领取/结算），任务池流转的轨迹层
+    "approval_request",  # 治理拦截 ask：待人工审批的命令（Web 对话内审批卡数据源）
+    "approval_decision",  # 治理拦截：审批结果（approved/denied/timeout，决策回执）
 }
 
 # 事件 payload 结构目录（结构化加固轮）：类型 → 必备 payload 键。
@@ -98,6 +100,8 @@ EVENT_CATALOG: dict[str, frozenset[str]] = {
     "tokens": frozenset({"prompt", "completion", "cost_cny"}),
     # verdict 由 evaluation 层直接 append（不经 write()），目录条目为存量文档
     "verdict": frozenset({"complete"}),
+    "approval_request": frozenset({"pending_id", "tool", "command", "rule"}),
+    "approval_decision": frozenset({"pending_id", "decision", "by"}),
     # 三档止损状态机（docs/设计-工作循环形态.md §2）：phase ∈ nudged/wrapping/stalled
     "loop_phase": frozenset({"phase"}),
     # 编排层事件（frontier 直写父流，非 EventSink 通道；catalog 登记保契约一致）

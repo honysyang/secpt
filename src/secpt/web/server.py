@@ -89,6 +89,9 @@ class SecptWebHandler(BaseHTTPRequestHandler):
                 self._send_json(api.overview_payload())
             elif path == "/api/assets":
                 self._send_json(api.assets_payload())
+            elif path.startswith("/api/findings/") and path.endswith("/evidence"):
+                fid = path[len("/api/findings/") : -len("/evidence")]
+                self._send_json(api.finding_evidence_payload(fid))
             elif path == "/api/findings":
                 self._send_json(api.findings_payload())
             elif path == "/api/tools":
@@ -252,6 +255,24 @@ class SecptWebHandler(BaseHTTPRequestHandler):
                 job_id = parsed.path[len("/api/jobs/") : -len("/cancel")]
                 result = api.cancel_task(job_id)
                 self._send_json(result, status=200 if result.get("ok") else 400)
+            elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/approve"):
+                job_id = parsed.path[len("/api/jobs/") : -len("/approve")]
+                body = self._read_body()
+                result = api.intercept_decide(
+                    str((body or {}).get("pending_id") or ""), True, job_id=job_id
+                )
+                self._send_json(result, status=200 if result.get("ok") else 400)
+            elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/deny"):
+                job_id = parsed.path[len("/api/jobs/") : -len("/deny")]
+                body = self._read_body()
+                result = api.intercept_decide(
+                    str((body or {}).get("pending_id") or ""), False, job_id=job_id
+                )
+                self._send_json(result, status=200 if result.get("ok") else 400)
+            elif parsed.path.startswith("/api/pending/"):
+                pid = parsed.path[len("/api/pending/") :]
+                result = api.intercept_pending_one(pid)
+                self._send_json(result, status=200 if not result.get("error") else 404)
             elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/message"):
                 job_id = parsed.path[len("/api/jobs/") : -len("/message")]
                 body = self._read_body()

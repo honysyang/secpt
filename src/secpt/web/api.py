@@ -631,6 +631,113 @@ def resume_task(job_id: str) -> dict:
     return {"ok": True, "resumed": True}
 
 
+def finding_evidence_payload(finding_id: str) -> dict:
+    """finding 的流量证据（ARTEX traffic-evidence-viewer 语义）：
+    list_for 绑定 + get_blob 还原 request/response 原文（http 文件风格）。"""
+    fid = str(finding_id or "").strip()
+    if not fid:
+        return {"error": "缺少 finding_id"}
+    with contextlib.suppress(Exception):
+        from secpt.evidence.store import EvidenceStore, try_parse_exchange
+
+        store = EvidenceStore()
+        out = []
+        for b in store.list_for(fid):
+            blob = store.get_blob(b["blob_hash"]) or b""
+            env = try_parse_exchange(blob)
+            item = {
+                "binding_id": b.get("id"),
+                "role": b.get("role") or "supporting",
+                "note": b.get("note") or "",
+                "ts": b.get("ts"),
+            }
+            if env:
+                item["url"] = env.get("url") or ""
+                item["method"] = env.get("method") or ""
+                item["status"] = env.get("status") or ""
+                req = env.get("request") or {}
+                resp = env.get("response") or {}
+
+                def _text(part):
+                    import base64 as _b
+
+                    raw = _b.b64decode(part.get("body_b64") or "") if part else b""
+                    return raw.decode("utf-8", errors="replace")[:20000]
+
+                hl = part_headers(req)
+                item["request"] = (
+                    f"{item['method']} {item['url']}\n"
+                    + "\n".join(hl)
+                    + ("\n\n" + _text(req) if _text(req) else "")
+                )
+                item["response"] = (
+                    f"HTTP {item['status']}\n"
+                    + "\n".join(part_headers(resp))
+                    + ("\n\n" + _text(resp) if _text(resp) else "")
+                )
+            else:
+                item["raw"] = blob.decode("utf-8", errors="replace")[:20000]
+            out.append(item)
+        return {"ok": True, "finding_id": fid, "evidence": out}
+    return {"ok": True, "finding_id": fid, "evidence": []}
+
+
+def part_headers(part: dict | None) -> list[str]:
+    """信封 headers（dict 或 list）→ "Key: Value" 行列表。"""
+    if not part:
+        return []
+    h = part.get("headers")
+    if isinstance(h, dict):
+        return [f"{k}: {v}" for k, v in h.items()]
+    if isinstance(h, list):
+        return [str(x) for x in h]
+    return []
+
+
+def intercept_pending_one(pending_id: str) -> dict:
+    """查一条审批（对话审批卡刷新真实状态用，防刷新后重复出按钮）。"""
+    from secpt.governance.intercept import Interceptor
+
+    ic = Interceptor()
+    with ic._conn() as c:
+        row = c.execute(
+            "SELECT * FROM intercept_pending WHERE id=?", (str(pending_id or ""),)
+        ).fetchone()
+    return dict(row) if row else {"error": "审批不存在"}
+
+
+def intercept_decide(pending_id: str, approved: bool, *, job_id: str = "") -> dict:
+    """审批决策（Web 对话审批卡的 允许/拒绝 按钮）：写 intercept 库 + 事件流回执。"""
+    from secpt.governance.intercept import Interceptor
+
+    pid = str(pending_id or "").strip()
+    if not pid:
+        return {"error": "缺少 pending_id"}
+    ic = Interceptor()
+    row = intercept_pending_one(pid)
+    if row.get("error"):
+        return {"error": "审批不存在"}
+    if row.get("status") != "pending":
+        return {"ok": True, "status": row.get("status"), "already": True}
+    ic.decide(pid, approved, by="human")
+    # 决策回执入任务事件流（审批卡在对话里翻转为已允许/已拒绝）
+    jid = str(job_id or row.get("job_id") or "")
+    if jid:
+        with contextlib.suppress(Exception):
+            from secpt.core.job.event import EventSink
+            from secpt.core.job.resume import jobs_dir
+
+            EventSink(jid, jobs_dir()).write(
+                "approval_decision",
+                {
+                    "pending_id": pid,
+                    "decision": "approved" if approved else "denied",
+                    "by": "human",
+                },
+            )
+    return {"ok": True, "status": "approved" if approved else "denied"}
+
+
 def delete_job(job_id: str) -> dict:
     """删除任务：运行中先协作式取消，再整树移除（root + 派生子任务；目录留存可归档）。"""
     from secpt.core.job.store import JobStore

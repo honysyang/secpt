@@ -298,6 +298,40 @@ function renderFeed(){
     if(e.target.closest("[data-copy-key]"))return;
     toggleFileCard(h.closest(".file-card"));
   });
+  $$("[data-approve]",feed).forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    try{
+      const r=await api(`/api/jobs/${encodeURIComponent(b.dataset.job)}/approve`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({pending_id:b.dataset.approve})});
+      if(r.ok){
+        appDecided.set(b.dataset.approve,"approved");
+        const card=b.closest(".approval-card");
+        if(card){
+          card.querySelector(".ap-btns")?.remove();
+          card.querySelector(".ap-row").insertAdjacentHTML("beforeend",'<span class="ap-badge approved">已允许</span>');
+        }
+        toast("已允许执行");
+      }else toast(r.error||"操作失败");
+    }catch(err){toast("操作失败："+err.message);b.disabled=false}
+  });
+  $$("[data-deny]",feed).forEach(b=>b.onclick=async()=>{
+    b.disabled=true;
+    try{
+      const r=await api(`/api/jobs/${encodeURIComponent(b.dataset.job)}/deny`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({pending_id:b.dataset.deny})});
+      if(r.ok){
+        appDecided.set(b.dataset.deny,"denied");
+        const card=b.closest(".approval-card");
+        if(card){
+          card.querySelector(".ap-btns")?.remove();
+          card.querySelector(".ap-row").insertAdjacentHTML("beforeend",'<span class="ap-badge denied">已拒绝</span>');
+        }
+        toast("已拒绝执行");
+      }else toast(r.error||"操作失败");
+    }catch(err){toast("操作失败："+err.message);b.disabled=false}
+  });
   $$("[data-detail]",feed).forEach(b=>b.onclick=async()=>{
     const seq=+b.dataset.detail;
     b.disabled=true;
@@ -458,6 +492,31 @@ function workPanelHTML(round,items,open){
     <div class="panel-body">${html}</div>
   </section>`;
 }
+/* 审批卡（ARTEX InterceptCard 对齐）：拦截 ask 请求内嵌对话流，
+   允许/拒绝直接在对话里点；按钮点击后立即翻转为决策态。 */
+function approvalCardHTML(e){
+  const p=e.payload||{};
+  const pid=esc(p.pending_id||"");
+  const state=state2=>state2;
+  const decided=appDecided.get(p.pending_id||"");
+  return `<div class="approval-card turn-item" data-seq="${e.seq}" data-pending="${pid}">
+    <div class="ap-row">
+      <span class="ap-ic">🛡</span>
+      <div class="ap-main">
+        <div class="ap-title"><b>审批请求</b><code>${esc(p.tool||"")}</code><span class="ap-id">#${esc(String(p.pending_id||"").replace(/^icp-/,""))}</span></div>
+        <pre class="ap-cmd">${esc(p.command||"")}</pre>
+      </div>
+      ${decided?`<span class="ap-badge ${decided}">${decided==="approved"?"已允许":"已拒绝"}</span>`
+        :`<div class="ap-btns">
+            <button class="ap-allow" data-approve="${pid}" data-job="${esc(e.job_id||state.jobId)}">允许</button>
+            <button class="ap-deny" data-deny="${pid}" data-job="${esc(e.job_id||state.jobId)}">拒绝</button>
+          </div>`}
+    </div>
+    <div class="ap-foot">规则：${esc(p.rule||"")} · 等待审批中（超时按规则处理）</div>
+  </div>`;
+}
+const appDecided=new Map();  // pending_id → approved|denied（页面内存；刷新后靠回执事件）
+function renderFeed2(){}
 function itemHTML(i){
   if(i.t==="tool")return toolItemHTML(i.o);
   const e=i.o,p=e.payload||{};
@@ -477,6 +536,13 @@ function itemHTML(i){
   }
   if(e.type==="loop_phase"){
     return `<div class="sysnote turn-item" data-seq="${e.seq}">phase → ${esc(p.phase)}${p.reason?`（${esc(p.reason)}）`:""}</div>`;
+  }
+  if(e.type==="approval_request"){
+    return approvalCardHTML(e);
+  }
+  if(e.type==="approval_decision"){
+    // 决策回执：更新同 pending 的卡片状态（若在视口内）
+    return `<div class="sysnote turn-item" data-seq="${e.seq}" data-approval="${esc(p.pending_id)}">审批 ${p.decision==="approved"?"已允许":"已拒绝"} · ${fmtT(e.ts)}</div>`;
   }
   if(e.type==="status_change"){
     return `<div class="sysnote turn-item" data-seq="${e.seq}">status → ${esc(p.status)}</div>`;
@@ -1663,6 +1729,24 @@ function openFinding(f){
   if(!f)return;
   openDetail(f.title,`${f.id} · ${f.severity} · ${f.status} · 置信度 ${((f.confidence||0)*100).toFixed(0)}%`,
     `${f.description||"(无描述)"}\n\n—— 目标：${f.target}\n来源任务：${f.job_id}${f.cwe?"\nCWE："+f.cwe:""}`,{md:true});
+  /* 流量证据查看器（ARTEX traffic-evidence-viewer 语义）：绑定的 HTTP 交换
+     以 request/response 原文折叠呈现（role 标注 baseline/proof/…） */
+  api(`/api/findings/${encodeURIComponent(f.id)}/evidence`).then(d=>{
+    if(!d||!d.ok||!(d.evidence||[]).length)return;
+    const body=$("#fd-body");
+    if(!body||!body.classList.contains("rich"))return;
+    const wrap=document.createElement("div");
+    wrap.className="ev-wrap";
+    wrap.innerHTML=`<div class="ev-cap">流量证据 · ${d.evidence.length} 条</div>`+
+      d.evidence.map((ev,i)=>`<details class="ev-item"${ev.role==="proof"?" open":""}>
+        <summary><span class="ev-role r-${esc(ev.role)}">${esc(ev.role)}</span>
+          <span class="ev-url">${esc((ev.method||"")+" "+(ev.url||ev.raw?.slice(0,60)||""))}</span></summary>
+        ${ev.request?`<pre class="ev-req">${esc(ev.request)}</pre>`:""}
+        ${ev.response?`<pre class="ev-res">${esc(ev.response)}</pre>`:""}
+        ${!ev.request&&!ev.response&&ev.raw?`<pre class="ev-req">${esc(ev.raw)}</pre>`:""}
+      </details>`).join("");
+    body.appendChild(wrap);
+  }).catch(()=>{});
 }
 function openDetail(title,meta,bodyText,{md=false}={}){
   $("#fd-title").textContent=title;$("#fd-meta").textContent=meta;

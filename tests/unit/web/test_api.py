@@ -579,3 +579,39 @@ def test_event_detail_lazy_load(env) -> None:
     assert d["ok"] is True and len(d["detail"]) == 2000
     # 无记录 seq → 报错
     assert "error" in api.event_detail_payload("det-1", 999)
+
+
+def test_intercept_decide_flow(env) -> None:
+    """Web 审批：pending 落库 → /allow 决策 → 状态翻转 + 事件回执。"""
+
+    from secpt.governance.intercept import Interceptor
+
+    ic = Interceptor()
+    pid = "icp-test0001"
+    with ic._conn() as c:
+        c.execute(
+            "INSERT INTO intercept_pending (id,job_id,target,preview,rule_id,rule_name,status,ts)"
+            " VALUES (?,?,?,?,?,?,'pending',?)",
+            (pid, "job-ap", "bash", "curl https://x", 1, "外连命令（已放行；如需收紧改 ask）", 0),
+        )
+
+    ok = api.intercept_decide(pid, True, job_id="job-ap")
+    assert ok.get("ok") is True and ok.get("status") == "approved"
+    # 已决策：重复决策返回 already（幂等）
+    again = api.intercept_decide(pid, False, job_id="job-ap")
+    assert again.get("already") is True
+    # 决策回执落任务事件流（jsonl 侧读取，避免直接依赖 JobStore 库文件名）
+    import json as _j
+
+    from secpt.core.job.resume import jobs_dir
+
+    ev_file = jobs_dir() / "job-ap" / "events.jsonl"
+    rows = [_j.loads(ln) for ln in ev_file.read_text().splitlines() if ln.strip()]
+    decisions = [e for e in rows if e.get("type") == "approval_decision"]
+    assert decisions and decisions[0]["payload"]["decision"] == "approved"
+
+
+def test_finding_evidence_payload_empty(env) -> None:
+    assert api.finding_evidence_payload("") == {"error": "缺少 finding_id"}
+    d = api.finding_evidence_payload("no-such")
+    assert d.get("ok") is True and d.get("evidence") == []

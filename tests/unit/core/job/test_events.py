@@ -100,6 +100,8 @@ def test_hooks_all_wired(tmp_path):
         "loop_phase",  # 三档止损状态机档位迁移（设计 §2）
         "plan_event",  # v4 编排：Commander/规划轮结果（frontier 父流直写）
         "intent_event",  # v4 编排：意图生命周期（领取/结算轨迹）
+        "approval_request",  # 治理拦截 ask：待审批命令（Web 审批卡数据源）
+        "approval_decision",  # 治理拦截：审批结果回执
     } == EVENT_TYPES
 
 

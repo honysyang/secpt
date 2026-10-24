@@ -296,6 +296,23 @@ class Interceptor:
                    VALUES (?,?,?,?,?,?, 'pending', ?)""",
                 (pid, job_id, tool, (command or "")[:200], rule["id"], rule["name"], time.time()),
             )
+        # 对话面板审批卡（ARTEX InterceptCard 语义）：pending 写 job 事件流，
+        # Web 端 SSE 即时收到并渲染 允许/拒绝 按钮；决策经 /api/jobs/{id}/approve
+        if job_id:
+            with contextlib.suppress(Exception):
+                from secpt.core.job.event import EventSink
+                from secpt.core.job.resume import jobs_dir
+
+                EventSink(job_id, jobs_dir()).write(
+                    "approval_request",
+                    {
+                        "pending_id": pid,
+                        "tool": tool,
+                        "command": (command or "")[:2000],
+                        "rule": rule["name"],
+                        "timeout_s": float(rule["timeout_s"] or 0),
+                    },
+                )
         print(
             f"[intercept] ⏸ 等待审批 #{pid} 规则[{rule['name']}]："
             f"{(command or '')[:80]}（secpt approve {pid} / deny）"

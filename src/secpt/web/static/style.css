@@ -794,3 +794,41 @@ pre.detail-full{max-height:420px}
 .msg-group.open .msgg-body{display:block}
 .msgg-item{padding:2px 12px}
 .msgg-item .a-body{font-size:13px;line-height:1.65;color:var(--fg)}
+
+/* ═══ 审批卡（ARTEX InterceptCard 对齐） ═══ */
+.approval-card{max-width:860px;margin:8px 0;border:1px solid color-mix(in srgb,var(--warn) 55%,transparent);background:color-mix(in srgb,var(--warn) 8%,transparent);border-radius:10px;padding:11px 13px}
+.approval-card .ap-row{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.approval-card .ap-ic{flex:none;font-size:14px}
+.approval-card .ap-main{min-width:0;flex:1}
+.approval-card .ap-title{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.approval-card .ap-title b{color:var(--warn)}
+.approval-card .ap-title code{font:11px var(--mono);background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn);border-radius:4px;padding:1px 7px}
+.approval-card .ap-id{font:10px var(--mono);color:var(--fg3)}
+.approval-card .ap-cmd{margin:6px 0 0;font:11.5px/1.6 var(--mono);color:var(--fg2);white-space:pre-wrap;word-break:break-all;background:var(--term-bg);border-radius:6px;padding:8px 10px;max-height:120px;overflow:auto}
+.approval-card .ap-btns{display:flex;gap:8px;flex:none;margin-left:auto}
+.approval-card .ap-allow,.approval-card .ap-deny{font-size:12px;padding:4px 14px;border-radius:7px;cursor:pointer;border:1px solid transparent}
+.approval-card .ap-allow{background:var(--c-ok);color:#fff}
+.approval-card .ap-allow:hover{opacity:.88}
+.approval-card .ap-deny{background:transparent;color:var(--c-bad);border-color:var(--c-bad)}
+.approval-card .ap-deny:hover{background:color-mix(in srgb,var(--c-bad) 12%,transparent)}
+.approval-card .ap-badge{flex:none;font:600 11px var(--ui);border-radius:5px;padding:3px 10px}
+.approval-card .ap-badge.approved{background:color-mix(in srgb,var(--c-ok) 18%,transparent);color:var(--c-ok)}
+.approval-card .ap-badge.denied{background:color-mix(in srgb,var(--c-bad) 15%,transparent);color:var(--c-bad)}
+.approval-card .ap-foot{font-size:10.5px;color:var(--fg3);margin-top:7px}
+
+/* ═══ 流量证据查看器（ARTEX traffic-evidence-viewer 对齐） ═══ */
+.ev-wrap{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+.ev-wrap .ev-cap{font:10.5px var(--mono);color:var(--c-time);letter-spacing:.1em;margin-bottom:8px;text-transform:uppercase}
+.ev-item{border:1px solid var(--line);border-radius:8px;margin-bottom:8px;overflow:hidden;background:var(--bg2)}
+.ev-item summary{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font:11px var(--mono);color:var(--fg2);list-style:none;user-select:none}
+.ev-item summary::-webkit-details-marker{display:none}
+.ev-item summary:hover{background:var(--bg3)}
+.ev-role{flex:none;border-radius:4px;padding:0 7px;font-size:10px;line-height:16px;color:#fff}
+.ev-role.r-proof{background:var(--c-ok)}
+.ev-role.r-baseline{background:var(--c-time)}
+.ev-role.r-verification{background:var(--info)}
+.ev-role.r-supporting{background:var(--agent)}
+.ev-item .ev-url{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
+.ev-item .ev-req,.ev-item .ev-res{margin:0;padding:9px 12px;font:11.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto}
+.ev-item .ev-req{background:var(--term-bg);color:#9DA7B3;border-top:1px solid var(--line)}
+.ev-item .ev-res{background:#0D1117;color:#C9D1D9;border-top:1px dashed var(--line)}
