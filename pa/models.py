@@ -198,8 +198,10 @@ EventType = Literal[
     "task.created", "task.state_changed", "task.dispatched",
     "decision.made", "action.started", "action.finished", "action.blocked",
     "evidence.stored", "clue.added", "finding.proposed", "finding.adjudicated",
-    "worker.returned", "mentor.intervened", "restart.decided",
+    "worker.returned", "mentor.intervened", "mentor.advisory",
+    "restart.decided",
     "budget.charged", "budget.warning", "human.directive", "model.switched",
+    "context.assembled",
 ]
 
 

@@ -56,7 +56,8 @@ def _ms(started: float) -> int:
 def _blocked(state: MissionState, writer: StoreWriter, tool_name: str,
              args: dict, task_id: str, reason: str, started: float) -> Outcome:
     writer.append("action.blocked", "gateway",
-                  {"tool": tool_name, "args": args, "reason": reason},
+                  {"tool": tool_name, "args": args, "reason": reason,
+                   "task_id": task_id},
                   f"blk:{fingerprint(tool_name, args)}:{task_id}")
     assert reason in BLOCKED_REASONS          # 封闭枚举，杜绝自由文本
     return Outcome(ok=False, blocked_reason=reason, duration_ms=_ms(started))
@@ -136,7 +137,8 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
     # 共用同一个 key 会被幂等去重吞掉，审计链断掉
     retry_no = state.meta.get("fp_attempts", {}).get(fp, 0) + 1
     writer.append("action.started", "gateway",
-                  {"tool": tool_name, "args": args, "fp": fp},
+                  {"tool": tool_name, "args": args, "fp": fp,
+                   "task_id": task_id},
                   f"act:{fp}:{task_id}:r{retry_no}")
     ws = writer.root / _WORKSPACE
     ws.mkdir(exist_ok=True)
@@ -162,7 +164,8 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
     writer.append("evidence.stored", "gateway",
                   {"id": ev, "task_id": task_id}, f"ev:{ev}")
     writer.append("action.finished", "gateway",
-                  {"fp": fp, "exit": out.exit_code, "evidence": ev},
+                  {"fp": fp, "exit": out.exit_code, "evidence": ev,
+                   "task_id": task_id},
                   f"fin:{fp}:{task_id}:r{retry_no}")
     if out.exit_code != 0:
         # §6.5.1 失败计数：与 derive_stats 的账本口径同步累加（裁定 2：

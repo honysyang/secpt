@@ -19,6 +19,7 @@ from pa.core.worker import run_worker
 from pa.graph.ready import promote_pending, ready_tasks, revive_blocked
 from pa.graph.state import transition
 from pa.models import Adjudication, MissionState
+from pa.policy import coach
 from pa.runtime.lease import make_lease
 from pa.store.event import apply_event
 from pa.store.writer import StoreWriter
@@ -47,6 +48,8 @@ def round(state: MissionState, writer: StoreWriter, llm, assets) -> None:
     # 7) JEV sweep：本轮新产生的 + 历轮漏判的 finding 一并裁决（规则在
     #    pa/adjudicate，这里只编排与落账）
     jev_sweep(state, writer)
+    # 8) 教练检查（S12）：shadow 只 advise，enforce 追加三个动作之一
+    coach.on_round(state, writer)
 
 
 def _dispatch(task, state: MissionState, writer: StoreWriter, llm, assets) -> None:

@@ -52,6 +52,18 @@ def assemble(phase: str, state: MissionState, payload: dict,
     return system, _fit(sections, MAX_CTX_CHARS)
 
 
+def section_sizes(phase: str, state: MissionState, payload: dict,
+                  assets: AssetSnapshot) -> dict:
+    """各段尺寸与占比（S13 context.assembled 用）：只记数字，不记正文——
+    不记目标、不记凭据。"""
+    secs = render_sections(phase, state, payload, assets)
+    total = sum(len(t) for t in secs.values())
+    return {"total_chars": total,
+            "sections": {k: {"chars": len(t),
+                             "pct": round(len(t) / total, 4) if total else 0.0}
+                         for k, t in sorted(secs.items())}}
+
+
 # 参与全局裁剪的段及其方式（约束 C：线索 → 经验 → 任务细节，其余不裁）
 _TRIM_ORDER = {"clues": "head", "lessons": "head", "task": "tail"}
 

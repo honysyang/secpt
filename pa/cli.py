@@ -18,6 +18,8 @@ from pa.errors import SecptError
 from pa.infra.llm import load_client
 from pa.models import MissionSpec
 from pa.report import render_report
+from pa.report import stats as stats_mod
+from pa.report import trace as trace_mod
 from pa.runtime import run
 from pa.store.view import StoreView
 
@@ -36,10 +38,22 @@ def main(argv=None) -> int:
     p_resume.add_argument("dir")
     p_report = sub.add_parser("report", help="渲染证据链报告 report.md")
     p_report.add_argument("dir")
+    p_trace = sub.add_parser("trace", help="只读还原 mission 执行轨迹（不产生事件）")
+    p_trace.add_argument("dir")
+    p_trace.add_argument("--step", type=int, help="只看某个超级步")
+    p_trace.add_argument("--task", help="只看某个任务")
+    p_trace.add_argument("--json", action="store_true", help="结构化输出")
+    p_stats = sub.add_parser("stats", help="跨 mission 聚合统计与调参建议")
+    p_stats.add_argument("dirs", nargs="+")
+    p_stats.add_argument("--json", action="store_true", help="结构化输出")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "report":
             return _report(args.dir)
+        if args.cmd == "trace":
+            return _trace(args)
+        if args.cmd == "stats":
+            return _stats(args)
         return _run_mission(args)
     except SecptError as e:
         print(f"secpt: {e}", file=sys.stderr)
@@ -79,6 +93,24 @@ def _report(d: str) -> int:
     out = root / "report.md"
     out.write_text(text, encoding="utf-8")
     print(f"报告已写入 {out}")
+    return 0
+
+
+def _trace(args) -> int:
+    tr = trace_mod.build(args.dir, step=args.step, task=args.task)
+    if args.json:
+        print(trace_mod.render_json(tr), end="")
+    else:
+        print(trace_mod.render_text(tr, root=args.dir), end="")
+    return 0
+
+
+def _stats(args) -> int:
+    rows = [stats_mod.collect(d) for d in args.dirs]
+    if args.json:
+        print(stats_mod.render_json(rows), end="")
+    else:
+        print(stats_mod.render(rows), end="")
     return 0
 
 

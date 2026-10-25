@@ -19,6 +19,8 @@ def derive_stats(events: Iterable[Event]) -> dict[str, Any]:
     plan_rewrites = 0
     planned = 0
     virtual_success = 0
+    worker_returns = 0
+    failures_by_class: dict[str, int] = {}
     restarts: dict[str, int] = {}
     fp_attempts: dict[str, int] = {}
     for ev in events:
@@ -39,6 +41,12 @@ def derive_stats(events: Iterable[Event]) -> dict[str, Any]:
             if not ev.payload.get("cached") and int(ev.payload.get("exit", 0)) != 0:
                 fp = str(ev.payload.get("fp", ""))
                 fp_attempts[fp] = fp_attempts.get(fp, 0) + 1
+        elif t == "worker.returned":
+            worker_returns += 1
+            failure = ev.payload.get("failure")
+            if failure:
+                cls = str(failure.get("cls", "?"))
+                failures_by_class[cls] = failures_by_class.get(cls, 0) + 1
         elif t == "task.state_changed":
             to = ev.payload.get("to")
             frm = ev.payload.get("from")
@@ -51,7 +59,9 @@ def derive_stats(events: Iterable[Event]) -> dict[str, Any]:
         "no_progress_steps": no_progress,
         "plan_rewrites": plan_rewrites,
         "restarts_same_task": max(restarts.values()) if restarts else 0,
-        "virtual_success_count": virtual_success,
+        "virtual_success_count": virtual_success,   # vs_events：按事件计（教练用）
+        "worker_returns": worker_returns,
+        "failures_by_class": dict(sorted(failures_by_class.items())),
         "planned": planned,
         "fp_attempts": fp_attempts,
     }

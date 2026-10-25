@@ -48,6 +48,8 @@ def run(root, spec: MissionSpec | None = None, *, llm=None,
     cursor = [0]                              # llm.calls 消费位
     started = time.monotonic()
     while True:
+        if state.finished:
+            break                     # enforce 下 mentor 可能已提前收口
         reason = check_termination(state)
         if reason:
             _finish(state, writer, reason)

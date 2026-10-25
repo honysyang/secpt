@@ -17,7 +17,7 @@ import hashlib
 import json
 from collections import deque
 
-from pa.core.context import assemble
+from pa.core.context import assemble, section_sizes
 from pa.core.delegate import compile_briefing
 from pa.core.reflect import (
     classify_blocked, criteria_met, extract_clues, is_progress,
@@ -65,6 +65,13 @@ def run_worker(task: Task, state, writer: StoreWriter, llm, assets) -> WorkerRes
         payload["clues"] = brief["relevant_clues"]
         payload["untrusted_data"] = list(untrusted)   # 约束 A：运行时累积
         system, user = assemble("worker", state, payload, assets)
+        # S13 观测事件：只记各段尺寸与占比——不记正文、不记目标、不记凭据，
+        # 供 stats 的 prompts 斜率 / worker 步数分布使用
+        writer.append("context.assembled", f"worker:{task.id}",
+                      {"task_id": task.id, "attempt": task.attempt,
+                       "step": steps_done, "phase": "worker",
+                       **section_sizes("worker", state, payload, assets)},
+                      f"ctx:{task.id}:{task.attempt}:{steps_done}")
         try:
             raw = complete_retry(llm, retries=1, system=system, user=user,
                                  schema=Decision, phase="worker")

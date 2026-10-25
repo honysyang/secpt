@@ -48,6 +48,8 @@ _EXPECT_META = {
     "plan_rewrites": 1,
     "restarts_same_task": 2,
     "virtual_success_count": 1,
+    "worker_returns": 0,
+    "failures_by_class": {},
     "planned": 3,
     "fp_attempts": {},             # §6.5.1：无 action.finished 失败记录
 }
