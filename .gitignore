@@ -1,19 +1,14 @@
 # --- Python ---
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
 .venv/
 venv/
-env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-.tox/
-.nox/
 dist/
 build/
 *.egg-info/
@@ -24,36 +19,19 @@ build/
 *.swp
 .DS_Store
 
-# --- secpt runtime ---
-data/graphstore.sqlite
-data/graphstore.sqlite-journal
-data/runs/
-logs/
+# --- secpt v0 运行数据（事件账本 / 证据 / 报告，不入库） ---
+missions/
+
+# --- 密钥与本地配置（永不入库） ---
 .env
 .env.*
 !.env.example
-
-# --- scan artifacts ---
-tmp/
-artifacts/
-*.pcap
-
-# --- secpt runtime data（不入库） ---
-var/
-
-# 运行归档产物
-archive/runs/
-
-# --- 运行日志（不入库） ---
-tsec*-run-*.log
-*.run.log
-
-# --- 构建产物 ---
-*.tar.gz
-
-# --- 敏感凭证（永不入库） ---
 vpn/
 *.ovpn
 
-# --- 临时解压目录（zip 解包产物不入库，.zip 原始包保留） ---
-challenges/**/attachments/*.zip/
+# --- 杂项 ---
+logs/
+tmp/
+*.tar.gz
+tsec*-run-*.log
+*.run.log
