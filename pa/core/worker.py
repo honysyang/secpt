@@ -49,12 +49,14 @@ def run_worker(task: Task, state, writer: StoreWriter, llm, assets) -> WorkerRes
     untrusted: deque[dict] = deque(maxlen=UNTRUSTED_RING)
     history: dict[str, str] = {}                    # fp → stdout，判进展用
     produced: list = []
+    findings: list = []
     evidence_refs: list[str] = []
     no_progress = 0
     steps_done = 0
 
     def result(status, failure: Failure | None = None) -> WorkerResult:
         return WorkerResult(task_id=task.id, status=status, clues=produced,
+                            findings=findings,
                             evidence_refs=evidence_refs, tried=tried,
                             failure=failure, cost={"steps": steps_done},
                             confidence=0.9 if status == "done" else 0.5)
@@ -91,7 +93,8 @@ def run_worker(task: Task, state, writer: StoreWriter, llm, assets) -> WorkerRes
         tried.append(fp)
         out = execute(state, writer, tool_name=dec.tool, args=dec.args,
                       task_id=task.id,
-                      allowed_tools=task.allowed_tools)
+                      allowed_tools=task.allowed_tools,
+                      expect=dec.expect, rationale=dec.rationale)
         if out.blocked_reason:                    # 约束 D：立即返回
             if out.blocked_reason == "budget_exceeded":
                 # 裁定 1：budget_exceeded 不是失败——partial，无 Failure
@@ -105,7 +108,6 @@ def run_worker(task: Task, state, writer: StoreWriter, llm, assets) -> WorkerRes
         untrusted.append({"source": dec.tool, "data": _summarize(out)})
 
         new_clues = extract_clues(dec.tool, dec.args, out)
-        pre_keys = {c.key for c in state.clues}
         existing = {(c.key, json.dumps(c.value, ensure_ascii=False,
                                        sort_keys=True, default=str))
                     for c in state.clues}
@@ -123,11 +125,33 @@ def run_worker(task: Task, state, writer: StoreWriter, llm, assets) -> WorkerRes
                 existing.add((c.key, json.dumps(
                     c.value, ensure_ascii=False, sort_keys=True, default=str)))
                 produced.append(c)
+        # 确定性敏感暴露检测（规则兜底，不依赖模型自觉）：.git/config
+        # 这类路径返回 2xx/3xx 即提案 finding，交给 JEV 裁决
+        if dec.tool == "http" and out.evidence_id:
+            from pa.core.sensitive import sensitive_finding
+            f = sensitive_finding(str(dec.args.get("url") or ""),
+                                  out.exit_code, out.evidence_id)
+            if f is not None:
+                from pa.adjudicate.rules import finding_id
+                fev = writer.append(
+                    "finding.proposed", f"worker:{task.id}",
+                    {"finding": f.model_dump(mode="json")},
+                    f"find:{task.id}:{finding_id(f)}")
+                apply_event(state, fev)
+                findings.append(f)
 
-        if criteria_met(state.clues, task.success_criteria):
+        if criteria_met(state.clues, task.success_criteria, task_id=task.id):
             return result("done")
-        fresh = any(c.key not in pre_keys for c in new_clues)
-        if is_progress(out, dec.expect, new_clue=fresh, fp=fp,
+        # 信息增益（联调裁定）：catch-all 站点让「换个随机路径再试」
+        # 每次都产生新 key 的线索，旧规则把重复信息当进展、烧光步数。
+        # (kind, value) 已观测过 → 本条线索不含新信息。
+        pre_kv = {(c.kind, json.dumps(c.value, ensure_ascii=False,
+                                      sort_keys=True, default=str))
+                  for c in state.clues}
+        novel = any((c.kind, json.dumps(c.value, ensure_ascii=False,
+                                        sort_keys=True, default=str))
+                    not in pre_kv for c in new_clues)
+        if is_progress(out, dec.expect, new_clue=novel, fp=fp,
                        history=history):
             no_progress = 0
         else:

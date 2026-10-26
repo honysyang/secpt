@@ -110,10 +110,28 @@ def _render_brief(state: MissionState) -> str:
                     for a in spec.acceptance)
     tgts = "\n".join(f"- {t}" for t in spec.targets)
     scope = "\n".join(f"- {s}" for s in spec.allowed_scope) or "（空）"
+    # 意图/维度（do 立面起草）：空值不输出，旧 mission 行为逐字节不变
+    intent = f"intent: {spec.intent}\n" if spec.intent else ""
+    dims = ""
+    if spec.dimensions:
+        dims = ("## 评估维度\n"
+                + "\n".join(f"- {d}" for d in spec.dimensions) + "\n\n")
+    # 规划草案（do 立面起草）：空值不输出，旧 mission 行为逐字节不变
+    sketch = ""
+    if spec.plan_sketch:
+        sketch = ("## 规划草案（用户已确认，优先照此分解，可按证据修订）\n"
+                  + "\n".join(
+                      f"- {t.goal}"
+                      + (f"（{t.kind}）" if t.kind else "")
+                      + (f"——{t.why}" if t.why else "")
+                      for t in spec.plan_sketch) + "\n\n")
     return ("# 任务简报\n"
             f"mission: {state.mission_id}\n"
-            f"objective: {spec.objective}\n\n"
+            f"objective: {spec.objective}\n"
+            f"{intent}\n"
             f"## 目标清单\n{tgts}\n\n"
+            f"{dims}"
+            f"{sketch}"
             f"## 验收标准（不裁剪）\n{acc}\n\n"
             f"## 范围（不裁剪）\n{scope}")
 

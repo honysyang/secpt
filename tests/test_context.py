@@ -31,7 +31,7 @@ def _state(n_clues: int = 0) -> MissionState:
             "10.0.0.12:27017", "10.0.0.13:9200", "10.0.0.14:15672"],
         acceptance=[AcceptanceItem(
             id=f"a{i}", item=f"第 {i} 批目标的端口状态清单须逐条附证据引用",
-            evidence="port.open")
+            evidence="port.open", target="10.0.0.5")
             for i in range(1, 9)],
         budget=Budget(), allowed_scope=[
             "10.0.0.0/24:80", "10.0.0.0/24:443", "10.0.0.0/24:22",

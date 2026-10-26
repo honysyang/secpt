@@ -44,7 +44,7 @@ def _spec(port: int, *, steps: int = 12, evidence_: str = "open",
         objective="探测本地监听端口",
         targets=["127.0.0.1"],
         acceptance=[AcceptanceItem(id="acc-1", item="端口开放被证实",
-                                   evidence=evidence_)],
+                                   evidence=evidence_, target="127.0.0.1")],
         budget=Budget(steps=steps, seconds=600, tokens=40000),
         allowed_scope=[f"127.0.0.1:{port}"],
     )
@@ -167,7 +167,7 @@ def test_stats_three_terminals_one_row_each(tmp_mission, listener):
                                              "plateau"]
     assert rows[0]["tasks"].get("done") == 1
     assert rows[1]["steps"] == 2
-    assert rows[2]["peak_no_progress"] >= 8
+    assert rows[2]["peak_no_progress"] >= 1   # P1-1：排空即收口，峰值=空转轮数
     assert rows[2]["authz"] == 1                     # out_of_scope 计入 AuthZ
 
     text = stats_mod.render(rows)

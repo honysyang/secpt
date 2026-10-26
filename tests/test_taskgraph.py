@@ -37,7 +37,8 @@ def _mk(tid: str, **kw) -> Task:
 
 def _state(tasks: list[Task], mid: str = "m") -> MissionState:
     spec = MissionSpec(objective="o", targets=[],
-                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e")],
+                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e",
+                                                  target="x")],
                        budget=Budget(), allowed_scope=[])
     return MissionState(spec=spec, mission_id=mid, tasks={t.id: t for t in tasks})
 
@@ -98,7 +99,8 @@ def test_transition_replay_restores_lease_and_attempt(tmp_mission):
 
 def _write_mission(root) -> None:
     spec = MissionSpec(objective="o", targets=[],
-                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e")],
+                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e",
+                                                  target="x")],
                        budget=Budget(), allowed_scope=[])
     (root / "mission.json").write_text(spec.model_dump_json(), encoding="utf-8")
 

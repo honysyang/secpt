@@ -17,10 +17,10 @@ from pathlib import Path
 from pa.assets.snapshot import AssetSnapshot
 from pa.core.planner import bootstrap_plan
 from pa.errors import SecptError
+from pa import envs
 from pa.models import AcceptanceItem, MissionSpec, MissionState, now
 from pa.runtime import budget, scheduler
 from pa.runtime.recovery import resume
-from pa.store.derive import derive_stats
 from pa.store.event import apply_event
 from pa.store.view import StoreView
 from pa.store.writer import StoreWriter
@@ -57,11 +57,11 @@ def run(root, spec: MissionSpec | None = None, *, llm=None,
         scheduler.round(state, writer, llm, assets)
         budget.charge(state, writer, llm, cursor, started)
         started = time.monotonic()
-        # 行为参数每轮由账本重算（裁定 2：不依赖内存计数器，重启即一致）
-        state.meta.update(derive_stats(view.events(from_seq=1)))
+        # meta 由 scheduler.round 内重算（judge 后 coach 前，裁定 1.3）。
+        # 终态检查的 no_progress 因此滞后一个结算——纯时序差，账本口径不变
         writer.checkpoint(state)
-        die_at = os.environ.get("SECPT_DIE_AT_STEP")
-        if die_at and state.step == int(die_at):
+        die_at = envs.die_at_step()
+        if die_at is not None and state.step == die_at:
             os._exit(9)                       # 测试钩子：模拟第 N 步断电
     return state
 
@@ -94,8 +94,14 @@ def check_termination(state: MissionState) -> str | None:
         return "budget_tokens"
     if b.steps and state.step >= b.steps:
         return "budget_steps"
-    if not _has_retryable_work(state) and _acceptance_met(state):
+    if _acceptance_met(state):
+        # 裁定 1.1：只看验收达成——满足验收后无重试余地不再是前提，
+        # 否则队列里还有 ready 任务时会继续空跑烧预算
         return "completed"
+    if _queue_drained(state):
+        # P1-1：本轮无 ready 且无 running → 立即 plateau（原因随
+        # _plateau_reason 区分 thrashing / no_ready），不等 8 轮
+        return "plateau"
     if state.meta.get("no_progress_steps", 0) >= PLATEAU_LIMIT \
             and not _has_retryable_work(state):
         return "plateau"
@@ -119,12 +125,39 @@ def _plateau_reason(state: MissionState) -> str:
     return "no_ready"
 
 
+def _acceptance_hit(c, a: AcceptanceItem) -> bool:
+    """判定委托 pa.core.evidence_kinds.acceptance_hit（唯一出口，口径
+    见该函数 docstring）；此处保留包装以兼容既有调用与测试导入。"""
+    from pa.core.evidence_kinds import acceptance_hit
+    return acceptance_hit(c, a)
+
+
 def _acceptance_met(state: MissionState) -> bool:
-    return all(_item_met(state, a) for a in state.spec.acceptance)
+    """每项验收各自独立满足（AND）。target 把每项钉在特定对象上，
+    不再有「同族证据命中其一即可」的折叠——不同对象的同 kind 项是
+    不同的验收要求。空验收视为已满足（与旧 requirements_met 口径一致）。"""
+    return all(any(_acceptance_hit(c, a) for c in state.clues)
+               for a in state.spec.acceptance)
 
 
 def _item_met(state: MissionState, a: AcceptanceItem) -> bool:
-    return any(a.evidence in (c.key, str(c.value)) for c in state.clues)
+    return any(_acceptance_hit(c, a) for c in state.clues)
+
+
+def _queue_drained(state: MissionState) -> bool:
+    """队列排空（P1-1）：无可派发（无 ready）且无在跑（无 running），
+    也没有下一轮会重排队回来的失败任务 → 立即收口，不等 8 轮空烧预算。
+    P0-2 之后 deps 不再造成 pending 滞留；blocked（out_of_scope 等不可
+    复活）与 failed（尝试耗尽）都是永久态，留着它们不会改变任何事。"""
+    from pa.graph.ready import ready_tasks
+    if ready_tasks(state):              # 含依赖/前置已满足的 pending
+        return False
+    if any(t.state == "running" for t in state.tasks.values()):
+        return False
+    if any(t.state == "failed" and t.attempt < scheduler.MAX_ATTEMPTS
+           for t in state.tasks.values()):
+        return False                    # 下轮重排队，队列还会活
+    return True
 
 
 def _finish(state: MissionState, writer: StoreWriter, reason: str) -> None:

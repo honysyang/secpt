@@ -146,6 +146,10 @@ class Clue(BaseModel):
     evidence_id: str | None = None
     confidence: float = 0.8
     source_task: str | None = None
+    # 验收三要素之对象绑定（P1-2）：probe/http 线索必须带主机；path 仅
+    # http 类线索填充（None = 不区分路径）。shell/fs 类无对象线索保持 None。
+    target: str | None = None
+    path: str | None = None
 
 
 class FindingProposal(BaseModel):
@@ -199,7 +203,7 @@ EventType = Literal[
     "decision.made", "action.started", "action.finished", "action.blocked",
     "evidence.stored", "clue.added", "finding.proposed", "finding.adjudicated",
     "worker.returned", "mentor.intervened", "mentor.advisory",
-    "restart.decided",
+    "mentor.advisory_agg", "restart.decided",
     "budget.charged", "budget.warning", "human.directive", "model.switched",
     "context.assembled",
 ]
@@ -218,10 +222,26 @@ class Event(BaseModel):
 # ─────────────────────────── mission ───────────────────────────
 
 class AcceptanceItem(BaseModel):
+    """验收项必须绑定对象（P1-2）：target 必填，path 可选。
+
+    匹配是三要素 (evidence, target, path)：线索的 kind 命中 evidence，
+    且线索绑定的对象（主机 / 路径）与验收项一致——禁止只比 kind。
+    无对象证据类型（shell.ok / shell.error / fs.result）不得作验收。"""
     id: str
     item: str
     evidence: str
+    target: str
+    path: str | None = None
     judged_by: Literal["auto", "jev", "human"] = "auto"
+
+
+class PlanSketchItem(BaseModel):
+    """规划草案（do 立面）：LLM 在理解意图/维度后给出的任务分解设想，
+    展示给用户确认，并作为 planner 简报的引导（非强制——运行期计划仍由
+    planner 依据执行证据修订）。goal 必填；kind/why 可空。"""
+    goal: str
+    kind: str = ""
+    why: str = ""
 
 
 class MissionSpec(BaseModel):
@@ -233,6 +253,12 @@ class MissionSpec(BaseModel):
     deadline: datetime | None = None
     allowed_scope: list[str]         # CIDR:ports / host:ports
     max_workers: int = 4
+    # 意图理解（do 立面）：LLM 起草的意图摘要与评估维度，进 planner 简报
+    # 引导规划；空值 = 未起草（旧 mission.json 兼容，默认空）
+    intent: str = ""
+    dimensions: list[str] = Field(default_factory=list)
+    # 规划草案：同一次起草调用产出的任务分解设想（展示 + 简报引导）
+    plan_sketch: list[PlanSketchItem] = Field(default_factory=list)
 
 
 class MissionState(BaseModel):

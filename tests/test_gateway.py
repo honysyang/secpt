@@ -18,7 +18,8 @@ from pa.tools import REGISTRY, ToolSpec
 def _write_mission(root, scope=("10.0.0.0/24:80",)) -> None:
     spec = MissionSpec(
         objective="评估暴露面", targets=["10.0.0.5:80"],
-        acceptance=[AcceptanceItem(id="a1", item="端口清单", evidence="port.open")],
+        acceptance=[AcceptanceItem(id="a1", item="端口清单", evidence="port.open",
+                                   target="10.0.0.5")],
         budget=Budget(), allowed_scope=list(scope),
     )
     (root / "mission.json").write_text(spec.model_dump_json(), encoding="utf-8")
@@ -189,3 +190,18 @@ def test_fs_declares_no_network(tmp_mission):
     out = execute(state, w, tool_name="fs",
                   args={"op": "read", "path": "n.txt"}, task_id="t1")
     assert out.ok is True and out.stdout == "x" and out.evidence_id
+
+
+def test_scope_check_canonicalizes_url():
+    """回归真实联调事故：http 工具带 url=http://host/ 时被 partition(":")
+    切成 host="http" 而误判越界。规范化后 scheme 剥离、默认端口补齐。"""
+    from pa.gateway.execute import _canonical_target
+
+    assert _canonical_target("http://aimohu.com/", None) == "aimohu.com:80"
+    assert _canonical_target("https://aimohu.com/x?y=1", None) == \
+        "aimohu.com:443"
+    assert _canonical_target("https://aimohu.com:8443/", None) == \
+        "aimohu.com:8443"
+    assert _canonical_target("10.0.0.5", 80) == "10.0.0.5:80"
+    assert _canonical_target("10.0.0.5:22", 80) == "10.0.0.5:22"
+    assert _canonical_target("", None) == ""

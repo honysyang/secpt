@@ -17,12 +17,21 @@ WARN_RATIO = 0.8
 
 def charge(state: MissionState, writer: StoreWriter, llm, cursor: list,
            started: float) -> None:
-    """结算一个超级步：tokens 按本步 LLM 调用的 prompt 估算（纯函数），
-    seconds 按墙钟。cursor[0] 是 llm.calls 的消费位。"""
+    """结算一个超级步：tokens 优先取真实 API 返回的 usage（P0-1），
+    桩/无 usage 时退回 prompt 估算（纯函数）；seconds 按墙钟。
+    cursor[0] 是 llm.calls 的消费位。
+
+    P2-2：本轮零 LLM 调用（v0 里等价于零动作——worker 同步且每个决策
+    都过 LLM）时不写 budget.charged 结算事件：账本只记真实发生的结算，
+    空轮不污染 no_progress 口径，也不消耗步数序号。"""
     calls = getattr(llm, "calls", [])
     fresh = calls[cursor[0]:]
-    tokens = sum(llm.estimate_tokens(c["system"] + c["user"]) for c in fresh)
+    if not fresh:
+        return
     cursor[0] = len(calls)
+    tokens = sum(int(c.get("usage")
+                     or llm.estimate_tokens(c["system"] + c["user"]))
+                 for c in fresh)
     # idem 用 step+1 序号而非当前 step：resume 重放后 step 已是已结算值，
     # 用当前值会撞账本上同序号旧事件（重放即重结算）；序号跨中断跑法确定
     ev = writer.append(

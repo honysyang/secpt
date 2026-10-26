@@ -43,21 +43,41 @@ def classify_blocked(reason: str) -> FailureClass:
     return cls
 
 
-def criteria_met(clues: list[Clue], criteria: list[Criterion]) -> bool:
-    """判据只认证据类型，不接受形容词（models.Criterion 注释）：每条 required
-    判据都要有 key 或 value 命中的线索。"""
-    for c in criteria:
-        if not c.required:
-            continue
-        if not any(c.evidence in (cl.key, str(cl.value)) for cl in clues):
-            return False
-    return True
+def criteria_met(clues: list[Clue], criteria: list[Criterion],
+                 task_id: str | None = None) -> bool:
+    """判据语义（联调裁定）：判据表达的是「该问题已被探测并有了结论」，
+    不是「现实吻合模型事先的猜测」——同族证据互为印证（probe.open 的
+    判据被 probe.closed 线索满足 = 端口状态已确认；http.status.404 的
+    判据被 http.status.200 满足 = 状态已观测）。真实联调中模型猜
+    「443 关闭」而实际开放、猜「robots.txt 返回 404」而实际 200，
+    精确匹配让任务永远不可能成功，空烧预算。
+
+    task_id 给定（judge/worker  live 路径）时只比本任务线索与未归属
+    线索（source_task=None）：防止 A 任务的探测结果替 B 任务交差。
+    互斥同族的判据仍折叠成「命中其一即可」（requirement_groups）。"""
+    from pa.core.evidence_kinds import family_of, requirements_met
+
+    scoped = ([c for c in clues
+               if c.source_task is None or c.source_task == task_id]
+              if task_id is not None else clues)
+
+    def hit(e: str) -> bool:
+        for c in scoped:
+            if e in (c.kind, c.key, str(c.value)):
+                return True
+            fe, fc = family_of(e), family_of(c.kind)
+            if fe is not None and fe == fc:
+                return True
+        return False
+
+    return requirements_met([c.evidence for c in criteria if c.required],
+                            hit)
 
 
 def judge(task: Task, result: WorkerResult, state: MissionState) -> str:
     """CONTROL_PLANE §6.2 判定矩阵。返回 success | virtual_success |
     failure | false_failure | blocked | partial。"""
-    met = criteria_met(state.clues, task.success_criteria)
+    met = criteria_met(state.clues, task.success_criteria, task_id=task.id)
     if result.status == "done" and met:
         return "success"
     if result.status == "done" and not met:
@@ -108,24 +128,38 @@ def extract_clues(tool: str, args: dict, out) -> list[Clue]:
     - probe: open/closed 一条，key = target:port
     - http: 状态码一条，key = url
     - shell/fs: stdout 里 "key=value" 形式的行（最多 10 条）
+
+    kind 一律经 pa/core/evidence_kinds 的构造函数生成（点分枚举），
+    产出必须命中该工具在 TOOL_KIND_CHECKS 登记的白名单（契约测试）。
     """
+    from pa.core.evidence_kinds import http_kind, probe_kind, shell_kind
+    from urllib.parse import urlsplit
+
     stdout = out.stdout.decode("utf-8", "replace") if isinstance(
         out.stdout, bytes) else str(out.stdout)
     clues: list[Clue] = []
     if tool == "probe":
-        state = "open" if out.exit_code == 0 else "closed"
-        clues.append(Clue(kind="port",
+        kind = probe_kind(out.exit_code)
+        state = kind.split(".", 1)[1]          # value 与 kind 同源，不另拼
+        clues.append(Clue(kind=kind,
                           key=f"{args.get('target')}:{args.get('port')}",
                           value=state, evidence_id=out.evidence_id,
-                          confidence=0.9 if state == "open" else 0.7))
+                          confidence=0.9 if state == "open" else 0.7,
+                          target=str(args.get("target"))))
     elif tool == "http":
-        clues.append(Clue(kind="path", key=str(args.get("url")),
+        url = str(args.get("url"))
+        u = urlsplit(url)
+        clues.append(Clue(kind=http_kind(out.exit_code),
+                          key=url,
                           value=f"status={out.exit_code}",
-                          evidence_id=out.evidence_id))
+                          evidence_id=out.evidence_id,
+                          target=u.hostname or url,
+                          path=u.path or "/"))
     else:
+        kind = shell_kind(out.exit_code)
         for line in stdout.splitlines():
             if "=" in line and line[0].isalnum() and len(clues) < 10:
                 k, _, v = line.partition("=")
-                clues.append(Clue(kind="tool", key=k.strip(), value=v.strip(),
+                clues.append(Clue(kind=kind, key=k.strip(), value=v.strip(),
                                   evidence_id=out.evidence_id))
     return clues

@@ -57,7 +57,7 @@ def _setup(tmp_mission, steps=12):
     spec = MissionSpec(
         objective="o", targets=["10.0.0.5:80"],
         acceptance=[AcceptanceItem(id="a1", item="端口清单",
-                                   evidence="port.open")],
+                                   evidence="port.open", target="10.0.0.5")],
         budget=Budget(), allowed_scope=["10.0.0.0/24:80"])
     (tmp_mission / "mission.json").write_text(spec.model_dump_json(),
                                               encoding="utf-8")

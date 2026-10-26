@@ -44,7 +44,8 @@ def _spec(port: int) -> MissionSpec:
         objective="探测本地监听端口",
         targets=["127.0.0.1"],
         acceptance=[AcceptanceItem(id="acc-1", item="端口开放被证实",
-                                   evidence="never-ever-met")],
+                                   evidence="never-ever-met",
+                                   target="127.0.0.1")],
         budget=Budget(steps=12, seconds=600, tokens=40000),
         allowed_scope=[f"127.0.0.1:{port}"],
     )
@@ -80,7 +81,7 @@ def _dump(state):
 # ─────────────────────────── off / shadow ───────────────────────────
 
 def test_off_mode_zero_mentor_events(tmp_mission, listener, monkeypatch):
-    monkeypatch.setenv("PA_MENTOR_MODE", "off")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "off")
     d = tmp_mission / "m"
     llm = MockLLM({"planner": [_planner(listener)], "worker": [FINISH]})
     run(d, _spec(listener), llm=llm, assets=_freeze())
@@ -91,12 +92,12 @@ def test_off_mode_zero_mentor_events(tmp_mission, listener, monkeypatch):
 def test_shadow_byte_identical_to_off_with_advisories(tmp_mission, listener,
                                                       monkeypatch):
     # 同一 mission 两种模式各跑一遍（同名子目录，mission_id 一致才可比对）
-    monkeypatch.setenv("PA_MENTOR_MODE", "off")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "off")
     d_off = tmp_mission / "off" / "m"
     llm = MockLLM({"planner": [_planner(listener)], "worker": [FINISH]})
     s_off = run(d_off, _spec(listener), llm=llm, assets=_freeze())
 
-    monkeypatch.setenv("PA_MENTOR_MODE", "shadow")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "shadow")
     d_sh = tmp_mission / "shadow" / "m"
     llm = MockLLM({"planner": [_planner(listener)], "worker": [FINISH]})
     s_sh = run(d_sh, _spec(listener), llm=llm, assets=_freeze())
@@ -115,7 +116,7 @@ def test_shadow_byte_identical_to_off_with_advisories(tmp_mission, listener,
 
 def test_enforce_thrashing_supersede_replayable(tmp_mission, listener,
                                                 monkeypatch):
-    monkeypatch.setenv("PA_MENTOR_MODE", "enforce")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "enforce")
     d = tmp_mission / "m"
     llm = MockLLM({"planner": [_planner(listener)], "worker": [FINISH]})
     state = run(d, _spec(listener), llm=llm, assets=_freeze())
@@ -138,7 +139,7 @@ def test_plan_missing_criteria_shadow_advises_enforce_blocks(tmp_mission,
                                                             monkeypatch):
     bad_plan = _planner(listener, criteria=[], scope={"host": "127.0.0.1"})
 
-    monkeypatch.setenv("PA_MENTOR_MODE", "shadow")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "shadow")
     d_sh = tmp_mission / "sh" / "m"
     llm = MockLLM({"planner": [bad_plan], "worker": [FINISH]})
     s_sh = run(d_sh, _spec(listener), llm=llm, assets=_freeze())
@@ -146,7 +147,7 @@ def test_plan_missing_criteria_shadow_advises_enforce_blocks(tmp_mission,
     adv = [e for e in _events(d_sh) if e["type"] == "mentor.advisory"]
     assert any(e["payload"]["issue"] == "no_criteria" for e in adv)
 
-    monkeypatch.setenv("PA_MENTOR_MODE", "enforce")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "enforce")
     d_en = tmp_mission / "en" / "m"
     llm = MockLLM({"planner": [bad_plan], "worker": [FINISH]})
     s_en = run(d_en, _spec(listener), llm=llm, assets=_freeze())
@@ -160,7 +161,7 @@ def test_plan_missing_criteria_shadow_advises_enforce_blocks(tmp_mission,
 
 def test_threshold_change_changes_advisory_count(tmp_mission, listener,
                                                  monkeypatch):
-    monkeypatch.setenv("PA_MENTOR_MODE", "shadow")
+    monkeypatch.setenv("SECPT_MENTOR_MODE", "shadow")
     # 默认阈值：thrashing 信号触发（任务打满 3 次尝试）
     d1 = tmp_mission / "a" / "m"
     llm = MockLLM({"planner": [_planner(listener)], "worker": [FINISH]})

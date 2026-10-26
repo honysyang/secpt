@@ -133,7 +133,11 @@ def _satisfied(state):
 
 
 def _item_met(state, a) -> bool:
-    return any(a.evidence in (c.key, str(c.value)) for c in state.clues)
+    # 与主循环收口同一判定出口（evidence_kinds.acceptance_hit）——
+    # 旧的宽松比对（只看 key/value 撞 evidence）曾让同一账本出现
+    # 「收口说 3/6、报告说 0/6」的自相矛盾
+    from pa.core.evidence_kinds import acceptance_hit
+    return any(acceptance_hit(c, a) for c in state.clues)
 
 
 def _ref_line(view, ref: str) -> str:

@@ -63,18 +63,22 @@ def _blocked(state: MissionState, writer: StoreWriter, tool_name: str,
     return Outcome(ok=False, blocked_reason=reason, duration_ms=_ms(started))
 
 
-def _audit_cache_hit(writer: StoreWriter, fp: str, task_id: str,
+def _audit_cache_hit(writer: StoreWriter, tool: str, fp: str, task_id: str,
                      exit_code: int, ev: str | None, started: float) -> None:
     """命中去重仍落 action.finished{cached:true}，审计链不断（裁定 4）。
     idem key 每次命中唯一——每次 gateway 调用都是独立动作，不该互相吞。"""
     writer.append("action.finished", "gateway",
-                  {"fp": fp, "exit": exit_code, "evidence": ev, "cached": True},
+                  {"tool": tool, "fp": fp, "exit": exit_code, "evidence": ev,
+                   "cached": True, "task_id": task_id},
                   f"fin:{fp}:{task_id}:hit:{uuid.uuid4().hex[:12]}")
 
 
 def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
             args: dict, task_id: str,
-            allowed_tools: list[str] | None = None) -> Outcome:
+            allowed_tools: list[str] | None = None,
+            expect: str = "", rationale: str = "") -> Outcome:
+    """expect/rationale：worker 决策时的预期观察与理由，随 action.started
+    落账（思考链可读；空串兼容旧调用方与旧账本）。"""
     started = time.monotonic()
     spec = state.spec
 
@@ -93,9 +97,8 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
     # 参数名嗅探关闭安全检查；fs 这类本地工具在 ToolSpec 显式声明
     # requires_network=False）。范围在去重之前：缓存不得越过 scope。
     if REGISTRY[tool_name].requires_network:
-        tgt = str(args.get("target") or args.get("url") or "")
-        if args.get("port") and ":" not in tgt:
-            tgt = f"{tgt}:{args['port']}"      # probe 类工具 target/port 分参合并
+        tgt = _canonical_target(str(args.get("target") or args.get("url") or ""),
+                                args.get("port"))
         if not tgt:
             return _blocked(state, writer, tool_name, args, task_id,
                             "missing_target", started)
@@ -115,14 +118,15 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
         if prev_exit == 0:
             # 成功 → 永久缓存（mission 内）
             prev = writer.action_evidence(fp)
-            _audit_cache_hit(writer, fp, task_id, 0, prev, started)
+            _audit_cache_hit(writer, tool_name, fp, task_id, 0, prev, started)
             return Outcome(ok=True, cached=True, evidence_id=prev,
                            exit_code=0, duration_ms=_ms(started), risk=tier)
         attempts = state.meta.get("fp_attempts", {}).get(fp, 0)
         if attempts >= FAIL_RETRY_LIMIT:
             # 失败已重试 2 次：第 3 次起返回最后一次结果，不再执行
             prev = writer.action_evidence(fp)
-            _audit_cache_hit(writer, fp, task_id, prev_exit, prev, started)
+            _audit_cache_hit(writer, tool_name, fp, task_id, prev_exit, prev,
+                             started)
             last = evidence.get(writer.root, prev) if prev else {}
             return Outcome(ok=False, cached=True, cache_hit_exhausted=True,
                            evidence_id=prev,
@@ -138,7 +142,8 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
     retry_no = state.meta.get("fp_attempts", {}).get(fp, 0) + 1
     writer.append("action.started", "gateway",
                   {"tool": tool_name, "args": args, "fp": fp,
-                   "task_id": task_id},
+                   "task_id": task_id, "expect": expect,
+                   "rationale": rationale},
                   f"act:{fp}:{task_id}:r{retry_no}")
     ws = writer.root / _WORKSPACE
     ws.mkdir(exist_ok=True)
@@ -164,8 +169,8 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
     writer.append("evidence.stored", "gateway",
                   {"id": ev, "task_id": task_id}, f"ev:{ev}")
     writer.append("action.finished", "gateway",
-                  {"fp": fp, "exit": out.exit_code, "evidence": ev,
-                   "task_id": task_id},
+                  {"tool": tool_name, "fp": fp, "exit": out.exit_code,
+                   "evidence": ev, "task_id": task_id},
                   f"fin:{fp}:{task_id}:r{retry_no}")
     if out.exit_code != 0:
         # §6.5.1 失败计数：与 derive_stats 的账本口径同步累加（裁定 2：
@@ -178,6 +183,28 @@ def execute(state: MissionState, writer: StoreWriter, *, tool_name: str,
                    stdout=content["stdout"], stderr=content["stderr"],
                    exit_code=out.exit_code, duration_ms=_ms(started),
                    risk=tier)
+
+
+def _canonical_target(raw: str, port_arg) -> str:
+    """规范化成 host[:port] 供 in_scope 比对：
+    - URL（http://host/path、https://host:8443/x）剥 scheme 与路径，无显式
+      端口时按 scheme 补默认（80/443）——不规范化会被 partition(":") 切出
+      host="http" 而误判越界；
+    - probe 类 target/port 分参合并；
+    - 其余原样。"""
+    from urllib.parse import urlsplit
+
+    s = raw.strip()
+    if not s:
+        return ""
+    if s.startswith(("http://", "https://")):
+        u = urlsplit(s)
+        host = u.hostname or ""
+        port = u.port or (443 if u.scheme == "https" else 80)
+        return f"{host}:{port}" if host else ""
+    if port_arg and ":" not in s:
+        return f"{s}:{port_arg}"
+    return s
 
 
 def in_scope(target: str, allowed: list[str]) -> bool:

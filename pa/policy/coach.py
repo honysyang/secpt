@@ -1,5 +1,5 @@
-"""教练编排（S12 约束 A/C）：三档模式 PA_MENTOR_MODE=off|shadow|enforce，
-默认 shadow。
+"""教练编排（S12 约束 A/C）：三档模式 SECPT_MENTOR_MODE=off|shadow|enforce，
+默认 shadow（经 pa/envs 读取，环境变量一律 SECPT_ 前缀）。
 
 - off：零 mentor 事件；
 - shadow：判定照旧，只落 mentor.advisory（不投影状态——shadow 与 off
@@ -12,30 +12,45 @@ threshold{当前阈值} / would_do / target / converged_after（null，事后回
 """
 from __future__ import annotations
 
-import os
-
+from pa import envs
 from pa.models import MissionState, TaskDraft
 from pa.policy import intervene, review, signals
 from pa.policy.thresholds import THRESHOLDS
 from pa.store.writer import StoreWriter
 
-_MODES = ("off", "shadow", "enforce")
 _I4_CODES = ("no_criteria", "empty_scope", "dangling_dep")
 
 
 def mode() -> str:
-    m = os.environ.get("PA_MENTOR_MODE", "shadow").lower()
-    return m if m in _MODES else "shadow"
+    return envs.mentor_mode()
 
 
-def _advisory(writer: StoreWriter, *, level: str, issue: str,
-              metric: dict, threshold: dict, would_do: str,
-              target: str) -> None:
-    writer.append("mentor.advisory", "mentor",
-                  {"level": level, "issue": issue, "metric": metric,
-                   "threshold": threshold, "would_do": would_do,
-                   "target": target, "converged_after": None},
-                  f"adv:{issue}:{target}")
+def _advisory(state: MissionState, writer: StoreWriter, *, level: str,
+              issue: str, metric: dict, threshold: dict,
+              would_do: str, target: str) -> None:
+    """advisory 去重 + occurrences（裁定 1.4）：同 issue+target 只记一次
+    mentor.advisory，其后每次命中追加 mentor.advisory_agg{delta:1}；
+    两者重放后得到同一 occurrences，幂等键确定（无 uuid）。"""
+    from pa.store.derive import advisory_occurrences
+    from pa.store.event import apply_event
+    from pa.store.view import StoreView
+    key = f"{issue}:{target}"
+    # occurrences 不投影进 state.meta（否则 shadow 与 off 的状态 dump 不再
+    # 逐字节一致，违反 S12 验收一）：每次从账本现算，口径唯一且可重放
+    n = advisory_occurrences(
+        StoreView(writer.root).events(from_seq=1)).get(key, 0)
+    if n == 0:
+        ev = writer.append("mentor.advisory", "mentor",
+                           {"level": level, "issue": issue, "metric": metric,
+                            "threshold": threshold, "would_do": would_do,
+                            "target": target, "converged_after": None,
+                            "occurrences": 1},
+                           f"adv:{issue}:{target}")
+    else:
+        ev = writer.append("mentor.advisory_agg", "mentor",
+                           {"issue": issue, "target": target, "delta": 1},
+                           f"adv:{issue}:{target}:{n}")
+    apply_event(state, ev)
 
 
 def on_plan(state: MissionState, writer: StoreWriter,
@@ -53,13 +68,13 @@ def on_plan(state: MissionState, writer: StoreWriter,
     blocked_idx: set[int] = set()
     for iss in issues:
         if iss.code == "budget_too_large":
-            _advisory(writer, level="I3", issue=iss.code,
+            _advisory(state, writer, level="I3", issue=iss.code,
                       metric=dict(iss.detail),
                       threshold={"plan_budget_steps":
                                  THRESHOLDS["plan_budget_steps"]},
                       would_do="", target="plan")
             continue
-        _advisory(writer, level=iss.level, issue=iss.code,
+        _advisory(state, writer, level=iss.level, issue=iss.code,
                   metric=dict(iss.detail),
                   threshold={}, would_do="block_task",
                   target=f"plan#{iss.draft_index}")
@@ -79,7 +94,7 @@ def on_round(state: MissionState, writer: StoreWriter) -> None:
     if ta >= THRESHOLDS["thrashing_attempts"]:
         target = sorted((t for t in state.tasks.values()
                          if t.attempt == ta), key=lambda t: t.id)[0]
-        _advisory(writer, level="I2", issue="thrashing",
+        _advisory(state, writer, level="I2", issue="thrashing",
                   metric={"max_attempt": ta},
                   threshold={"attempts": THRESHOLDS["thrashing_attempts"]},
                   would_do="supersede", target=target.id)
@@ -92,17 +107,16 @@ def on_round(state: MissionState, writer: StoreWriter) -> None:
         metric = {"vs_events": int(meta.get("virtual_success_count", 0)),
                   "worker_returns": int(meta.get("worker_returns", 0)),
                   "vs_rate": round(vr, 4)}
-        _advisory(writer, level="I1", issue="vs_rate", metric=metric,
+        _advisory(state, writer, level="I1", issue="vs_rate", metric=metric,
                   threshold={"vs_rate": THRESHOLDS["vs_rate"]},
                   would_do="degrade_model", target="model")
         if m == "enforce":
-            import os as _os
-            fallback = _os.environ.get("SECPT_FALLBACK_MODEL", "fallback-model")
+            fallback = envs.get(envs.FALLBACK_MODEL, "fallback-model")
             intervene.degrade_model(state, writer, fallback, metric)
     # 信号三：authz_ratio → 提前收口（多数失败是越界时计划已失真）
     ar = signals.authz_ratio(meta)
     if ar > THRESHOLDS["authz_ratio"]:
-        _advisory(writer, level="I2", issue="authz_ratio",
+        _advisory(state, writer, level="I2", issue="authz_ratio",
                   metric={"authz_ratio": round(ar, 4),
                           "failures_by_class":
                           dict(meta.get("failures_by_class", {}))},

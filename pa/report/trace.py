@@ -89,7 +89,8 @@ def build(root, *, step: int | None = None, task: str | None = None) -> dict:
                {"tool": p.get("tool"), "fp": fp[:12]})
         elif t == "action.finished":
             fp = str(p.get("fp", ""))
-            tool = fp_tool.get(fp, "")
+            # P2-1：payload 自带 tool，直接采用；fp 配对只作旧账本回退
+            tool = p.get("tool") or fp_tool.get(fp, "")
             entry = {"tool": tool, "fp": fp[:12], "exit": p.get("exit"),
                      "evidence": p.get("evidence"), "cached": p.get("cached")}
             tl(t, p.get("task_id", _NO_TASK), entry)

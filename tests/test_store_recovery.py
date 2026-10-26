@@ -12,7 +12,8 @@ from pa.store.writer import StoreWriter
 def _write_mission_json(root) -> None:
     spec = MissionSpec(
         objective="评估暴露面", targets=["10.0.0.5:80"],
-        acceptance=[AcceptanceItem(id="a1", item="端口清单", evidence="port.open")],
+        acceptance=[AcceptanceItem(id="a1", item="端口清单", evidence="port.open",
+                                   target="10.0.0.5")],
         budget=Budget(), allowed_scope=["10.0.0.0/24:80"],
     )
     (root / "mission.json").write_text(spec.model_dump_json(), encoding="utf-8")
@@ -137,3 +138,33 @@ def test_evidence_view_layout(tmp_mission):
     assert v.evidence_meta(eid)["sha"] == sha
     assert v.evidence_verified(eid) is True
     assert v.evidence_verified("ev-" + "0" * 16) is False
+
+
+def test_event_log_is_append_only(tmp_mission):
+    """紧急裁定：events.jsonl 只允许追加，任何路径（含快照）不得原地
+    改写。after.startswith(before) 且长度严格增长。"""
+    spec = MissionSpec(objective="o", targets=["127.0.0.1"],
+                       acceptance=[AcceptanceItem(id="a", item="i",
+                                                  evidence="open",
+                                                  target="127.0.0.1")],
+                       budget=Budget(steps=4), allowed_scope=["127.0.0.1"])
+    (tmp_mission / "mission.json").write_text(spec.model_dump_json(),
+                                              encoding="utf-8")
+    from pa.models import MissionState
+    state = MissionState(spec=spec, mission_id=tmp_mission.name)
+    writer = StoreWriter(tmp_mission)
+    for i in range(3):
+        writer.append("task.state_changed", "engine",
+                      {"task_id": f"t{i}", "from": "pending", "to": "ready"},
+                      f"k{i}")
+    before = (tmp_mission / "events.jsonl").read_bytes()
+
+    writer.snapshot_now(state)          # 快照路径不得动账本
+    writer.checkpoint(state)
+    assert (tmp_mission / "events.jsonl").read_bytes() == before
+
+    writer.append("budget.charged", "engine", {"tokens": 1, "seconds": 1},
+                  "k3")
+    after = (tmp_mission / "events.jsonl").read_bytes()
+    assert after.startswith(before), "账本必须保持前缀（只追加）"
+    assert len(after) > len(before), "追加后长度必须严格增长"

@@ -56,7 +56,7 @@ def _spec(port: int, *, steps: int = 12, evidence: str = "open") -> MissionSpec:
         objective="探测本地监听端口",
         targets=["127.0.0.1"],
         acceptance=[AcceptanceItem(id="acc-1", item="端口开放被证实",
-                                   evidence=evidence)],
+                                   evidence=evidence, target="127.0.0.1")],
         budget=Budget(steps=steps, seconds=600, tokens=40000),
         allowed_scope=[f"127.0.0.1:{port}"],
     )
@@ -113,9 +113,11 @@ def test_step_budget_exhaustion_terminates_budget_steps(tmp_mission, listener):
 
 # ─────────────────────────── 3. 平台期 → plateau ───────────────────────────
 
-def test_plateau_terminates_after_8_clueless_rounds(tmp_mission, listener):
+def test_plateau_terminates_immediately_when_queue_drained(tmp_mission,
+                                                           listener):
     # worker 第一步就 out_of_scope 被拦（10.255.255.1 不在 allowed_scope），
-    # 任务 blocked 后无可派发，连续 8 轮无新线索 → plateau
+    # 任务 blocked 后队列排空（无 ready 且无 running）→ P1-1 立即 plateau，
+    # 不再等 8 轮空烧预算（原 8 轮等待语义随本裁定废除）
     bad = json.dumps({"kind": "call_tool", "tool": "probe",
                       "args": {"target": "10.255.255.1", "port": 80},
                       "expect": "x"}, ensure_ascii=False)
@@ -126,7 +128,7 @@ def test_plateau_terminates_after_8_clueless_rounds(tmp_mission, listener):
     assert state.finished
     assert state.finish_reason == "plateau"
     assert state.tasks["t-0001"].state == "blocked"
-    assert state.meta["no_progress_steps"] >= 8
+    assert state.step <= 2
     assert state.meta["plateau_reason"] == "no_ready"
 
 
@@ -162,7 +164,9 @@ def _spawn(args, env_extra=None):
 
 
 def test_die_at_step_and_resume_matches_uninterrupted(tmp_mission, listener):
-    spec = _spec(listener, evidence="never-ever-met", steps=4)
+    # P1-1 后队列排空立即 plateau：任务 3 次尝试耗尽即排空，steps 预算必须
+    # 在排空之前触顶（steps=3：第 3 步结算后 step=3 ≥ 3，先于 plateau 收口）
+    spec = _spec(listener, evidence="never-ever-met", steps=3)
     spec_json = json.dumps(spec.model_dump(mode="json"), ensure_ascii=False)
     script = json.dumps(
         {"planner": [_planner_script(listener, "never-ever-met")],

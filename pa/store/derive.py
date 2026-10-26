@@ -65,3 +65,22 @@ def derive_stats(events: Iterable[Event]) -> dict[str, Any]:
         "planned": planned,
         "fp_attempts": fp_attempts,
     }
+
+
+def advisory_occurrences(events: Iterable[Event]) -> dict[str, int]:
+    """1.4：同 issue+target 的命中次数（首次 mentor.advisory 记 occurrences，
+    其后每条 mentor.advisory_agg{delta:1} 累加）。
+
+    故意不进 state.meta：meta 任一键差都会让 off/shadow 两个 mission 的
+    状态 dump 不同（S12 验收一要求 shadow 与 off 逐字节一致）。occurrences
+    是教练的内部判据，谁要用谁从账本现算，口径唯一且可重放。"""
+    occ: dict[str, int] = {}
+    for ev in events:
+        if ev.type == "mentor.advisory":
+            key = f'{ev.payload.get("issue")}:{ev.payload.get("target")}'
+            occ[key] = max(int(occ.get(key, 0)),
+                           int(ev.payload.get("occurrences", 1)))
+        elif ev.type == "mentor.advisory_agg":
+            key = f'{ev.payload.get("issue")}:{ev.payload.get("target")}'
+            occ[key] = int(occ.get(key, 0)) + int(ev.payload.get("delta", 1))
+    return occ

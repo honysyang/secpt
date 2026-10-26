@@ -48,7 +48,12 @@ def round(state: MissionState, writer: StoreWriter, llm, assets) -> None:
     # 7) JEV sweep：本轮新产生的 + 历轮漏判的 finding 一并裁决（规则在
     #    pa/adjudicate，这里只编排与落账）
     jev_sweep(state, writer)
-    # 8) 教练检查（S12）：shadow 只 advise，enforce 追加三个动作之一
+    # 8) 行为参数本轮重算（裁定 1.3：judge 之后、coach 之前——coach 的
+    #    advisory.metric 必须含本轮失败，不得读上一轮的陈旧 meta）
+    from pa.store.derive import derive_stats
+    from pa.store.view import StoreView
+    state.meta.update(derive_stats(StoreView(writer.root).events(from_seq=1)))
+    # 9) 教练检查：shadow 只 advise，enforce 追加三个动作之一
     coach.on_round(state, writer)
 
 

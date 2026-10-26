@@ -9,13 +9,13 @@ api_key 纪律：complete() 不得在任何日志 / __repr__ / 异常信息里�
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 
 import httpx
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from pa.envs import API_KEY, BASE_URL, FALLBACK_MODEL, MODEL, get, llm_mock_script
 from pa.errors import ModelCallError, ModelParseError
 from pa.models import Decision
 
@@ -119,12 +119,15 @@ class ApiLLM:
 
     def __init__(self, *, base_url: str | None = None, api_key: str | None = None,
                  model: str | None = None, timeout: float = 60.0) -> None:
-        self._base_url = base_url or os.environ.get("SECPT_BASE_URL", "")
-        self._api_key = api_key or os.environ.get("SECPT_API_KEY", "")
-        self._model = model or os.environ.get("SECPT_MODEL", "")
-        # SECPT_FALLBACK_MODEL：降级链用（S10 接线），此处仅冻结取值
-        self._fallback_model = os.environ.get("SECPT_FALLBACK_MODEL", "")
+        self._base_url = base_url or get(BASE_URL)
+        self._api_key = api_key or get(API_KEY)
+        self._model = model or get(MODEL)
+        # 降级链用（enforce 下 vs_rate 越线时写入 model.switched 事件）
+        self._fallback_model = get(FALLBACK_MODEL)
         self._timeout = timeout
+        # 与 MockLLM 同口径的调用记录（P0-1）：budget.charge 从 usage 计费，
+        # 只存内存不进账本；真实 usage = prompt_tokens + completion_tokens
+        self.calls: list[dict] = []
 
     def __repr__(self) -> str:
         return f"ApiLLM(base_url={self._base_url!r}, model={self._model!r})"
@@ -134,16 +137,37 @@ class ApiLLM:
         if not self._base_url or not self._api_key:
             raise ModelCallError(
                 "LLM 客户端未配置：需要 SECPT_BASE_URL / SECPT_API_KEY")
+        # OpenAI 兼容惯例：BASE_URL 允许填根（https://api.deepseek.com）
+        # 或全路径（.../chat/completions），缺路径时自动补
+        url = self._base_url.rstrip("/")
+        if not url.endswith("/chat/completions"):
+            url += "/chat/completions"
         try:
             with httpx.Client(timeout=self._timeout) as c:
-                r = c.post(self._base_url,
+                r = c.post(url,
                            headers={"Authorization": f"Bearer {self._api_key}"},
                            json={"model": self._model,
                                  "messages": [{"role": "system", "content": system},
                                               {"role": "user", "content": user}]})
                 r.raise_for_status()
                 data = r.json()
+            usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
+            total = int(usage.get("prompt_tokens", 0)) \
+                + int(usage.get("completion_tokens", 0))
+            self.calls.append({"phase": phase, "system": system,
+                               "user": user, "usage": total})
             return str(data["choices"][0]["message"]["content"])
+        except httpx.HTTPStatusError as e:
+            # 状态码是排障必需（401=key 错、404=模型名错）；响应体只截前
+            # 120 字符且不带请求内容（含 key）
+            body = ""
+            try:
+                body = str(e.response.text)[:120]
+            except Exception:
+                pass
+            raise ModelCallError(
+                f"LLM 调用失败: HTTP {e.response.status_code} {body}"
+            ) from e
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             # 只带异常类型名，绝不带请求内容（含 key）
             raise ModelCallError(f"LLM 调用失败: {type(e).__name__}") from e
@@ -157,11 +181,11 @@ class ApiLLM:
 
 def load_client(mock_script: dict | str | None = None):
     """装载 LLMClient（ARCHITECTURE §8 L1 签名）：显式 mock_script 优先，
-    其次 SECPT_LLM_MOCK 环境变量，否则真实客户端（读 SECPT_BASE_URL /
-    SECPT_API_KEY / SECPT_MODEL / SECPT_FALLBACK_MODEL）。"""
+    其次 SECPT_LLM_MOCK 环境变量，否则真实客户端（经 pa/envs 读
+    SECPT_BASE_URL / SECPT_API_KEY / SECPT_MODEL / SECPT_FALLBACK_MODEL）。"""
     if mock_script is not None:
         return MockLLM(mock_script)
-    env_mock = os.environ.get("SECPT_LLM_MOCK")
+    env_mock = llm_mock_script()
     if env_mock:
         return MockLLM(env_mock)
     return ApiLLM()

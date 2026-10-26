@@ -78,8 +78,11 @@ def collect(root) -> dict:
             if p.get("reason") in _AUTHZ_REASONS:
                 authz += 1
         elif t == "context.assembled":
-            ctx_sizes.append(int(p.get("total_chars", 0)))
-            if p.get("phase") == "worker":      # planner 段不混入 worker 步数
+            # 斜率只看 worker 段：planner 引导是一次性人口（含全部提示词
+            # 资产），混入会把「worker ReAct 的上下文增长率」污染成两次
+            # 采样间的固定差值，prompt 文件一改符号就可能翻转
+            if p.get("phase") == "worker":
+                ctx_sizes.append(int(p.get("total_chars", 0)))
                 key = (str(p.get("task_id")), int(p.get("attempt", 0)))
                 worker_runs[key] = worker_runs.get(key, 0) + 1
         elif t == "mission.finished":
