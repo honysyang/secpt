@@ -3,6 +3,7 @@
 追加验收：transition() 清空租约的四条路径 to ∈ {done, failed, blocked,
 superseded} 全部测到——否则重启后过期租约会继续占着任务，任务永远不再被调度。
 """
+
 from __future__ import annotations
 
 import json
@@ -15,8 +16,16 @@ from pa.graph.ready import promote_pending, ready_tasks, validate_dag
 from pa.graph.state import transition
 from pa.graph.task import create_task
 from pa.models import (
-    AcceptanceItem, Budget, Clue, Criterion, Lease, MissionSpec, MissionState,
-    Precondition, Task, TaskDraft,
+    AcceptanceItem,
+    Budget,
+    Clue,
+    Criterion,
+    Lease,
+    MissionSpec,
+    MissionState,
+    Precondition,
+    Task,
+    TaskDraft,
 )
 from pa.store.view import StoreView
 from pa.store.writer import StoreWriter
@@ -24,41 +33,61 @@ from pa.store.writer import StoreWriter
 
 def _lease() -> Lease:
     from pa.models import now
+
     return Lease(owner="w-1", expires=now() + timedelta(seconds=60))
 
 
 def _mk(tid: str, **kw) -> Task:
-    base = dict(id=tid, mission_id="m", type="recon", goal="探活",
-                success_criteria=[Criterion(evidence="port.open")],
-                scope_slice={}, allowed_tools=["probe"])
+    base = dict(
+        id=tid,
+        mission_id="m",
+        type="recon",
+        goal="探活",
+        success_criteria=[Criterion(evidence="port.open")],
+        scope_slice={},
+        allowed_tools=["probe"],
+    )
     base.update(kw)
     return Task(**base)
 
 
 def _state(tasks: list[Task], mid: str = "m") -> MissionState:
-    spec = MissionSpec(objective="o", targets=[],
-                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e",
-                                                  target="x")],
-                       budget=Budget(), allowed_scope=[])
+    spec = MissionSpec(
+        objective="o",
+        targets=[],
+        acceptance=[AcceptanceItem(id="a1", item="i", evidence="e", target="x")],
+        budget=Budget(),
+        allowed_scope=[],
+    )
     return MissionState(spec=spec, mission_id=mid, tasks={t.id: t for t in tasks})
 
 
 def _draft() -> TaskDraft:
-    return TaskDraft(type="recon", goal="探活",
-                     success_criteria=[Criterion(evidence="port.open")],
-                     scope_slice={}, allowed_tools=["probe"])
+    return TaskDraft(
+        type="recon",
+        goal="探活",
+        success_criteria=[Criterion(evidence="port.open")],
+        scope_slice={},
+        allowed_tools=["probe"],
+    )
 
 
 def test_illegal_transitions_raise(tmp_mission):
     w = StoreWriter(tmp_mission)
-    cases = [("pending", "running"), ("done", "ready"), ("done", "superseded"),
-             ("superseded", "ready"), ("blocked", "running"), ("ready", "done")]
+    cases = [
+        ("pending", "running"),
+        ("done", "ready"),
+        ("done", "superseded"),
+        ("superseded", "ready"),
+        ("blocked", "running"),
+        ("ready", "done"),
+    ]
     for frm, to in cases:
         t = _mk("t1")
         t.state = frm
         with pytest.raises(IllegalTransition, match=frm):
             transition(t, to, w)
-        assert t.state == frm          # 非法转移不改状态、不落事件
+        assert t.state == frm  # 非法转移不改状态、不落事件
     assert not (tmp_mission / "events.jsonl").exists()
 
 
@@ -98,26 +127,30 @@ def test_transition_replay_restores_lease_and_attempt(tmp_mission):
 
 
 def _write_mission(root) -> None:
-    spec = MissionSpec(objective="o", targets=[],
-                       acceptance=[AcceptanceItem(id="a1", item="i", evidence="e",
-                                                  target="x")],
-                       budget=Budget(), allowed_scope=[])
+    spec = MissionSpec(
+        objective="o",
+        targets=[],
+        acceptance=[AcceptanceItem(id="a1", item="i", evidence="e", target="x")],
+        budget=Budget(),
+        allowed_scope=[],
+    )
     (root / "mission.json").write_text(spec.model_dump_json(), encoding="utf-8")
 
 
 def test_ready_set_and_promote(tmp_mission):
     w = StoreWriter(tmp_mission)
-    t1 = _mk("t1")                                                  # 无依赖 → ready
-    t2 = _mk("t2", deps=["t1"], priority=0.6)                       # 依赖未完成
-    t3 = _mk("t3", priority=0.4,
-             preconditions=[Precondition(match={"port": 445})])     # 缺线索
+    t1 = _mk("t1")  # 无依赖 → ready
+    t2 = _mk("t2", deps=["t1"], priority=0.6)  # 依赖未完成
+    t3 = _mk(
+        "t3", priority=0.4, preconditions=[Precondition(match={"port": 445})]
+    )  # 缺线索
     t4 = _mk("t4", priority=0.9)
-    t5 = _mk("t5", deps=["ghost"])                                  # 依赖不存在
+    t5 = _mk("t5", deps=["ghost"])  # 依赖不存在
     st = _state([t1, t2, t3, t4, t5])
     assert [t.id for t in ready_tasks(st)] == ["t4", "t1"]
     assert promote_pending(st, w) == 2
     assert st.tasks["t1"].state == "ready" and st.tasks["t4"].state == "ready"
-    assert promote_pending(st, w) == 0            # 已提升的不重复
+    assert promote_pending(st, w) == 0  # 已提升的不重复
     # 补前置：线索到位 → t3 就绪
     st.clues.append(Clue(kind="port", key="port", value=445))
     assert [t.id for t in ready_tasks(st)] == ["t4", "t1", "t3"]
@@ -138,10 +171,10 @@ def test_create_task_replay(tmp_mission):
     assert set(state.tasks) == {"t-0001", "t-0002"}
     assert all(t.state == "pending" for t in state.tasks.values())
     assert state.tasks["t-0001"].mission_id == tmp_mission.name
-    assert state.task_seq == 2                       # 计数器随事件重放恢复
-    w2 = StoreWriter(tmp_mission)                    # 模拟重启后再创建
+    assert state.task_seq == 2  # 计数器随事件重放恢复
+    w2 = StoreWriter(tmp_mission)  # 模拟重启后再创建
     t3 = create_task(state, w2, _draft())
-    assert t3.id == "t-0003"                         # 不撞号（裁定 4）
+    assert t3.id == "t-0003"  # 不撞号（裁定 4）
 
 
 def test_validate_dag_blocks_dangling_deps(tmp_mission):
@@ -152,22 +185,28 @@ def test_validate_dag_blocks_dangling_deps(tmp_mission):
     t1 = create_task(st, w, _draft())
     draft2 = _draft().model_copy(update={"deps": [t1.id, "ghost"]})
     t2 = create_task(st, w, draft2)
-    create_task(st, w, _draft())                     # t-0003 无依赖，不受影响
+    create_task(st, w, _draft())  # t-0003 无依赖，不受影响
 
     from pa.graph.ready import validate_dag
+
     assert validate_dag(st, w) == [t2.id]
     assert st.tasks[t2.id].state == "blocked"
     assert st.tasks[t2.id].block_reason == "dangling_dep"
     assert st.tasks[t1.id].state == "pending"
 
-    lines = [json.loads(x) for x in
-             (tmp_mission / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    lines = [
+        json.loads(x)
+        for x in (tmp_mission / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     iv = [e for e in lines if e["type"] == "mentor.intervened"]
     assert len(iv) == 1
-    assert iv[0]["payload"] == {"level": "I3", "issue": "dangling_dep",
-                                "detail": {"task_ids": [t2.id]}}
+    assert iv[0]["payload"] == {
+        "level": "I3",
+        "issue": "dangling_dep",
+        "detail": {"task_ids": [t2.id]},
+    }
 
-    restored = StoreView(tmp_mission).restore()      # 重放后诊断信息不丢
+    restored = StoreView(tmp_mission).restore()  # 重放后诊断信息不丢
     rt = restored.tasks[t2.id]
     assert rt.state == "blocked" and rt.block_reason == "dangling_dep"
     assert validate_dag(restored, StoreWriter(tmp_mission)) == []  # 幂等
@@ -184,14 +223,15 @@ def test_revive_blocked(tmp_mission):
     assert validate_dag(st, w) == [t2.id]
 
     from pa.graph.ready import revive_blocked
-    assert revive_blocked(st, w) == []               # ghost 还没建出来
+
+    assert revive_blocked(st, w) == []  # ghost 还没建出来
     draft3 = _draft().model_copy(update={"deps": [t1.id]})
-    t3 = create_task(st, w, draft3)                  # 补上 ghost 这个任务
+    t3 = create_task(st, w, draft3)  # 补上 ghost 这个任务
     st.tasks["ghost"] = st.tasks.pop(t3.id)
     st.tasks["ghost"].id = "ghost"
     assert revive_blocked(st, w) == [t2.id]
     assert st.tasks[t2.id].state == "pending"
-    assert st.tasks[t2.id].block_reason is None      # 复活即清原因
+    assert st.tasks[t2.id].block_reason is None  # 复活即清原因
 
     restored = StoreView(tmp_mission).restore()
     assert restored.tasks[t2.id].state == "pending"

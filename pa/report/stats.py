@@ -9,6 +9,7 @@ context.assembled 的 total_chars 序列做最小二乘）。
 末尾「调参建议」：每个越线指标给一句可执行建议。阈值是常量占位——
 等真实数据回来再标定，这里只留接口（suggest() 纯函数，可单测）。
 """
+
 from __future__ import annotations
 
 import json
@@ -18,10 +19,11 @@ from pa.errors import SecptError
 from pa.store.view import StoreView
 
 # 调参建议阈值（占位，待真实数据标定）
-VS_RATE_WARN = 0.2          # virtual_success 率 > 20%
-AUTHZ_RATIO_WARN = 0.3      # AuthZ 阻塞占全部阻塞 > 30%
-ATTEMPT3_WARN = 0.5         # 打满 MAX_ATTEMPTS 的任务占比 > 50%
-SLOPE_WARN = 2000.0         # prompts 每步增长 > 2000 字符
+VS_RATE_WARN = 0.2  # virtual_success 率 > 20%
+AUTHZ_RATIO_WARN = 0.3  # AuthZ 阻塞占全部阻塞 > 30%
+ATTEMPT3_WARN = 0.5  # 打满 MAX_ATTEMPTS 的任务占比 > 50%
+SLOPE_WARN = 2000.0  # prompts 每步增长 > 2000 字符
+MODEL_ERROR_WARN = 0.15  # 模型解析失败 / worker 返回 > 15%
 
 _AUTHZ_REASONS = ("out_of_scope", "needs_approval")
 
@@ -36,9 +38,9 @@ def collect(root) -> dict:
     tokens = 0
     task_state: dict[str, str] = {}
     task_attempt: dict[str, int] = {}
-    vs_tasks: set[str] = set()            # vs_task_rate 分子：按任务去重
-    vs_events = 0                         # vs_events：按事件计（教练口径）
-    unattributed = 0                      # 旧 mission 动作无 task_id，不回溯猜测
+    vs_tasks: set[str] = set()  # vs_task_rate 分子：按任务去重
+    vs_events = 0  # vs_events：按事件计（教练口径）
+    unattributed = 0  # 旧 mission 动作无 task_id，不回溯猜测
     authz = 0
     blocked = 0
     peak_np = 0
@@ -46,6 +48,8 @@ def collect(root) -> dict:
     saw_clue = False
     ctx_sizes: list[int] = []
     worker_runs: dict[tuple[str, int], int] = {}
+    verdicts: dict[str, int] = {}
+    model_errors = 0
     fin = "未完成"
     wall = int((events[-1].ts - events[0].ts).total_seconds())
     for ev in events:
@@ -62,9 +66,16 @@ def collect(root) -> dict:
             if p.get("to") == "failed" and p.get("reason") == "virtual_success":
                 vs_events += 1
                 vs_tasks.add(str(tk))
-        elif t in ("action.started", "action.finished", "action.blocked") \
-                and not p.get("task_id"):
-            unattributed += 1             # 裁定 2：只计数，不归属
+        elif t == "decision.made":
+            if p.get("kind") == "model_error":
+                model_errors += 1
+        elif t == "finding.adjudicated":
+            v = str(p.get("verdict") or "?")
+            verdicts[v] = verdicts.get(v, 0) + 1
+        elif t in ("action.started", "action.finished", "action.blocked") and not p.get(
+            "task_id"
+        ):
+            unattributed += 1  # 裁定 2：只计数，不归属
         elif t == "budget.charged":
             steps += 1
             tokens += int(p.get("tokens", 0))
@@ -98,16 +109,24 @@ def collect(root) -> dict:
         worker_hist[n] = worker_hist.get(n, 0) + 1
     return {
         "name": root.name,
-        "steps": steps, "tokens": tokens, "wall_s": wall,
-        "tasks": counts, "vs_events": vs_events,
+        "steps": steps,
+        "tokens": tokens,
+        "wall_s": wall,
+        "tasks": counts,
+        "vs_events": vs_events,
         "vs_tasks": len(vs_tasks),
         "actions_unattributed": unattributed,
-        "authz": authz, "blocked": blocked,
+        "authz": authz,
+        "blocked": blocked,
         "peak_no_progress": peak_np,
         "attempt_dist": dict(sorted(attempts_hist.items())),
         "worker_step_dist": dict(sorted(worker_hist.items())),
         "prompt_slope": _slope(ctx_sizes),
         "terminal": fin,
+        "findings_confirmed": verdicts.get("confirmed", 0),
+        "findings_suspected": verdicts.get("suspected", 0),
+        "findings_false_positive": verdicts.get("false_positive", 0),
+        "model_errors": model_errors,
     }
 
 
@@ -129,6 +148,14 @@ def aggregate(rows: list[dict]) -> dict:
     total_vs_tasks = sum(r["vs_tasks"] for r in rows)
     total_blocked = sum(r["blocked"] for r in rows)
     total_authz = sum(r["authz"] for r in rows)
+    total_tokens = sum(r["tokens"] for r in rows)
+    confirmed = sum(r.get("findings_confirmed", 0) for r in rows)
+    suspected = sum(r.get("findings_suspected", 0) for r in rows)
+    false_positive = sum(r.get("findings_false_positive", 0) for r in rows)
+    model_errors = sum(r.get("model_errors", 0) for r in rows)
+    worker_returns = sum(
+        sum(r.get("worker_step_dist", {}).values()) for r in rows
+    )
     attempt_dist: dict[int, int] = {}
     worker_dist: dict[int, int] = {}
     for r in rows:
@@ -140,15 +167,29 @@ def aggregate(rows: list[dict]) -> dict:
     return {
         "missions": len(rows),
         # 裁定 1：双口径分开命名，禁止同名字段混用
-        "vs_events": total_vs_events,                       # 按事件计（教练用）
+        "vs_events": total_vs_events,  # 按事件计（教练用）
         "vs_task_rate": round(total_vs_tasks / total_tasks, 4)
-        if total_tasks else 0.0,                            # 按任务去重 0~1（报告用）
+        if total_tasks
+        else 0.0,  # 按任务去重 0~1（报告用）
         "authz_ratio": round(total_authz / total_blocked, 4) if total_blocked else 0.0,
         "attempt_dist": dict(sorted(attempt_dist.items())),
         "worker_step_dist": dict(sorted(worker_dist.items())),
         "mean_prompt_slope": round(sum(slopes) / len(slopes), 2) if slopes else 0.0,
-        "attempt3_ratio": round(
-            attempt_dist.get(3, 0) / total_tasks, 4) if total_tasks else 0.0,
+        "attempt3_ratio": round(attempt_dist.get(3, 0) / total_tasks, 4)
+        if total_tasks
+        else 0.0,
+        "total_tokens": total_tokens,
+        "findings_confirmed": confirmed,
+        "findings_suspected": suspected,
+        "findings_false_positive": false_positive,
+        # 产出质量：每 100k tokens 换到多少 confirmed finding。
+        # 没有这个数，就无法判断“无人值守”是否真的比人工便宜。
+        "confirmed_per_100k": round(confirmed / (total_tokens / 100_000), 3)
+        if total_tokens
+        else 0.0,
+        "model_error_rate": round(model_errors / worker_returns, 4)
+        if worker_returns
+        else 0.0,
     }
 
 
@@ -160,30 +201,51 @@ def suggest(agg: dict) -> list[str]:
             f"vs_task_rate {agg['vs_task_rate']:.0%} 越线"
             f"（>{VS_RATE_WARN:.0%}，vs_events={agg['vs_events']}）："
             f"任务判据写得太松，worker 报 done 但证据不满足——"
-            f"收紧 success_criteria 的 evidence 指向。")
+            f"收紧 success_criteria 的 evidence 指向。"
+        )
     if agg["authz_ratio"] > AUTHZ_RATIO_WARN:
         out.append(
             f"AuthZ 阻塞占比 {agg['authz_ratio']:.0%} 越线"
             f"（>{AUTHZ_RATIO_WARN:.0%}）：计划与范围/工具白名单脱节——"
-            f"在 planner 提示词里强调 allowed_scope 与 allowed_tools。")
+            f"在 planner 提示词里强调 allowed_scope 与 allowed_tools。"
+        )
     if agg["attempt3_ratio"] > ATTEMPT3_WARN:
         out.append(
             f"打满 3 次尝试的任务占比 {agg['attempt3_ratio']:.0%} 越线"
             f"（>{ATTEMPT3_WARN:.0%}）：检查 Model 失败详情与工具可用性，"
-            f"必要时给 probe 类工具加超时预算。")
+            f"必要时给 probe 类工具加超时预算。"
+        )
     if agg["mean_prompt_slope"] > SLOPE_WARN:
         out.append(
             f"prompts 平均每步增长 {agg['mean_prompt_slope']:.0f} 字符越线"
             f"（>{SLOPE_WARN:.0f}）：线索窗口或 untrusted 缓冲有泄漏——"
-            f"用 secpt trace --task 定位 context.assembled 里持续增长的段。")
+            f"用 secpt trace --task 定位 context.assembled 里持续增长的段。"
+        )
+    if agg["model_error_rate"] > MODEL_ERROR_WARN:
+        out.append(
+            f"模型解析失败率 {agg['model_error_rate']:.0%} 越线"
+            f"（>{MODEL_ERROR_WARN:.0%}）：JSON 后追加散文/截断是主因——"
+            f"换支持 JSON mode 的端点或降低输出长度。"
+        )
+    if agg["total_tokens"] and agg["findings_confirmed"] == 0:
+        out.append(
+            f"累计 {agg['total_tokens']} tokens 无 confirmed finding"
+            f"（suspected {agg['findings_suspected']}、"
+            f"fp {agg['findings_false_positive']}）："
+            f"检查验收是否只覆盖探测类判据、worker 是否提案 findings、"
+            f"敏感路径规则是否命中。"
+        )
     return out
 
 
 # ─────────────────────────── 文本渲染（确定性） ───────────────────────────
 
+
 def render_table(rows: list[dict]) -> str:
-    head = (f"{'MISSION':<24} {'STEP':>4} {'TOKENS':>7} {'TASKS(d/f/b)':>12} "
-            f"{'VS(e/t)':>8} {'AUTHZ':>5} {'NP峰':>4} {'墙钟':>5} {'未归属':>4}  终态")
+    head = (
+        f"{'MISSION':<24} {'STEP':>4} {'TOKENS':>7} {'TASKS(d/f/b)':>12} "
+        f"{'VS(e/t)':>8} {'AUTHZ':>5} {'NP峰':>4} {'墙钟':>5} {'未归属':>4}  终态"
+    )
     lines = [head, "-" * len(head)]
     for r in rows:
         t = r["tasks"]
@@ -192,30 +254,52 @@ def render_table(rows: list[dict]) -> str:
         lines.append(
             f"{r['name']:<24} {r['steps']:>4} {r['tokens']:>7} {dfb:>12} "
             f"{vst:>8} {r['authz']:>5} {r['peak_no_progress']:>4} "
-            f"{r['wall_s']:>4}s {r['actions_unattributed']:>4}  {r['terminal']}")
+            f"{r['wall_s']:>4}s {r['actions_unattributed']:>4}  {r['terminal']}"
+        )
     return "\n".join(lines)
 
 
 def render(rows: list[dict]) -> str:
     agg = aggregate(rows)
-    lines = ["# secpt stats", "", render_table(rows), "",
-             "## 聚合", "",
-             f"missions: {agg['missions']}",
-             f"vs_events（按事件，教练口径）: {agg['vs_events']}",
-             f"vs_task_rate（按任务去重，报告口径）: {agg['vs_task_rate']:.1%}",
-             f"AuthZ 占比: {agg['authz_ratio']:.1%}",
-             f"attempt 分布: {_hist(agg['attempt_dist'])}",
-             f"worker 步数分布: {_hist(agg['worker_step_dist'])}",
-             f"prompts 尺寸斜率(均值): {agg['mean_prompt_slope']:.2f} 字符/步",
-             "", "## 调参建议", ""]
+    lines = [
+        "# secpt stats",
+        "",
+        render_table(rows),
+        "",
+        "## 聚合",
+        "",
+        f"missions: {agg['missions']}",
+        f"vs_events（按事件，教练口径）: {agg['vs_events']}",
+        f"vs_task_rate（按任务去重，报告口径）: {agg['vs_task_rate']:.1%}",
+        f"AuthZ 占比: {agg['authz_ratio']:.1%}",
+        f"attempt 分布: {_hist(agg['attempt_dist'])}",
+        f"worker 步数分布: {_hist(agg['worker_step_dist'])}",
+        f"prompts 尺寸斜率(均值): {agg['mean_prompt_slope']:.2f} 字符/步",
+        f"tokens（累计）: {agg['total_tokens']}",
+        f"findings: confirmed {agg['findings_confirmed']} / "
+        f"suspected {agg['findings_suspected']} / "
+        f"false_positive {agg['findings_false_positive']}",
+        f"confirmed / 100k tokens: {agg['confirmed_per_100k']}",
+        f"模型解析失败率: {agg['model_error_rate']:.1%}",
+        "",
+        "## 调参建议",
+        "",
+    ]
     tips = suggest(agg)
     lines += [f"- {s}" for s in tips] if tips else ["- 无（所有指标在阈值内）"]
     return "\n".join(lines) + "\n"
 
 
 def render_json(rows: list[dict]) -> str:
-    return json.dumps({"missions": rows, "aggregate": aggregate(rows)},
-                      ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    return (
+        json.dumps(
+            {"missions": rows, "aggregate": aggregate(rows)},
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def _hist(h: dict) -> str:

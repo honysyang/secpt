@@ -8,6 +8,7 @@
 或内容截断）后重放同一内容可自愈——put 先校验已有内容，损坏则原子重写
 （S4 追加验收一）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -57,12 +58,13 @@ def verify(root, eid: str) -> bool:
     """内容、meta、id 三者一致才算数；文件缺失或损坏返回 False。"""
     if not eid.startswith(_ID_PREFIX):
         return False
-    sha16 = eid[len(_ID_PREFIX):]
+    sha16 = eid[len(_ID_PREFIX) :]
     content_path = _find_content(Path(root), sha16)
     if content_path is None:
         return False
-    meta_path = content_path.with_name(content_path.name[:-len(".json")]
-                                       + ".meta.json")
+    meta_path = content_path.with_name(
+        content_path.name[: -len(".json")] + ".meta.json"
+    )
     try:
         raw = content_path.read_bytes()
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -73,10 +75,11 @@ def verify(root, eid: str) -> bool:
 
 def get(root, eid: str) -> dict:
     """按 id 读证据内容（JSON）。缺失抛 SecptError，不返回 None 让调用方猜。"""
-    sha16 = eid[len(_ID_PREFIX):] if eid.startswith(_ID_PREFIX) else eid
+    sha16 = eid[len(_ID_PREFIX) :] if eid.startswith(_ID_PREFIX) else eid
     content_path = _find_content(Path(root), sha16)
     if content_path is None:
         from pa.errors import SecptError
+
         raise SecptError(f"evidence not found: {eid}")
     return json.loads(content_path.read_bytes())
 
@@ -96,6 +99,7 @@ def put(root, content, task_id: str, extra: dict | None = None) -> str:
     if extra:
         meta.update(extra)
     _atomic_write(d / f"{sha}.json", content)
-    _atomic_write(d / f"{sha}.meta.json",
-                  json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+    _atomic_write(
+        d / f"{sha}.meta.json", json.dumps(meta, ensure_ascii=False).encode("utf-8")
+    )
     return eid

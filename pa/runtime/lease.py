@@ -3,6 +3,7 @@
 resume 后仍在 running 的任务若租约已过期，转回 ready（transition 清租约、
 落 task.state_changed{reason: lease_expired}，重放逐字段一致）。
 """
+
 from __future__ import annotations
 
 from datetime import timedelta
@@ -23,6 +24,7 @@ def expire_leases(state: MissionState, writer: StoreWriter) -> int:
 
 
 def make_lease(task, seconds_grace: int = 60) -> Lease:
-    return Lease(owner=f"w-{task.id}",
-                 expires=now() + timedelta(seconds=task.budget.seconds
-                                           + seconds_grace))
+    return Lease(
+        owner=f"w-{task.id}",
+        expires=now() + timedelta(seconds=task.budget.seconds + seconds_grace),
+    )

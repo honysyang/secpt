@@ -10,9 +10,10 @@
 确定性：按 id 排序返回，不依赖文件系统遍历序；同 id 重复是配置错误，
 抛 PolicyViolation 而不是静默覆盖。
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -24,9 +25,12 @@ from pa.errors import PolicyViolation
 class Skill:
     id: str
     task_types: list[str]
-    trigger: str          # planner 目录行用：什么情形下适用
-    summary: str          # planner 目录行用：一句摘要
-    body: str             # 全文，只给 worker
+    trigger: str  # planner 目录行用：什么情形下适用
+    summary: str  # planner 目录行用：一句摘要
+    body: str  # 全文，只给 worker
+    # 限定适配角色（空 = 任意角色都注入）。M1：任务带 role 时 worker 的
+    # 技能正文按 (task_type, role) 双过滤——角色专属纪律不该喂给别的角色。
+    roles: list[str] = field(default_factory=list)
 
 
 def _parse(path: Path) -> Skill:
@@ -37,10 +41,15 @@ def _parse(path: Path) -> Skill:
     meta = yaml.safe_load(fm) or {}
     sid = str(meta.get("id") or path.stem)
     applies = [str(x) for x in (meta.get("applies_to") or [])]
-    return Skill(id=sid, task_types=applies,
-                 trigger=str(meta.get("trigger") or ""),
-                 summary=str(meta.get("summary") or ""),
-                 body=body.strip())
+    tagged = [str(x) for x in (meta.get("roles") or [])]
+    return Skill(
+        id=sid,
+        task_types=applies,
+        trigger=str(meta.get("trigger") or ""),
+        summary=str(meta.get("summary") or ""),
+        body=body.strip(),
+        roles=tagged,
+    )
 
 
 def load_skills(dirs) -> list[Skill]:

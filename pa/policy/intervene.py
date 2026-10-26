@@ -10,6 +10,7 @@
 
 不实现 I3 提醒、不实现 I5 升级（没有投递对象）。
 """
+
 from __future__ import annotations
 
 from pa.graph.state import transition
@@ -18,30 +19,44 @@ from pa.store.event import apply_event
 from pa.store.writer import StoreWriter
 
 
-def supersede_task(state: MissionState, writer: StoreWriter, task,
-                   issue: str, metric: dict) -> None:
-    if task.state != "failed":            # 已 supersede/done 的不重复动作
+def supersede_task(
+    state: MissionState, writer: StoreWriter, task, issue: str, metric: dict
+) -> None:
+    if task.state != "failed":  # 已 supersede/done 的不重复动作
         return
     transition(task, "superseded", writer)
-    writer.append("mentor.intervened", "mentor",
-                  {"level": "I2", "issue": issue,
-                   "detail": {"action": "supersede", "task_id": task.id,
-                              "metric": metric}},
-                  f"int:supersede:{task.id}")
+    writer.append(
+        "mentor.intervened",
+        "mentor",
+        {
+            "level": "I2",
+            "issue": issue,
+            "detail": {"action": "supersede", "task_id": task.id, "metric": metric},
+        },
+        f"int:supersede:{task.id}",
+    )
 
 
-def settle_plateau(state: MissionState, writer: StoreWriter,
-                   satisfied: list[str]) -> None:
-    payload = {"summary": f"mentor 提前收口（authz_ratio 越线）：验收满足 "
-                          f"{len(satisfied)}/{len(state.spec.acceptance)}",
-               "reason": "plateau", "satisfied": satisfied}
-    ev = writer.append("mission.finished", "mentor", payload,
-                       f"mf:{state.mission_id}")
-    apply_event(state, ev)
+def settle_plateau(
+    state: MissionState, writer: StoreWriter, satisfied: list[str]
+) -> None:
+    payload = {
+        "summary": f"mentor 提前收口（authz_ratio 越线）：验收满足 "
+        f"{len(satisfied)}/{len(state.spec.acceptance)}",
+        "reason": "plateau",
+        "satisfied": satisfied,
+    }
+    ev = writer.append("mission.finished", "mentor", payload, f"mf:{state.mission_id}")
+    if ev is not None:
+        apply_event(state, ev)
 
 
-def degrade_model(state: MissionState, writer: StoreWriter,
-                  to_model: str, metric: dict) -> None:
-    writer.append("model.switched", "mentor",
-                  {"to": to_model, "reason": "vs_rate", "metric": metric},
-                  f"sw:vs_rate:{state.mission_id}")
+def degrade_model(
+    state: MissionState, writer: StoreWriter, to_model: str, metric: dict
+) -> None:
+    writer.append(
+        "model.switched",
+        "mentor",
+        {"to": to_model, "reason": "vs_rate", "metric": metric},
+        f"sw:vs_rate:{state.mission_id}",
+    )

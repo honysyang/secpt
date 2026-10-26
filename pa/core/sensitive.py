@@ -9,6 +9,7 @@ findings 恒为 0。敏感路径的可访问性由本模块兜底：worker 每�
 规则刻意保守：只认 2xx/3xx（4xx/5xx 的探测价值由线索本身承载），
 模式集是公开漏洞案例里的常客（版本库元数据、环境文件、备份残留）。
 """
+
 from __future__ import annotations
 
 import re
@@ -19,12 +20,14 @@ from pa.models import FindingProposal
 _SENSITIVE_PATH = re.compile(
     r"(\.git/|\.svn/|\.hg/|\.env([./?]|$)|\.aws/|\.ssh/"
     r"|\.bak([./?]|$)|\.old([./?]|$)|\.sql([./?]|$)|\.swp$|~$)",
-    re.IGNORECASE)
+    re.IGNORECASE,
+)
 _HIGH = (".git/", ".svn/", ".env", ".aws/", ".ssh/")
 
 
-def sensitive_finding(url: str, status: int,
-                      evidence_id: str | None) -> FindingProposal | None:
+def sensitive_finding(
+    url: str, status: int, evidence_id: str | None
+) -> FindingProposal | None:
     """命中敏感路径模式且状态为 2xx/3xx → 疑似暴露 finding；否则 None。"""
     if not (200 <= status < 400):
         return None
@@ -37,7 +40,10 @@ def sensitive_finding(url: str, status: int,
         severity=sev,
         evidence_refs=[evidence_id] if evidence_id else [],
         reproduce=f"curl -ik {url}",
-        falsify_if=["响应实为认证重定向（Location 指向登录页）",
-                    "响应是自定义错误页，真实内容需有效会话",
-                    "WAF/反代对自动化来源统一返回该状态码"],
-        asset_id=None)
+        falsify_if=[
+            "响应实为认证重定向（Location 指向登录页）",
+            "响应是自定义错误页，真实内容需有效会话",
+            "WAF/反代对自动化来源统一返回该状态码",
+        ],
+        asset_id=None,
+    )

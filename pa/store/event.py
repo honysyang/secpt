@@ -4,11 +4,19 @@
 这是可回放的前提（§5.3 约束）。投影表之外的类型只落账本，不参与状态重建
 （ARCHITECTURE §5.3）。
 """
+
 from __future__ import annotations
 
 from pa.models import (
-    Adjudication, Clue, Event, FindingProposal, Lease, MissionState, Task,
+    Adjudication,
+    Clue,
+    Event,
+    FindingProposal,
+    Lease,
+    MissionState,
+    Task,
 )
+from pa.store.derive import merge_finding
 
 
 def apply_event(state: MissionState, ev: Event) -> None:
@@ -29,21 +37,34 @@ def apply_event(state: MissionState, ev: Event) -> None:
             task.lease = Lease.model_validate(lease) if lease else None
             if "reason" in ev.payload:
                 task.block_reason = ev.payload["reason"]
+            if "tried" in ev.payload:
+                task.tried = list(ev.payload["tried"])
     elif t == "clue.added":
         state.clues.append(Clue.model_validate(ev.payload["clue"]))
         state.clue_seq += 1
     elif t == "finding.proposed":
-        state.findings.append(FindingProposal.model_validate(ev.payload["finding"]))
+        # WORKFLOW §9.2-3：重复合并下沉到台账投影——同一暴露面（相同
+        # asset+fingerprint）的提案取最新降杆合并，不再逐条堆叠；账本
+        # 仍是 append-only 的原始提案流（trace 取证用），合并只作用于
+        # 投影。合并语义在 pa/store/derive.merge_finding，回放走同一路径。
+        merge_finding(state, FindingProposal.model_validate(ev.payload["finding"]))
     elif t == "finding.adjudicated":
         adj = Adjudication.model_validate(ev.payload)
         state.adjudications[adj.finding_id] = adj
     elif t == "budget.charged":
         state.spent_tokens += int(ev.payload.get("tokens", 0))
         state.spent_seconds += int(ev.payload.get("seconds", 0))
-        state.step += 1               # 一超级步一结算：step 由账本可重放
+        state.step += 1  # 一超级步一结算：step 由账本可重放
     elif t == "plan.created":
         if "strategy" in ev.payload:
             state.current_strategy = dict(ev.payload["strategy"])
+    elif t == "memory.reflect":
+        # L3 滚动简报（E2）：新覆盖旧（rolling）；账本原文各轮独立
+        # 永不丢，投影只保留最新——live 与 restore 走同一路径。
+        state.brief = {
+            "step": int(ev.payload.get("step", 0)),
+            "summary": str(ev.payload.get("summary", "")),
+        }
     elif t == "plan.revised":
         _apply_plan_ops(state, ev.payload.get("ops", []))
     elif t == "mission.finished":
@@ -68,6 +89,9 @@ def _apply_plan_ops(state: MissionState, ops: list[dict]) -> None:
             t = state.tasks[target]
             t.state = "superseded"
             t.lease = None
-        elif kind == "change_priority" and target in state.tasks \
-                and op.get("priority") is not None:
+        elif (
+            kind == "change_priority"
+            and target in state.tasks
+            and op.get("priority") is not None
+        ):
             state.tasks[target].priority = float(op["priority"])

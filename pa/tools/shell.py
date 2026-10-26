@@ -4,6 +4,7 @@ v0 白名单（"工具只能减不能加"的最小实现）：nmap / curl / dig 
 未命中白名单返回 exit_code=126（blocked），进程不执行。范围盲（S5 约束 B）：
 args 里的 target 只供 gateway 做范围校验，工具自身不判定。
 """
+
 from __future__ import annotations
 
 import shlex

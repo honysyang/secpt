@@ -8,6 +8,7 @@
    （含 meta 派生值；spent_seconds 墙钟不可重放，剔除后比对）；
 5. scheduler 顺序：注入一个未判定 finding，本轮结束前已被裁决。
 """
+
 from __future__ import annotations
 
 import json
@@ -20,15 +21,18 @@ from pathlib import Path
 import pytest
 
 from pa.assets.snapshot import AssetSnapshot
-from pa.core.planner import bootstrap_plan
 from pa.graph.task import create_task
 from pa.graph.ready import promote_pending
 from pa.infra.llm import MockLLM
 from pa.models import (
-    AcceptanceItem, Budget, FindingProposal, MissionSpec, MissionState,
+    AcceptanceItem,
+    Budget,
+    FindingProposal,
+    MissionSpec,
+    MissionState,
     TaskDraft,
 )
-from pa.runtime import run, resume
+from pa.runtime import run
 from pa.runtime import scheduler
 from pa.store.event import apply_event
 from pa.store.writer import StoreWriter
@@ -47,16 +51,18 @@ def listener() -> int:
 
 
 def _freeze():
-    return AssetSnapshot.freeze(ROOT / "pa" / "core" / "prompts",
-                                [ROOT / "skills"])
+    return AssetSnapshot.freeze(ROOT / "pa" / "core" / "prompts", [ROOT / "assets" / "skills"])
 
 
 def _spec(port: int, *, steps: int = 12, evidence: str = "open") -> MissionSpec:
     return MissionSpec(
         objective="探测本地监听端口",
         targets=["127.0.0.1"],
-        acceptance=[AcceptanceItem(id="acc-1", item="端口开放被证实",
-                                   evidence=evidence, target="127.0.0.1")],
+        acceptance=[
+            AcceptanceItem(
+                id="acc-1", item="端口开放被证实", evidence=evidence, target="127.0.0.1"
+            )
+        ],
         budget=Budget(steps=steps, seconds=600, tokens=40000),
         allowed_scope=[f"127.0.0.1:{port}"],
     )
@@ -64,34 +70,56 @@ def _spec(port: int, *, steps: int = 12, evidence: str = "open") -> MissionSpec:
 
 def _planner_script(port: int, evidence: str) -> str:
     return json.dumps(
-        {"tasks": [{"type": "recon",
+        {
+            "tasks": [
+                {
+                    "type": "recon",
                     "goal": f"probe 127.0.0.1:{port}",
                     "success_criteria": [{"evidence": evidence}],
                     "scope_slice": {},
                     "allowed_tools": ["probe"],
-                    "budget": {"steps": 4}}],
-         "current_strategy": {"s": "v"}, "rationale": "r"},
-        ensure_ascii=False)
+                    "budget": {"steps": 4},
+                }
+            ],
+            "current_strategy": {"s": "v"},
+            "rationale": "r",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _worker_script(port: int) -> str:
     return json.dumps(
-        {"kind": "call_tool", "tool": "probe",
-         "args": {"target": "127.0.0.1", "port": port},
-         "expect": "端口开放"}, ensure_ascii=False)
+        {
+            "kind": "call_tool",
+            "tool": "probe",
+            "args": {"target": "127.0.0.1", "port": port},
+            "expect": "端口开放",
+        },
+        ensure_ascii=False,
+    )
 
 
 # ─────────────────────────── 1. 完整 mission 收敛 finished ───────────────────────────
 
+
 def test_full_mission_converges_to_finished(tmp_mission, listener):
-    llm = MockLLM({"planner": [_planner_script(listener, "open")],
-                   "worker": [_worker_script(listener)]})
+    llm = MockLLM(
+        {
+            "planner": [_planner_script(listener, "open")],
+            "worker": [_worker_script(listener)],
+        }
+    )
     state = run(tmp_mission, _spec(listener), llm=llm, assets=_freeze())
     assert state.finished
     assert state.finish_reason == "completed"
     assert state.tasks["t-0001"].state == "done"
-    events = [json.loads(l) for l in
-              (tmp_mission / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)
+        for line in (tmp_mission / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
     fin = [e for e in events if e["type"] == "mission.finished"]
     assert len(fin) == 1 and fin[0]["payload"]["reason"] == "completed"
     assert fin[0]["payload"]["satisfied"] == ["acc-1"]
@@ -99,32 +127,51 @@ def test_full_mission_converges_to_finished(tmp_mission, listener):
 
 # ─────────────────────────── 2. 步数预算耗尽 → budget_steps ───────────────────────────
 
+
 def test_step_budget_exhaustion_terminates_budget_steps(tmp_mission, listener):
     # 判据永远不满足（evidence 串不在线索里）：任务反复重排队直到预算收口
-    llm = MockLLM({"planner": [_planner_script(listener, "never-ever-met")],
-                   "worker": [_worker_script(listener)]})
-    state = run(tmp_mission, _spec(listener, evidence="never-ever-met",
-                                   steps=2),
-                llm=llm, assets=_freeze())
+    llm = MockLLM(
+        {
+            "planner": [_planner_script(listener, "never-ever-met")],
+            "worker": [_worker_script(listener)],
+        }
+    )
+    state = run(
+        tmp_mission,
+        _spec(listener, evidence="never-ever-met", steps=2),
+        llm=llm,
+        assets=_freeze(),
+    )
     assert state.finished
     assert state.finish_reason == "budget_steps"
-    assert not state.meta.get("fp_attempts")      # probe 成功结果永久缓存，无失败重试
+    assert not state.meta.get("fp_attempts")  # probe 成功结果永久缓存，无失败重试
 
 
 # ─────────────────────────── 3. 平台期 → plateau ───────────────────────────
 
-def test_plateau_terminates_immediately_when_queue_drained(tmp_mission,
-                                                           listener):
+
+def test_plateau_terminates_immediately_when_queue_drained(tmp_mission, listener):
     # worker 第一步就 out_of_scope 被拦（10.255.255.1 不在 allowed_scope），
     # 任务 blocked 后队列排空（无 ready 且无 running）→ P1-1 立即 plateau，
     # 不再等 8 轮空烧预算（原 8 轮等待语义随本裁定废除）
-    bad = json.dumps({"kind": "call_tool", "tool": "probe",
-                      "args": {"target": "10.255.255.1", "port": 80},
-                      "expect": "x"}, ensure_ascii=False)
-    llm = MockLLM({"planner": [_planner_script(listener, "never-ever-met")],
-                   "worker": [bad]})
-    state = run(tmp_mission, _spec(listener, evidence="never-ever-met"),
-                llm=llm, assets=_freeze())
+    bad = json.dumps(
+        {
+            "kind": "call_tool",
+            "tool": "probe",
+            "args": {"target": "10.255.255.1", "port": 80},
+            "expect": "x",
+        },
+        ensure_ascii=False,
+    )
+    llm = MockLLM(
+        {"planner": [_planner_script(listener, "never-ever-met")], "worker": [bad]}
+    )
+    state = run(
+        tmp_mission,
+        _spec(listener, evidence="never-ever-met"),
+        llm=llm,
+        assets=_freeze(),
+    )
     assert state.finished
     assert state.finish_reason == "plateau"
     assert state.tasks["t-0001"].state == "blocked"
@@ -158,9 +205,14 @@ def _spawn(args, env_extra=None):
     env.pop("SECPT_LLM_MOCK", None)
     if env_extra:
         env.update(env_extra)
-    return subprocess.run([sys.executable, "-c", _RUNNER, *args],
-                          capture_output=True, text=True, cwd=ROOT, env=env,
-                          timeout=120)
+    return subprocess.run(
+        [sys.executable, "-c", _RUNNER, *args],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=env,
+        timeout=120,
+    )
 
 
 def test_die_at_step_and_resume_matches_uninterrupted(tmp_mission, listener):
@@ -169,8 +221,12 @@ def test_die_at_step_and_resume_matches_uninterrupted(tmp_mission, listener):
     spec = _spec(listener, evidence="never-ever-met", steps=3)
     spec_json = json.dumps(spec.model_dump(mode="json"), ensure_ascii=False)
     script = json.dumps(
-        {"planner": [_planner_script(listener, "never-ever-met")],
-         "worker": [_worker_script(listener)]}, ensure_ascii=False)
+        {
+            "planner": [_planner_script(listener, "never-ever-met")],
+            "worker": [_worker_script(listener)],
+        },
+        ensure_ascii=False,
+    )
 
     # 不中断跑法（对照组）。两处 root 同名（basename m）：mission_id 取自
     # 目录名，同名才能逐字节比对
@@ -183,32 +239,51 @@ def test_die_at_step_and_resume_matches_uninterrupted(tmp_mission, listener):
     die = tmp_mission / "die" / "m"
     r1 = _spawn([spec_json, script, str(die)], env_extra={"SECPT_DIE_AT_STEP": "2"})
     assert r1.returncode == 9, (r1.stdout, r1.stderr)
-    r2 = _spawn(["", script, str(die)])       # 已存在目录：restore 路径，无需 spec
+    r2 = _spawn(["", script, str(die)])  # 已存在目录：restore 路径，无需 spec
     assert r2.returncode == 0, r2.stderr
     assert "finish_reason=budget_steps" in r2.stdout
 
     a = (ctl / "final.json").read_text(encoding="utf-8")
     b = (die / "final.json").read_text(encoding="utf-8")
-    assert a == b                              # 含 meta 派生值逐字段一致
+    assert a == b  # 含 meta 派生值逐字段一致
 
 
 # ─────────────────────────── 5. JEV sweep：本轮内裁决 ───────────────────────────
 
+
 def test_jev_sweep_adjudicates_injected_finding_same_round(tmp_mission, listener):
     (tmp_mission / "mission.json").write_text(
         json.dumps(_spec(listener).model_dump(mode="json"), ensure_ascii=False),
-        encoding="utf-8")
+        encoding="utf-8",
+    )
     writer = StoreWriter(tmp_mission)
     state = MissionState(spec=_spec(listener), mission_id=tmp_mission.name)
-    task = create_task(state, writer, TaskDraft(
-        type="recon", goal=f"probe 127.0.0.1:{listener}",
-        success_criteria=[{"evidence": "open"}], scope_slice={},
-        allowed_tools=["probe"], budget=Budget(steps=4)))
+    task = create_task(
+        state,
+        writer,
+        TaskDraft(
+            type="recon",
+            goal=f"probe 127.0.0.1:{listener}",
+            success_criteria=[{"evidence": "open"}],
+            scope_slice={},
+            allowed_tools=["probe"],
+            budget=Budget(steps=4),
+        ),
+    )
     promote_pending(state, writer)
-    f = FindingProposal(claim="监听端口开放", severity="low", evidence_refs=[],
-                        reproduce="重跑 probe", falsify_if=["连接被拒绝"])
-    ev = writer.append("finding.proposed", "worker:t-0001",
-                       {"finding": f.model_dump(mode="json")}, "fp:test-1")
+    f = FindingProposal(
+        claim="监听端口开放",
+        severity="low",
+        evidence_refs=[],
+        reproduce="重跑 probe",
+        falsify_if=["连接被拒绝"],
+    )
+    ev = writer.append(
+        "finding.proposed",
+        "worker:t-0001",
+        {"finding": f.model_dump(mode="json")},
+        "fp:test-1",
+    )
     apply_event(state, ev)
     assert scheduler.finding_id(f) not in state.adjudications
 
@@ -216,6 +291,6 @@ def test_jev_sweep_adjudicates_injected_finding_same_round(tmp_mission, listener
     scheduler.round(state, writer, llm, _freeze())
 
     fid = scheduler.finding_id(f)
-    assert fid in state.adjudications           # 本轮结束前已裁决
-    assert state.adjudications[fid].verdict == "suspected"   # 无证据引用
-    assert state.tasks[task.id].state == "done"              # 正常派发未受影响
+    assert fid in state.adjudications  # 本轮结束前已裁决
+    assert state.adjudications[fid].verdict == "suspected"  # 无证据引用
+    assert state.tasks[task.id].state == "done"  # 正常派发未受影响

@@ -11,6 +11,7 @@ TOOL_KIND_CHECKS 是每个工具登记的白名单（谓词形式，http.status.
 evidence_ok 以登记白名单为准，另保留旧形态（open/closed、status=NNN、
 key=value）以兼容既有 mission.json 与验收文本。
 """
+
 from __future__ import annotations
 
 import re
@@ -33,6 +34,25 @@ def shell_kind(exit_code: int) -> str:
     return "shell.ok" if exit_code == 0 else "shell.error"
 
 
+def tls_kind(exit_code: int) -> str:
+    """握手成功拿到证书 → tls.cert；连接/握手失败 → tls.error。
+    链校验失败（过期/自签/主机名不符）是评估数据，不是工具错误——
+    由 tls.cert 的 value 字段表达，exit 仍为 0。"""
+    return "tls.cert" if exit_code == 0 else "tls.error"
+
+
+def dns_kind(exit_code: int) -> str:
+    """解析成功 → dns.result（value 含 IP 列表）；失败 → dns.error。"""
+    return "dns.result" if exit_code == 0 else "dns.error"
+
+
+def file_kind(exit_code: int) -> str:
+    """附件确定性扫描完成 → file.scan（value 含各类命中计数）；失败 →
+    file.error。附件是 0day 研究工作流的入口证据：有 file.scan 线索即
+    「附件已扫描并有结论」，可作为纯文件任务的验收。"""
+    return "file.scan" if exit_code == 0 else "file.error"
+
+
 # ─────────────────────────── 工具白名单 ───────────────────────────
 
 _HTTP_STATUS_RE = re.compile(r"^http\.status\.\d{3}$")
@@ -43,18 +63,37 @@ def _probe_ok(kind: str) -> bool:
 
 
 def _http_ok(kind: str) -> bool:
-    return kind == http_kind(1) or bool(_HTTP_STATUS_RE.fullmatch(kind))
+    # http.meta = 结构化响应元数据（headers/content-length/Location/body hash）
+    return (
+        kind in ("http.meta", http_kind(1))
+        or bool(_HTTP_STATUS_RE.fullmatch(kind))
+    )
 
 
 def _shell_ok(kind: str) -> bool:
     return kind in (shell_kind(0), shell_kind(1))
 
 
+def _tls_ok(kind: str) -> bool:
+    return kind in (tls_kind(0), tls_kind(1))
+
+
+def _dns_ok(kind: str) -> bool:
+    return kind in (dns_kind(0), dns_kind(1))
+
+
+def _file_ok(kind: str) -> bool:
+    return kind in (file_kind(0), file_kind(1))
+
+
 TOOL_KIND_CHECKS: dict[str, Callable[[str], bool]] = {
     "probe": _probe_ok,
     "http": _http_ok,
     "shell": _shell_ok,
-    "fs": _shell_ok,        # fs 走同一 shell 家族口径（exit 0/非 0）
+    "fs": _shell_ok,  # fs 走同一 shell 家族口径（exit 0/非 0）
+    "tls": _tls_ok,
+    "dns": _dns_ok,
+    "file_scan": _file_ok,  # bootstrap 附件扫描（非 REGISTRY 工具）
 }
 
 
@@ -65,7 +104,7 @@ def tool_kind_ok(tool: str, kind: str) -> bool:
 
 # ─────────────────────────── acceptance 白名单 ───────────────────────────
 
-_LEGACY_KEYWORDS = ("open", "closed")           # 旧 clue value 形态
+_LEGACY_KEYWORDS = ("open", "closed")  # 旧 clue value 形态
 _LEGACY_STATUS_RE = re.compile(r"^status=\d{3}$")
 _LEGACY_KV_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}=[^=\s]{1,256}$")
 
@@ -76,15 +115,18 @@ def evidence_ok(evidence: str) -> bool:
     e = evidence.strip()
     if any(check(e) for check in TOOL_KIND_CHECKS.values()):
         return True
-    return (e in _LEGACY_KEYWORDS
-            or bool(_LEGACY_STATUS_RE.fullmatch(e))
-            or bool(_LEGACY_KV_RE.fullmatch(e)))
+    return (
+        e in _LEGACY_KEYWORDS
+        or bool(_LEGACY_STATUS_RE.fullmatch(e))
+        or bool(_LEGACY_KV_RE.fullmatch(e))
+    )
 
 
 # 无对象证据类型（P1-2）：产出不绑定具体目标（主机/路径）的 kind 不得
 # 作验收——否则一条 shell.ok 就能给任意目标交差，对象绑定形同虚设。
 OBJECTLESS_KINDS: frozenset[str] = frozenset(
-    {shell_kind(0), shell_kind(1), "fs.result"})
+    {shell_kind(0), shell_kind(1), "fs.result"}
+)
 
 
 def acceptance_evidence_ok(evidence: str) -> bool:
@@ -100,7 +142,7 @@ def acceptance_evidence_ok(evidence: str) -> bool:
 
 
 def _family(kind: str) -> str | None:
-    for fam in ("probe", "http", "shell"):
+    for fam in ("probe", "http", "shell", "tls", "dns", "file"):
         if kind.startswith(fam + "."):
             return fam
     return None
@@ -149,6 +191,9 @@ def acceptance_hit(c, a) -> bool:
       443 的开放会替 80 端口交差；
     - path 仅在验收项声明了路径时参与比对。
     禁止只比 kind（一条 probe.open 不能替另一个主机交差）。"""
+    if a.evidence == "http.meta":
+        if not (c.kind.startswith("http.") and c.meta.get("headers")):
+            return False
     fa = family_of(a.evidence)
     if a.evidence not in (c.kind, c.key, str(c.value)):
         if fa is None or fa != family_of(c.kind):

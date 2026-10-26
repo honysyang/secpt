@@ -4,6 +4,7 @@
 import 本模块）。依赖规则 1：models / ports / errors 不依赖任何内部模块——
 内部类型仅出现在 TYPE_CHECKING 分支，运行时本包不 import 任何 pa 内部模块。
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -20,8 +21,15 @@ class LLMClient(Protocol):
     core/context.py（裁定 1）。MockLLM 不要求实现该行为。
     """
 
-    def complete(self, *, system: str, user: str, schema: Any,
-                 phase: str, budget_tokens: int | None = None) -> str: ...
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: Any,
+        phase: str,
+        budget_tokens: int | None = None,
+    ) -> str: ...
 
     def parse(self, raw: str, schema: Any) -> Any: ...
 

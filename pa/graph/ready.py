@@ -3,6 +3,7 @@
 deps 是硬依赖（必须 done）；preconditions 是软依赖（由线索事实判定，
 缺什么补什么的自动动作就来自这里）。
 """
+
 from __future__ import annotations
 
 from pa.graph.state import transition
@@ -11,14 +12,15 @@ from pa.models import MissionState, Precondition, Task
 
 def _deps_done(state: MissionState, t: Task) -> bool:
     # 依赖指向不存在的任务按未满足处理，不让 KeyError 炸掉调度
-    return all(d in state.tasks and state.tasks[d].state == "done"
-               for d in t.deps)
+    return all(d in state.tasks and state.tasks[d].state == "done" for d in t.deps)
 
 
 def _precond_ok(state: MissionState, p: Precondition) -> bool:
     # match 的每一项都要求存在 key 与 value 都吻合的线索
-    return all(any(c.key == k and c.value == v for c in state.clues)
-               for k, v in p.match.items())
+    return all(
+        any(c.key == k and c.value == v for c in state.clues)
+        for k, v in p.match.items()
+    )
 
 
 def ready_tasks(state: MissionState) -> list[Task]:
@@ -44,6 +46,32 @@ def promote_pending(state: MissionState, writer) -> int:
     return n
 
 
+def block_dep_failed(state: MissionState, writer, max_attempts: int = 3) -> list[str]:
+    """依赖已死时把下游 pending 置 blocked(dep_failed)，不再静默滞留。
+
+    判定「已死」：dep 已 blocked/superseded，或 failed 且尝试次数打满。
+    dep 仍可能重试（failed 但 attempt < max_attempts）时继续等待；这样
+    t-0009/t-0010 依赖 t-0001、t-0001 三次失败后不会永远 pending。
+    """
+    blocked: list[str] = []
+    for t in state.tasks.values():
+        if t.state != "pending" or not t.deps:
+            continue
+        for dep in t.deps:
+            d = state.tasks.get(dep)
+            if d is None:  # 悬空依赖由 validate_dag 负责
+                continue
+            dead = d.state in ("blocked", "superseded") or (
+                d.state == "failed" and d.attempt >= max_attempts
+            )
+            if not dead:
+                continue
+            transition(t, "blocked", writer, reason=f"dep_failed:{dep}")
+            blocked.append(t.id)
+            break
+    return blocked
+
+
 def validate_dag(state: MissionState, writer) -> list[str]:
     """批量创建后检查 deps 悬空（裁定 3）：依赖指向不存在任务的任务置
     blocked(reason="dangling_dep")，并发一条 mentor.intervened(I3)。
@@ -52,16 +80,20 @@ def validate_dag(state: MissionState, writer) -> list[str]:
     任务永远不就绪、表现为平台期——validate_dag 把它变成可诊断的 blocked
     + 介入事件。返回被置 blocked 的任务 id 列表。
     """
-    dangling = [t.id for t in state.tasks.values()
-                if t.state == "pending"
-                and any(d not in state.tasks for d in t.deps)]
+    dangling = [
+        t.id
+        for t in state.tasks.values()
+        if t.state == "pending" and any(d not in state.tasks for d in t.deps)
+    ]
     for tid in dangling:
         transition(state.tasks[tid], "blocked", writer, reason="dangling_dep")
     if dangling:
-        writer.append("mentor.intervened", "mentor",
-                      {"level": "I3", "issue": "dangling_dep",
-                       "detail": {"task_ids": dangling}},
-                      f"dag:{'|'.join(dangling)}")
+        writer.append(
+            "mentor.intervened",
+            "mentor",
+            {"level": "I3", "issue": "dangling_dep", "detail": {"task_ids": dangling}},
+            f"dag:{'|'.join(dangling)}",
+        )
     return dangling
 
 

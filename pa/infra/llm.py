@@ -6,6 +6,7 @@ LLMClient 协议定义在 ports.py（坑 A2：runtime 只依赖 ports，不依�
 
 api_key 纪律：complete() 不得在任何日志 / __repr__ / 异常信息里泄漏 key。
 """
+
 from __future__ import annotations
 
 import json
@@ -17,10 +18,11 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from pa.envs import API_KEY, BASE_URL, FALLBACK_MODEL, MODEL, get, llm_mock_script
 from pa.errors import ModelCallError, ModelParseError
-from pa.models import Decision
+from pa.infra.log import get_logger
+
+logger = get_logger("secpt.llm")
 
 _JSON_BLOCK = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
-_JSON_OBJ = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def parse_json(raw: str, schema: type | None = None) -> Any:
@@ -34,15 +36,30 @@ def parse_json(raw: str, schema: type | None = None) -> Any:
     m = _JSON_BLOCK.match(text)
     if m:
         text = m.group(1).strip()
-    elif not text.startswith("{"):
-        m = _JSON_OBJ.search(text)
-        if m is None:
-            raise ModelParseError(f"模型输出里没有 JSON 对象: {text[:80]!r}")
-        text = m.group(0)
-    try:
-        obj = json.loads(text)
-    except ValueError as e:
-        raise ModelParseError(f"模型输出不是合法 JSON: {e}") from e
+    # 模型经常在合法 JSON 后面追加解释文字（"Extra data"）。先尝试
+    # 整段解析；失败后从第一个 { 起用 raw_decode 取第一个对象——这只
+    # 放宽「JSON 之后有多余文本」，不会把半截/损坏 JSON 猜成合法。
+    candidates = [text]
+    start = text.find("{")
+    if start > 0:
+        candidates.append(text[start:])
+    obj = None
+    last_err: ValueError | None = None
+    for cand in candidates:
+        if not cand:
+            continue
+        try:
+            obj = json.loads(cand)
+            break
+        except ValueError as e:
+            last_err = e
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(cand)
+                break
+            except ValueError as e2:
+                last_err = e2
+    if obj is None:
+        raise ModelParseError(f"模型输出不是合法 JSON: {last_err}")
     if schema is None:
         return obj
     try:
@@ -50,19 +67,23 @@ def parse_json(raw: str, schema: type | None = None) -> Any:
             return schema.model_validate(obj)
         return TypeAdapter(schema).validate_python(obj)
     except ValidationError as e:
-        raise ModelParseError(
-            f"模型输出 schema 校验失败: {e.errors()[:2]}") from e
+        raise ModelParseError(f"模型输出 schema 校验失败: {e.errors()[:2]}") from e
 
 
 def complete_retry(client, *, retries: int = 1, **kw) -> str:
     """调用 + 重试：ModelCallError / ModelParseError 各给 retries 次机会，
-    仍失败则抛最后一次的异常（S9/S10 的重试路径）。"""
+    仍失败则抛最后一次的异常（S9/S10 的重试路径）。
+
+    每次失败打一条告警再换下一轮：调用方（engine）会兜底进账本，但那
+    只记最终失败——中间几次失败的具体原因（超时？降级？坏 JSON？）只
+    有这里看得到，静默换轮会把三次失败压缩成一条看不出模式的事件。"""
     last: Exception | None = None
-    for _ in range(retries + 1):
+    for n in range(retries + 1):
         try:
             return client.complete(**kw)
         except (ModelCallError, ModelParseError) as e:
             last = e
+            logger.warning("LLM 调用失败（第 %d/%d 次）: %s", n + 1, retries + 1, e)
     raise last  # type: ignore[misc]
 
 
@@ -82,20 +103,28 @@ class MockLLM:
                 script = json.loads(script)
             except ValueError as e:
                 raise ModelCallError(f"MockLLM 脚本不是合法 JSON: {e}") from e
-        self._queues: dict[str, list[str]] = {k: list(v)
-                                              for k, v in (script or {}).items()}
+        self._queues: dict[str, list[str]] = {
+            k: list(v) for k, v in (script or {}).items()
+        }
         self._last: dict[str, str] = {}
-        self.calls: list[dict] = []          # 调用记录（审计用，无敏感信息）
+        self.calls: list[dict] = []  # 调用记录（审计用，无敏感信息）
 
-    def complete(self, *, system: str, user: str, schema: Any,
-                 phase: str, budget_tokens: int | None = None) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: Any,
+        phase: str,
+        budget_tokens: int | None = None,
+    ) -> str:
         self.calls.append({"phase": phase, "system": system, "user": user})
         q = self._queues.get(phase)
         if q:
             item = q.pop(0)
             self._last[phase] = item
         elif phase in self._last:
-            item = self._last[phase]             # 耗尽后重复最后一条
+            item = self._last[phase]  # 耗尽后重复最后一条
         else:
             raise ModelCallError(f"MockLLM: phase {phase!r} 没有注入脚本")
         return item
@@ -117,8 +146,14 @@ class ApiLLM:
     api_key 只存在私有属性里：__repr__ 不含，异常信息只带异常类型名。
     """
 
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None,
-                 model: str | None = None, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float = 60.0,
+    ) -> None:
         self._base_url = base_url or get(BASE_URL)
         self._api_key = api_key or get(API_KEY)
         self._model = model or get(MODEL)
@@ -132,11 +167,19 @@ class ApiLLM:
     def __repr__(self) -> str:
         return f"ApiLLM(base_url={self._base_url!r}, model={self._model!r})"
 
-    def complete(self, *, system: str, user: str, schema: Any,
-                 phase: str, budget_tokens: int | None = None) -> str:
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: Any,
+        phase: str,
+        budget_tokens: int | None = None,
+    ) -> str:
         if not self._base_url or not self._api_key:
             raise ModelCallError(
-                "LLM 客户端未配置：需要 SECPT_BASE_URL / SECPT_API_KEY")
+                "LLM 客户端未配置：需要 SECPT_BASE_URL / SECPT_API_KEY"
+            )
         # OpenAI 兼容惯例：BASE_URL 允许填根（https://api.deepseek.com）
         # 或全路径（.../chat/completions），缺路径时自动补
         url = self._base_url.rstrip("/")
@@ -144,18 +187,26 @@ class ApiLLM:
             url += "/chat/completions"
         try:
             with httpx.Client(timeout=self._timeout) as c:
-                r = c.post(url,
-                           headers={"Authorization": f"Bearer {self._api_key}"},
-                           json={"model": self._model,
-                                 "messages": [{"role": "system", "content": system},
-                                              {"role": "user", "content": user}]})
+                r = c.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json={
+                        "model": self._model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    },
+                )
                 r.raise_for_status()
                 data = r.json()
             usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
-            total = int(usage.get("prompt_tokens", 0)) \
-                + int(usage.get("completion_tokens", 0))
-            self.calls.append({"phase": phase, "system": system,
-                               "user": user, "usage": total})
+            total = int(usage.get("prompt_tokens", 0)) + int(
+                usage.get("completion_tokens", 0)
+            )
+            self.calls.append(
+                {"phase": phase, "system": system, "user": user, "usage": total}
+            )
             return str(data["choices"][0]["message"]["content"])
         except httpx.HTTPStatusError as e:
             # 状态码是排障必需（401=key 错、404=模型名错）；响应体只截前

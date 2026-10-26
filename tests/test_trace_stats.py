@@ -5,6 +5,7 @@
 - stats 对 3 个不同终态的 mission 一行一个，聚合数正确；
 - context.assembled 事件不含任何目标字符串（用带 10.0.0.5 的任务测）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -34,17 +35,23 @@ def listener() -> int:
 
 
 def _freeze():
-    return AssetSnapshot.freeze(ROOT / "pa" / "core" / "prompts",
-                                [ROOT / "skills"])
+    return AssetSnapshot.freeze(ROOT / "pa" / "core" / "prompts", [ROOT / "assets" / "skills"])
 
 
-def _spec(port: int, *, steps: int = 12, evidence_: str = "open",
-          goal: str | None = None) -> MissionSpec:
+def _spec(
+    port: int, *, steps: int = 12, evidence_: str = "open", goal: str | None = None
+) -> MissionSpec:
     return MissionSpec(
         objective="探测本地监听端口",
         targets=["127.0.0.1"],
-        acceptance=[AcceptanceItem(id="acc-1", item="端口开放被证实",
-                                   evidence=evidence_, target="127.0.0.1")],
+        acceptance=[
+            AcceptanceItem(
+                id="acc-1",
+                item="端口开放被证实",
+                evidence=evidence_,
+                target="127.0.0.1",
+            )
+        ],
         budget=Budget(steps=steps, seconds=600, tokens=40000),
         allowed_scope=[f"127.0.0.1:{port}"],
     )
@@ -52,33 +59,53 @@ def _spec(port: int, *, steps: int = 12, evidence_: str = "open",
 
 def _planner_script(port: int, evidence_: str, goal: str | None = None) -> str:
     return json.dumps(
-        {"tasks": [{"type": "recon",
+        {
+            "tasks": [
+                {
+                    "type": "recon",
                     "goal": goal or f"probe 127.0.0.1:{port}",
                     "success_criteria": [{"evidence": evidence_}],
-                    "scope_slice": {}, "allowed_tools": ["probe"],
-                    "budget": {"steps": 4}}],
-         "current_strategy": {}, "rationale": "r"}, ensure_ascii=False)
+                    "scope_slice": {},
+                    "allowed_tools": ["probe"],
+                    "budget": {"steps": 4},
+                }
+            ],
+            "current_strategy": {},
+            "rationale": "r",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _worker_script(port: int) -> str:
     return json.dumps(
-        {"kind": "call_tool", "tool": "probe",
-         "args": {"target": "127.0.0.1", "port": port},
-         "expect": "端口开放"}, ensure_ascii=False)
+        {
+            "kind": "call_tool",
+            "tool": "probe",
+            "args": {"target": "127.0.0.1", "port": port},
+            "expect": "端口开放",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _finish_script() -> str:
-    return json.dumps({"kind": "finish", "summary": "声称完成"},
-                      ensure_ascii=False)
+    return json.dumps({"kind": "finish", "summary": "声称完成"}, ensure_ascii=False)
 
 
-def _run(tmp_mission, name, port, *, steps=12, evidence_="open",
-         worker=None, goal=None):
+def _run(
+    tmp_mission, name, port, *, steps=12, evidence_="open", worker=None, goal=None
+):
     d = tmp_mission / name
-    llm = MockLLM({"planner": [_planner_script(port, evidence_, goal)],
-                   "worker": [worker or _worker_script(port)]})
-    state = run(d, _spec(port, steps=steps, evidence_=evidence_),
-                llm=llm, assets=_freeze())
+    llm = MockLLM(
+        {
+            "planner": [_planner_script(port, evidence_, goal)],
+            "worker": [worker or _worker_script(port)],
+        }
+    )
+    state = run(
+        d, _spec(port, steps=steps, evidence_=evidence_), llm=llm, assets=_freeze()
+    )
     return d, state
 
 
@@ -89,6 +116,7 @@ def _ledger(d):
 
 # ─────────────────────────── trace ───────────────────────────
 
+
 def test_trace_byte_stable_and_readonly(tmp_mission, listener):
     d, _ = _run(tmp_mission, "m", listener)
     raw0, sha0, lines0 = _ledger(d)
@@ -96,7 +124,7 @@ def test_trace_byte_stable_and_readonly(tmp_mission, listener):
     tr = trace_mod.build(d)
     a_txt = trace_mod.render_text(tr, root=d)
     b_txt = trace_mod.render_text(trace_mod.build(d), root=d)
-    assert a_txt == b_txt                            # 两次渲染逐字节相等
+    assert a_txt == b_txt  # 两次渲染逐字节相等
     a_json = trace_mod.render_json(trace_mod.build(d))
     b_json = trace_mod.render_json(trace_mod.build(d))
     assert a_json == b_json
@@ -137,11 +165,11 @@ def test_trace_sections_and_payload_field_names(tmp_mission, listener):
 
 def test_trace_text_has_four_sections(tmp_mission, listener, capsys):
     from pa.cli import main
+
     d, _ = _run(tmp_mission, "m", listener)
     assert main(["trace", str(d)]) == 0
     out = capsys.readouterr().out
-    for sec in ("== 计划 ==", "== 时间线 ==", "== 失败与重试 ==",
-                "== 线索与裁决 =="):
+    for sec in ("== 计划 ==", "== 时间线 ==", "== 失败与重试 ==", "== 线索与裁决 =="):
         assert sec in out
     assert main(["trace", str(d), "--json"]) == 0
     parsed = json.loads(capsys.readouterr().out)
@@ -150,30 +178,45 @@ def test_trace_text_has_four_sections(tmp_mission, listener, capsys):
 
 # ─────────────────────────── stats ───────────────────────────
 
+
 def test_stats_three_terminals_one_row_each(tmp_mission, listener):
-    d1, s1 = _run(tmp_mission, "m1", listener)                       # completed
-    d2, s2 = _run(tmp_mission, "m2", listener, steps=2,
-                  evidence_="never-ever-met")                        # budget_steps
-    bad = json.dumps({"kind": "call_tool", "tool": "probe",
-                      "args": {"target": "10.255.255.1", "port": 80},
-                      "expect": "x"}, ensure_ascii=False)
-    d3, s3 = _run(tmp_mission, "m3", listener, evidence_="never-ever-met",
-                  worker=bad)                                        # plateau
-    assert (s1.finish_reason, s2.finish_reason, s3.finish_reason) == \
-        ("completed", "budget_steps", "plateau")
+    d1, s1 = _run(tmp_mission, "m1", listener)  # completed
+    d2, s2 = _run(
+        tmp_mission, "m2", listener, steps=2, evidence_="never-ever-met"
+    )  # budget_steps
+    bad = json.dumps(
+        {
+            "kind": "call_tool",
+            "tool": "probe",
+            "args": {"target": "10.255.255.1", "port": 80},
+            "expect": "x",
+        },
+        ensure_ascii=False,
+    )
+    d3, s3 = _run(
+        tmp_mission, "m3", listener, evidence_="never-ever-met", worker=bad
+    )  # plateau
+    assert (s1.finish_reason, s2.finish_reason, s3.finish_reason) == (
+        "completed",
+        "budget_steps",
+        "plateau",
+    )
 
     rows = [stats_mod.collect(d) for d in (d1, d2, d3)]
-    assert [r["terminal"] for r in rows] == ["completed", "budget_steps",
-                                             "plateau"]
+    assert [r["terminal"] for r in rows] == ["completed", "budget_steps", "plateau"]
     assert rows[0]["tasks"].get("done") == 1
     assert rows[1]["steps"] == 2
-    assert rows[2]["peak_no_progress"] >= 1   # P1-1：排空即收口，峰值=空转轮数
-    assert rows[2]["authz"] == 1                     # out_of_scope 计入 AuthZ
+    assert rows[2]["peak_no_progress"] >= 1  # P1-1：排空即收口，峰值=空转轮数
+    assert rows[2]["authz"] == 1  # out_of_scope 计入 AuthZ
 
     text = stats_mod.render(rows)
     # 一行一个 mission（表体恰好 3 行：表头分隔线下、## 聚合 之上）
     table = text.split("## 聚合")[0]
-    body = [l for l in table.splitlines() if l and not l.startswith(("MISSION", "-", "#"))]
+    body = [
+        line
+        for line in table.splitlines()
+        if line and not line.startswith(("MISSION", "-", "#"))
+    ]
     assert len(body) == 3
     assert "调参建议" in text
 
@@ -181,18 +224,19 @@ def test_stats_three_terminals_one_row_each(tmp_mission, listener):
     assert agg["missions"] == 3
     assert agg["vs_events"] == 0
     assert agg["vs_task_rate"] == 0.0
-    assert agg["authz_ratio"] == 1.0                 # 唯一一次阻塞就是 AuthZ
+    assert agg["authz_ratio"] == 1.0  # 唯一一次阻塞就是 AuthZ
 
 
 def test_stats_suggestions_fire_on_threshold_crossing(tmp_mission, listener):
     # worker 立即 finish、判据永不满足 → virtual_success ×3（打满尝试）
-    d, s = _run(tmp_mission, "vs", listener, evidence_="never-ever-met",
-                worker=_finish_script())
+    d, s = _run(
+        tmp_mission, "vs", listener, evidence_="never-ever-met", worker=_finish_script()
+    )
     assert s.finish_reason == "plateau"
     rows = [stats_mod.collect(d)]
     agg = stats_mod.aggregate(rows)
-    assert agg["vs_events"] == 3                     # 按事件计 3 次
-    assert agg["vs_task_rate"] == 1.0                # 按任务去重 1 个任务
+    assert agg["vs_events"] == 3  # 按事件计 3 次
+    assert agg["vs_task_rate"] == 1.0  # 按任务去重 1 个任务
     tips = stats_mod.suggest(agg)
     assert any("vs_task_rate" in t for t in tips)
     assert any("尝试" in t for t in tips)
@@ -200,12 +244,16 @@ def test_stats_suggestions_fire_on_threshold_crossing(tmp_mission, listener):
 
 # ─────────────────────────── context.assembled ───────────────────────────
 
+
 def test_context_assembled_has_no_target_leak(tmp_mission, listener):
     goal = "先确认 10.0.0.5 的可达性，再探 127.0.0.1"
     d, _ = _run(tmp_mission, "leak", listener, goal=goal)
     lines = (d / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    ctx = [json.loads(l) for l in lines
-           if json.loads(l)["type"] == "context.assembled"]
+    ctx = [
+        json.loads(line)
+        for line in lines
+        if json.loads(line)["type"] == "context.assembled"
+    ]
     assert ctx, "应有 context.assembled 事件"
     for ev in ctx:
         assert "10.0.0.5" not in json.dumps(ev["payload"], ensure_ascii=False)
@@ -213,8 +261,11 @@ def test_context_assembled_has_no_target_leak(tmp_mission, listener):
         for sec in ev["payload"]["sections"].values():
             assert set(sec) == {"chars", "pct"}
     # 对照：目标字符串确实进了账本（task.created），只是观测事件不带
-    assert any("10.0.0.5" in json.loads(l)["payload"].get("task", {}).get("goal", "")
-               for l in lines if json.loads(l)["type"] == "task.created")
+    assert any(
+        "10.0.0.5" in json.loads(line)["payload"].get("task", {}).get("goal", "")
+        for line in lines
+        if json.loads(line)["type"] == "task.created"
+    )
     # stats 能消费：prompt 斜率非负且 worker 步数分布非空
     row = stats_mod.collect(d)
     assert row["worker_step_dist"]

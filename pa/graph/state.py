@@ -5,26 +5,35 @@
 要作废的是 finding，不是任务。pending→blocked 为裁定 3 增加：
 validate_dag 发现悬空依赖时经 transition 置 blocked，不走旁路。
 """
+
 from __future__ import annotations
 
 from pa.errors import IllegalTransition
 from pa.models import Task
 
 ALLOWED = {
-    "pending":    {"ready", "blocked", "superseded"},
-    "ready":      {"running", "superseded"},
-    "running":    {"done", "failed", "blocked", "ready", "superseded"},
-    "failed":     {"ready", "superseded"},
-    "done":       set(),
-    "blocked":    {"pending", "superseded"},
+    "pending": {"ready", "blocked", "superseded"},
+    "ready": {"running", "superseded"},
+    "running": {"done", "failed", "blocked", "ready", "superseded"},
+    "failed": {"ready", "superseded"},
+    "done": set(),
+    "blocked": {"pending", "superseded"},
     "superseded": set(),
 }
 
 _TERMINAL = ("done", "failed", "blocked", "superseded")
 
 
-def transition(task: Task, to: str, writer, *, lease=None, attempt=None,
-               reason=None) -> None:
+def transition(
+    task: Task,
+    to: str,
+    writer,
+    *,
+    lease=None,
+    attempt=None,
+    reason=None,
+    tried=None,
+) -> None:
     """状态转移：先落事件，再改内存；租约生命周期统一在这里收口。
 
     - lease 参数：派发进入 running 时由 scheduler 传入；
@@ -38,7 +47,8 @@ def transition(task: Task, to: str, writer, *, lease=None, attempt=None,
     """
     if to not in ALLOWED[task.state]:
         raise IllegalTransition(
-            f"illegal transition {task.state} -> {to} (task {task.id})")
+            f"illegal transition {task.state} -> {to} (task {task.id})"
+        )
     if lease is not None:
         task.lease = lease
     elif to in _TERMINAL or to == "ready":
@@ -49,10 +59,25 @@ def transition(task: Task, to: str, writer, *, lease=None, attempt=None,
         task.block_reason = reason
     elif to != "blocked":
         task.block_reason = None
-    writer.append("task.state_changed", "engine",
-                  {"task_id": task.id, "from": task.state, "to": to,
-                   "attempt": task.attempt,
-                   "lease": task.lease.model_dump(mode="json") if task.lease else None,
-                   "reason": reason},
-                  f"ts:{task.id}:{to}:{task.attempt}")
+    if tried is not None:
+        # tried 必须随状态事件落盘：否则崩溃重放后 task.tried 丢失，
+        # worker prompt 里没有“已试动作”，重试会重复同一请求，且
+        # die/resume 与不中断跑的 token/状态不可比。
+        task.tried = list(tried)
+    payload = {
+        "task_id": task.id,
+        "from": task.state,
+        "to": to,
+        "attempt": task.attempt,
+        "lease": task.lease.model_dump(mode="json") if task.lease else None,
+        "reason": reason,
+    }
+    if tried is not None:
+        payload["tried"] = list(tried)
+    writer.append(
+        "task.state_changed",
+        "engine",
+        payload,
+        f"ts:{task.id}:{to}:{task.attempt}",
+    )
     task.state = to

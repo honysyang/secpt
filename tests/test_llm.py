@@ -7,6 +7,7 @@
 - 客户端异常 → ModelCallError（不被误判成解析失败）；
 - repr / 异常信息里搜不到 api_key。
 """
+
 from __future__ import annotations
 
 import json
@@ -18,11 +19,16 @@ from pa.errors import ModelCallError, ModelParseError
 from pa.infra.llm import ApiLLM, MockLLM, complete_retry, load_client, parse_json
 from pa.models import Decision
 
-_GOOD = json.dumps({
-    "kind": "call_tool", "tool": "probe",
-    "args": {"target": "10.0.0.5", "port": 80},
-    "expect": "看到 open 或 closed"}, ensure_ascii=False)
-_SCHEMA_BAD = json.dumps({"tool": "probe", "args": {}})   # 缺 kind
+_GOOD = json.dumps(
+    {
+        "kind": "call_tool",
+        "tool": "probe",
+        "args": {"target": "10.0.0.5", "port": 80},
+        "expect": "看到 open 或 closed",
+    },
+    ensure_ascii=False,
+)
+_SCHEMA_BAD = json.dumps({"tool": "probe", "args": {}})  # 缺 kind
 _MALFORMED = '{"kind": "call_tool", ...'
 
 
@@ -45,11 +51,25 @@ def test_malformed_json_raises_parse_error():
     with pytest.raises(ModelParseError):
         parse_json(_MALFORMED, Decision)
     client = MockLLM({"decide": [_MALFORMED, _MALFORMED]})
-    with pytest.raises(ModelParseError):            # 第 1 次
+    with pytest.raises(ModelParseError):  # 第 1 次
         client.parse(_complete(client), Decision)
-    with pytest.raises(ModelParseError):            # 重试 1 次仍失败 → 第 2 次抛
+    with pytest.raises(ModelParseError):  # 重试 1 次仍失败 → 第 2 次抛
         client.parse(_complete(client), Decision)
     assert len(client.calls) == 2
+
+
+def test_parse_json_accepts_trailing_prose():
+    """模型在合法 JSON 后追加解释（Extra data）应被宽容解析。
+
+    真跑 4 次 ModelParseError 都是这种形态；整段 json.loads 失败不代表
+    第一个对象不可用。
+    """
+    raw = _GOOD + "\n\n说明：先探 80 端口。"
+    dec = parse_json(raw, Decision)
+    assert dec.kind == "call_tool" and dec.tool == "probe"
+    # 前置 prose 也允许（从第一个 { 起 raw_decode）
+    dec2 = parse_json("计划如下：\n" + _GOOD + "\n完成。", Decision)
+    assert dec2.kind == "call_tool"
 
 
 def test_complete_retry_exhausts():
@@ -57,6 +77,7 @@ def test_complete_retry_exhausts():
 
     注意 complete 只返回原始文本，解析在 parse——重试包装的是"取数"这一
     步；这里用注入异常的客户端验证 complete 侧的重试语义。"""
+
     class FlakyCall(MockLLM):
         def __init__(self):
             super().__init__({"decide": [_GOOD]})
@@ -70,12 +91,17 @@ def test_complete_retry_exhausts():
 
     client = FlakyCall()
     with pytest.raises(ModelCallError, match="transient"):
-        complete_retry(client, retries=1, system="s", user="u",
-                       schema=Decision, phase="decide")
-    assert len(client.calls) == 0                # 两次都在 complete 阶段失败
+        complete_retry(
+            client, retries=1, system="s", user="u", schema=Decision, phase="decide"
+        )
+    assert len(client.calls) == 0  # 两次都在 complete 阶段失败
     # 第三次成功（重试路径的正面情形）
-    assert complete_retry(client, retries=1, system="s", user="u",
-                          schema=Decision, phase="decide") == _GOOD
+    assert (
+        complete_retry(
+            client, retries=1, system="s", user="u", schema=Decision, phase="decide"
+        )
+        == _GOOD
+    )
 
 
 def test_schema_invalid_raises_parse_error():
@@ -98,8 +124,14 @@ def test_client_error_is_call_error_not_parse():
             return parse_json(raw, schema)
 
     with pytest.raises(ModelCallError, match="connection refused"):
-        complete_retry(BrokenLLM(), retries=1, system="s", user="u",
-                       schema=Decision, phase="decide")
+        complete_retry(
+            BrokenLLM(),
+            retries=1,
+            system="s",
+            user="u",
+            schema=Decision,
+            phase="decide",
+        )
 
 
 def test_no_api_key_leak(monkeypatch):
@@ -111,7 +143,7 @@ def test_no_api_key_leak(monkeypatch):
     assert isinstance(client, ApiLLM)
     assert "sk-" not in repr(client)
     with pytest.raises(ModelCallError) as ei:
-        _complete(client)                       # 127.0.0.1:9 拒绝连接，快速失败
+        _complete(client)  # 127.0.0.1:9 拒绝连接，快速失败
     assert "sk-" not in str(ei.value)
     assert "SECRETLEAK" not in str(ei.value)
 
@@ -129,7 +161,7 @@ def test_phase_queue_exhausted_repeats_last():
     client = MockLLM({"decide": ["first", "second"]})
     assert _complete(client) == "first"
     assert _complete(client) == "second"
-    assert _complete(client) == "second"        # 耗尽后重复最后一条
+    assert _complete(client) == "second"  # 耗尽后重复最后一条
     assert _complete(client) == "second"
 
 

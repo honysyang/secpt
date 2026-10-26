@@ -5,6 +5,7 @@
 "做过没有"——剔除后再哈希，同一目标 timeout 60 与 120 得到同一指纹，
 换端口/换目标则不同。指纹是动作去重与断点续做的键（§6.5 第 3 步）。
 """
+
 from __future__ import annotations
 
 import hashlib

@@ -4,6 +4,7 @@
 - vs_rate：vs_events / 已返回 worker 数（事件口径，教练用）；
 - authz_ratio：AuthZ 失败 / 总失败（failures_by_class 来自 derive_stats）。
 """
+
 from __future__ import annotations
 
 from pa.models import MissionState
