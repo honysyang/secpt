@@ -143,6 +143,7 @@ secpt do '审计这个项目' --attachment ./src --yes      # 文件/目录入 w
 | `docs/CONTROL_PLANE.md` | 判定矩阵 / 失败恢复 / 教练与 JEV / 记忆分层 |
 | `docs/BUILD_SPEC.md` | v0 施工单（逐文件实现与验收） |
 | `docs/WORKFLOW.md` | 工作流决议：双层控制环 / 黑板 / 信号级唤醒 / 对标（ARTEX、sec-agent） |
+| `docs/ENTERPRISE_DESIGN.md` | **企业级长任务高复杂场景**：对标开源 harness 的差距分析与 M1–M6 演进设计 |
 | `docs/DESIGN.md` | 早期架构设计说明（Hermes 对照） |
 | `docs/STATUS.md` | 实现状态台账（每行 ✅ 对应一个真实测试，由 `tests/test_status.py` 保证） |
 | `docs/REPORT_TEMPLATE.md` | 报告模板与写作纪律 |
