@@ -30,8 +30,13 @@ secpt/
 ├── assets/                    # 运行资产（数据驱动，mission 级冻结）
 │   ├── prompts→pa/core/prompts│   skills/ · roles/ · playbooks/（front matter markdown）
 ├── docs/                      # 设计与状态文档（见「文档地图」）
-├── tests/                     # 374 个验收测试
+├── tests/                     # 验收测试
 ├── missions/                  # 运行时数据（gitignore）：账本/证据/报告
+│   └── <family>/runs/N/
+│       ├── events.jsonl       #   原始账本（append-only）
+│       ├── analysis.md        #   ★ 运行分析：全过程+系统信号+失败归因+优化建议
+│       └── workspace/         #   附件与工具工作区
+├── <family>/report.md         # 交付物：验收核对矩阵 + findings + 证据链
 ├── pyproject.toml
 └── README.md
 ```
@@ -75,6 +80,7 @@ secpt do '审计这个项目' --attachment ./src --yes      # 文件/目录入 w
 - **副作用唯一入口**是动作网关（范围校验 → 工具白名单 → 风险档 → 去重 → 执行 → 证据落盘 → 审计）；**结论唯一出口**是 JEV 裁决（confirmed/suspected/false_positive + 补证方向）。
 - **编排者有护栏也有牙齿**：run/create/abandon 三权分立，判据合同门拒绝散文与伪证据，教练 advisory（thrashing/vs_rate）直接进编排上下文。
 - **验收核对矩阵**：报告区分 VERIFIED / CONTRACT_CONFLICT / NOT_OBSERVED，同族线索存在不冒充"预期值已验证"；0 任务/合同冲突输出 NOT_EXECUTED / PARTIAL 故障态，不产出假"无发现"报告。
+- **每次运行自动落盘 `runs/N/analysis.md`（运行分析）**：面向系统优化的全过程记录——运行元信息、系统信号（needs_help/缓存命中/编排降级/合同门拒绝/解析失败率）、具体到本次运行的优化建议、逐任务失败归因、完整思考-行动-观察叙事（与 `secpt log` 同源）。任意终态都写（失败的运行恰恰是最重要的分析素材）；`secpt report <dir>` 一键重新生成两份。
 
 ## 环境变量
 

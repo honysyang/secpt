@@ -465,6 +465,7 @@ def _run_follow(
 def _report(d: str) -> int:
     # 调用方已把 d 解析成实际账本 runs/N 路径；家族级聚合在 save_report
     # （run 收口时自动落盘），这里保留单账本渲染作为调试/补救入口。
+    # 同时重新生成 analysis.md——运行分析文档丢失/想更新时一键补。
     root = Path(d)
     view = StoreView(root)
     if not view.exists():
@@ -474,6 +475,11 @@ def _report(d: str) -> int:
     out = root / "report.md"
     out.write_text(text, encoding="utf-8")
     print(f"报告已写入 {out}")
+    from pa.report.analysis import save_analysis
+
+    analysis = save_analysis(state, root)
+    if analysis is not None:
+        print(f"运行分析已写入 {analysis}")
     return 0
 
 

@@ -22,6 +22,7 @@ from pa.core.planner import bootstrap_plan
 from pa.errors import SecptError
 from pa.infra.log import get_logger
 from pa.report import save_report
+from pa.report.analysis import save_analysis
 from pa.graph.ready import ready_tasks
 from pa import envs
 from pa.models import AcceptanceItem, Clue, MissionSpec, MissionState, now
@@ -97,12 +98,15 @@ def run(
         die_at = envs.die_at_step()
         if die_at is not None and state.step == die_at:
             os._exit(9)  # 测试钩子：模拟第 N 步断电
-    # 终态自动落盘报告（WORKFLOW §7 b8）：三条收口路径（resume-finished /
+    # 终态自动落盘（WORKFLOW §7 b8）：三条收口路径（resume-finished /
     # enforce 提前收口 / check_termination 正常收口）在这里汇聚，单点挂钩
     # 全覆盖；失败静默降级不阻断退出（save_report docstring）。断电路径
-    # 走不到这里——由 resume 二跑补报告，账本口径不变。
+    # 走不到这里——由 resume 二跑补，账本口径不变。
+    # report.md = 交付物（finished 才有）；analysis.md = 运行分析
+    # （任意终态都写——失败的运行恰恰是优化分析最需要的素材）。
     if state.finished:
         save_report(state, root)
+    save_analysis(state, root)
     return state
 
 

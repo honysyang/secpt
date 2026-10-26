@@ -87,6 +87,16 @@
 | 附件进 worker 简报（files 段）与 flow/log 头部展示 | ✅ | `test_attachment_mission_end_to_end`（简报经 fs.grep 复核链路） |
 | code 审计资产：roles/analyst.md + playbooks/pb-code.md + skills/source-review.md（数据驱动注入） | ✅ | `test_attachment_mission_end_to_end`（role=analyst 注入 + fs.grep 执行） |
 
+## v0.8：运行分析文档（每 run 自动落盘）
+
+| 条目 | 状态 | 验收测试 |
+| --- | --- | --- |
+| 任意终态自动落盘 runs/N/analysis.md（completed 与失败运行都写） | ✅ | `test_analysis_written_on_completed`、`test_analysis_written_on_plateau_with_attribution` |
+| 结构：运行元信息/系统信号/优化建议/失败归因/运行过程全记录 | ✅ | `test_analysis_written_on_completed` |
+| 优化建议具体到本次运行（needs_help/缓存命中/编排降级/合同门拒绝/零 finding） | ✅ | `test_analysis_written_on_plateau_with_attribution` |
+| `secpt report` 一键重新生成 report.md + analysis.md | ✅ | `test_analysis_regen_via_report_cli` |
+| 叙事单一事实源（analysis 的过程段 == render_log 去标题） | ✅ | `test_analysis_narrative_matches_log` |
+
 ## Part 1：五处地基修正
 
 | 条目 | 状态 | 验收测试 |
