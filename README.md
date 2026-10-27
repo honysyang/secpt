@@ -551,12 +551,23 @@ loop = ExecutionLoop(llm, tools, hitl_callback=controller.request_approval)
 
 | 变量 | 说明 |
 |------|------|
-| `LLM_PROVIDER` | 默认 LLM 提供商（deepseek/openai/anthropic） |
+| `LLM_PROVIDER` | 默认 LLM 提供商（deepseek/openai/anthropic/mock）。`mock` 为离线演示模式：无需 API Key 即可跑通流式输出、工具调用与 HITL 审批全链路 |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key |
 | `OPENAI_API_KEY` | OpenAI API Key |
 | `ANTHROPIC_API_KEY` | Anthropic API Key |
+| `WEB_API_KEY` | Web 服务 API 认证密钥。非空时所有 `/api/*` 接口要求请求头 `X-Api-Key`，且服务绑定 `0.0.0.0` 允许远程访问；为空时服务仅绑定 `127.0.0.1` 本机访问（`/api/health` 与静态页除外） |
 | `MEMORY_BACKEND` | 记忆存储后端（memory/sqlite） |
 | `LOG_LEVEL` | 日志级别 |
+
+Web 前端远程访问示例：
+
+```bash
+# 服务端 .env
+WEB_API_KEY=my-secret-key
+
+# 启动后前端首次请求会弹出密钥输入框；或直接在控制台预置：
+localStorage.setItem('secpt_api_key', 'my-secret-key')
+```
 
 ## 测试
 

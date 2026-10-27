@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from runtime.agents.base import AgentResult, SubAgent
 from runtime.blackboard import Blackboard, BlackboardAgent
@@ -41,13 +41,25 @@ class Router:
         self.coordinator = coordinator
         self.sub_agents = sub_agents
 
-    async def route(self, task: str, context: str = "") -> CollaborationResult:
+    async def route(
+        self,
+        task: str,
+        context: str = "",
+        on_token: Callable[[str], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ) -> CollaborationResult:
         """路由任务到合适的子 Agent。
 
         流程：
         1. Coordinator 分析任务，决定路由到哪个子 Agent
         2. 选中的子 Agent 执行任务
         3. 返回结果
+
+        Args:
+            on_token: 可选的流式回调，透传给执行任务的 Agent，
+                收到 LLM 文本增量时调用（路由决策本身不流式）
+            on_event: 可选的过程事件回调，透传给执行任务的 Agent
+                （tool_call/tool_result/tool_rejected），供 UI 展示交互过程
         """
         # Coordinator 决定路由；带上一句话职责描述，
         # 角色池变大后仅凭名字无法准确路由
@@ -66,7 +78,7 @@ class Router:
         # 执行
         if selected_name in self.sub_agents:
             agent = self.sub_agents[selected_name]
-            result = await agent.run(task, context)
+            result = await agent.run(task, context, on_token=on_token, on_event=on_event)
             return CollaborationResult(
                 output=result.output,
                 mode="router",
@@ -75,7 +87,7 @@ class Router:
             )
         else:
             # 未匹配，Coordinator 自己处理
-            result = await self.coordinator.run(task, context)
+            result = await self.coordinator.run(task, context, on_token=on_token, on_event=on_event)
             return CollaborationResult(
                 output=result.output,
                 mode="router",

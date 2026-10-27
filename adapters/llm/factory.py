@@ -8,6 +8,8 @@ OpenAI SDK 返回的对象需要转换为上述 dict 格式。
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 from harness.config import get_settings
@@ -230,6 +232,92 @@ class AnthropicLLM:
         }
 
 
+class MockLLM:
+    """离线演示/测试用 Mock 提供商：无需 API Key 即可跑通完整链路。
+
+    行为脚本：
+    - chat/chat_stream 带 tools 且历史中尚无工具结果 → 流式输出一段文字，
+      然后调用 run_command（dangerous=True），用于演示 HITL 审批交互
+    - 历史中已有工具结果 → 流式输出基于工具结果的收尾回答
+    - 不带 tools（路由/总结/run_simple）→ 纯文本确认，避免误触发工具
+    """
+
+    _INTRO = "好的，我先用一条演示命令验证工具链路与审批流程。"
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+    @staticmethod
+    def _pending_tool_call(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> bool:
+        """需要发起工具调用：带 tools 且还没有任何工具结果进入历史。"""
+        return bool(tools) and not any(m.get("role") == "tool" for m in messages)
+
+    @staticmethod
+    def _tool_call_response() -> dict[str, Any]:
+        return {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": MockLLM._INTRO,
+                "tool_calls": [{
+                    "id": "mock_call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": json.dumps({"command": "echo mock-web-demo"}),
+                    },
+                }],
+            }}],
+            "usage": {"total_tokens": 20},
+        }
+
+    @staticmethod
+    def _plain_text(messages: list[dict[str, Any]]) -> str:
+        if any(m.get("role") == "tool" for m in messages):
+            snippet = str(messages[-1].get("content", ""))[:120].replace("`", "'")
+            return (
+                f"演示完成。工具返回内容：\n\n```\n{snippet}\n```\n\n"
+                "以上回复由 MockLLM 生成（LLM_PROVIDER=mock），用于离线验证流式输出、"
+                "工具过程展示与审批交互。"
+            )
+        last = str(messages[-1].get("content", "")) if messages else ""
+        return f"收到：{last[:80]}（MockLLM 演示回复）"
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if self._pending_tool_call(messages, tools):
+            return self._tool_call_response()
+        text = self._plain_text(messages)
+        return {
+            "choices": [{"message": {"role": "assistant", "content": text, "tool_calls": []}}],
+            "usage": {"total_tokens": 30},
+        }
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        if self._pending_tool_call(messages, tools):
+            for ch in self._INTRO:
+                yield {"type": "delta", "content": ch}
+                await asyncio.sleep(0.01)
+            yield {"type": "final", **self._tool_call_response()["choices"][0], "usage": {"total_tokens": 20}}
+            return
+
+        text = self._plain_text(messages)
+        for ch in text:
+            yield {"type": "delta", "content": ch}
+            await asyncio.sleep(0.004)
+        yield {
+            "type": "final",
+            "message": {"role": "assistant", "content": text, "tool_calls": []},
+            "usage": {"total_tokens": 30},
+        }
+
+
 def build_llm(provider: str | None = None, **kwargs: Any) -> Any:
     """构建 LLM 客户端（适配器模式）。
 
@@ -243,14 +331,9 @@ def build_llm(provider: str | None = None, **kwargs: Any) -> Any:
     settings = get_settings()
     provider = provider or settings.llm_provider
 
-    # 凭证预检：空 key 时给出指名道姓的错误，
-    # 避免 OpenAI SDK 报出误导性的 "OPENAI_API_KEY missing"
-    api_key = getattr(settings, f"{provider}_api_key", "")
-    if not api_key:
-        raise ValueError(
-            f"提供商 {provider!r} 缺少 API Key。"
-            f"请在项目根 .env 中设置 {provider.upper()}_API_KEY 并重新启动"
-        )
+    # mock 提供商：离线演示/测试用，无需凭证，也不包韧性层（保持脚本行为确定性）
+    if provider == "mock":
+        return MockLLM(**kwargs)
 
     configs = {
         "deepseek": lambda: OpenAICompatibleLLM(
@@ -271,8 +354,19 @@ def build_llm(provider: str | None = None, **kwargs: Any) -> Any:
         ),
     }
 
+    # 先做提供商名校验再做凭证预检：否则未知 provider 会得到
+    # "缺少 XXX_API_KEY" 的误导性报错，而不是 "Unknown provider"
     if provider not in configs:
-        raise ValueError(f"Unknown provider: {provider}. Available: {list(configs.keys())}")
+        raise ValueError(f"Unknown provider: {provider}. Available: {list(configs.keys()) + ['mock']}")
+
+    # 凭证预检：空 key 时给出指名道姓的错误，
+    # 避免 OpenAI SDK 报出误导性的 "OPENAI_API_KEY missing"
+    api_key = getattr(settings, f"{provider}_api_key", "")
+    if not api_key:
+        raise ValueError(
+            f"提供商 {provider!r} 缺少 API Key。"
+            f"请在项目根 .env 中设置 {provider.upper()}_API_KEY 并重新启动"
+        )
 
     client = configs[provider]()
 

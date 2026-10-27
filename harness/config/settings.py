@@ -39,6 +39,8 @@ class Settings:
 
     # 环境
     env: str = "dev"
+    # Web 认证：非空时 API 必须携带 X-Api-Key；为空时仅允许本机访问
+    web_api_key: str = ""
 
 
 @lru_cache
@@ -56,4 +58,5 @@ def get_settings() -> Settings:
         vector_backend=os.getenv("VECTOR_BACKEND", "local"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         env=os.getenv("APP_ENV", "dev"),
+        web_api_key=os.getenv("WEB_API_KEY", ""),
     )

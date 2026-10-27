@@ -124,6 +124,10 @@ class ToolRegistry:
         """列出所有工具名。"""
         return list(self._tools.keys())
 
+    def list_items(self) -> list[Tool]:
+        """列出所有工具定义（供配置中心展示完整元数据）。"""
+        return list(self._tools.values())
+
     def list_schemas(self) -> list[dict[str, Any]]:
         """列出所有工具的 Schema。"""
         return [tool.to_schema() for tool in self._tools.values()]

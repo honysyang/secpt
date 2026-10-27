@@ -189,6 +189,10 @@ class RoleRegistry:
         """列出所有角色 {name: description}。"""
         return {name: spec.description for name, spec in self._roles.items()}
 
+    def list_specs(self) -> dict[str, RoleSpec]:
+        """列出所有角色完整声明（供配置中心展示/编辑）。"""
+        return dict(self._roles)
+
     def load_file(self, path: str | Path) -> list[str]:
         """从 JSON 配置文件合并加载角色（同名覆盖内置）。
 

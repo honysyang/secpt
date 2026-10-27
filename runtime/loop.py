@@ -51,6 +51,7 @@ class ExecutionLoop:
         max_steps: int = 10,
         hitl_callback: Any | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
         context_budget_chars: int = 60_000,
     ) -> None:
         self.llm = llm
@@ -58,9 +59,15 @@ class ExecutionLoop:
         self.max_steps = max_steps
         self.hitl_callback = hitl_callback  # 人工确认回调
         self.on_token = on_token  # 流式回调：LLM 文本增量时触发
+        self.on_event = on_event  # 过程事件回调：tool_call / tool_result / tool_rejected
         # 上下文预算（字符数，≈1/4 token）：超限时裁剪旧轮次观察，
         # 防止长任务消息无限增长逼近模型窗口
         self.context_budget_chars = context_budget_chars
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        """向 UI/观测层推送过程事件；无订阅者时零开销。"""
+        if self.on_event is not None:
+            self.on_event(event)
 
     async def run_react(
         self,
@@ -93,7 +100,9 @@ class ExecutionLoop:
             # 上下文预算：超限时裁剪旧轮次（保留 system 与最近消息）
             self._trim_messages(messages)
             # Thought: LLM 思考下一步（支持流式）
-            if self.on_token is not None and hasattr(self.llm, "chat_stream"):
+            # chat_stream 可能被韧性包装器显式置为 None（底层不支持流式），
+            # 因此用 getattr 判断而非 hasattr
+            if self.on_token is not None and getattr(self.llm, "chat_stream", None) is not None:
                 response = await self._chat_stream(messages)
             else:
                 response = await self.llm.chat(messages, tools=self.tools.list_schemas() or None)
@@ -132,6 +141,7 @@ class ExecutionLoop:
                 })
 
                 # 执行工具
+                self._emit({"type": "tool_call", "tool": tool_name, "args": tool_args_str})
                 tool = self.tools.get(tool_name)
                 if tool is None:
                     observation = f"错误: 工具 '{tool_name}' 不存在"
@@ -143,6 +153,7 @@ class ExecutionLoop:
                         approved = await hook(tool_name, tool_args_str)
                         if not approved:
                             observation = f"用户拒绝了执行 '{tool_name}'"
+                            self._emit({"type": "tool_rejected", "tool": tool_name})
                             steps.append({
                                 "step": step_num,
                                 "type": "observation",
@@ -161,6 +172,7 @@ class ExecutionLoop:
                     except Exception as e:
                         observation = f"工具执行错误: {e}"
 
+                self._emit({"type": "tool_result", "tool": tool_name, "content": str(observation)})
                 steps.append({
                     "step": step_num,
                     "type": "observation",

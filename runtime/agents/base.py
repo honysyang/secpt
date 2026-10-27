@@ -63,7 +63,11 @@ class SubAgent:
         self.description = description  # 一句话职责，供路由决策参考
 
     async def run(
-        self, task: str, context: str = "", on_token: Callable[[str], None] | None = None
+        self,
+        task: str,
+        context: str = "",
+        on_token: Callable[[str], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentResult:
         """执行任务。
 
@@ -76,6 +80,8 @@ class SubAgent:
             task: 任务描述
             context: 额外上下文
             on_token: 可选的流式回调，收到 LLM 文本增量时调用
+            on_event: 可选的过程事件回调（tool_call/tool_result/tool_rejected），
+                供 UI 展示交互过程；审批仍走工具注册表的 approval_hook
 
         Returns:
             AgentResult 包含输出和元数据
@@ -87,6 +93,7 @@ class SubAgent:
             tools=self.tools,
             max_steps=self.max_steps,
             on_token=on_token,
+            on_event=on_event,
         )
         result = await loop.run_react(task, context)
 

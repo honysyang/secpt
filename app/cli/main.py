@@ -26,23 +26,20 @@ console = Console()
 
 
 def _create_llm(provider: str | None = None) -> Any:
-    """创建真实 LLM 客户端。"""
-    from adapters.llm.factory import build_llm
+    """创建真实 LLM 客户端（委托共享引导模块，与 Web 保持一致）。"""
+    from app.bootstrap import create_llm
 
-    return build_llm(provider)
+    return create_llm(provider)
 
 
 def _register_default_tools(registry: Any) -> None:
     """注册内置工具集 + 加载用户自定义脚本工具（tools/ 目录，可选）。"""
-    from harness.tools.builtin import register_builtin
-    from harness.tools.loader import ScriptToolLoader
+    from app.bootstrap import build_tool_registry
 
-    names = register_builtin(registry)
-    console.print(f"[dim]内置工具: {len(names)} 个[/dim]")
-
-    loaded = ScriptToolLoader("tools").load_into(registry)
-    if loaded:
-        console.print(f"[dim]自定义脚本工具: {len(loaded)} 个 {loaded}[/dim]")
+    # 共享构造：内置工具 + 脚本工具；CLI 额外做提示与 HITL 挂钩
+    built = build_tool_registry(load_script_tools=True)
+    registry._tools = built._tools
+    console.print(f"[dim]工具: {len(registry._tools)} 个[/dim]")
 
     # HITL：危险工具（run_command/python_script/write_file 等）执行前人工确认
     registry.approval_hook = _hitl_confirm
@@ -125,15 +122,11 @@ async def _run_single_mode(
     return result.messages or []
 
 
-def _load_roles() -> Any:
-    """加载角色注册表：内置模板 + 可选的 configs/roles.json 自定义/覆盖。"""
-    from runtime.agents.roles import RoleRegistry
+def _load_roles(path: str | Path | None = None) -> Any:
+    """加载角色注册表（委托共享引导模块，与 Web 保持一致）。"""
+    from app.bootstrap import load_roles
 
-    roles = RoleRegistry.with_builtins()
-    roles_file = Path("configs/roles.json")
-    if roles_file.exists():
-        roles.load_file(roles_file)
-    return roles
+    return load_roles(path)
 
 
 _task_counter = 0  # 会话内任务序号（仅用于黑板 key 可读性）
