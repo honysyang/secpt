@@ -21,6 +21,8 @@ build/
 
 # --- secpt v0 运行数据（事件账本 / 证据 / 报告，不入库） ---
 missions/
+snapshots/
+outputs/
 
 # --- 密钥与本地配置（永不入库） ---
 .env
@@ -35,3 +37,4 @@ tmp/
 *.tar.gz
 tsec*-run-*.log
 *.run.log
+snapshots/
