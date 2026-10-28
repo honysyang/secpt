@@ -28,6 +28,7 @@ from secpt.finalize.experience import Distiller as ExperienceDistiller
 from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.judge import load_profile, note_for, sweep
 from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOutput, ToolCall
+from secpt.llms.coach import Coach
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
@@ -140,6 +141,7 @@ def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
         experience_env=_experience_env(),
         judge_sweep=partial(sweep, profile=prof),
         judge_note=note_for(prof),
+        coach=Coach(client),
     )
 
 

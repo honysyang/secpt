@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput
+from secpt.llms.coach import Coach
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
 from secpt.store import attention, experience, graph, ledger
@@ -95,6 +96,9 @@ JudgeSweep = Callable[[sqlite3.Connection, str], list[FindingRow]]
 （actor=judge）。None = 裁判不在装配（M1 兼容）。
 """
 
+# M2 注意力包的规划段占位文案：救场提案（WF5）会临时替换它一个步，用过即还原。
+_BASE_PLAN_NOTE = "（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）"
+
 
 class StepOutcome(BaseModel):
     """一步的落账快照：喂 W1-7 的 CLI 摘要行与 W2-3 的 e2e 断言。"""
@@ -135,6 +139,7 @@ class PentestLoop:
         experience_env: str = "lab",
         judge_sweep: JudgeSweep | None = None,
         judge_note: str | None = None,
+        coach: Coach | None = None,
     ) -> None:
         self._conn = conn
         self._llm = main_llm
@@ -145,6 +150,7 @@ class PentestLoop:
         self._experience_env = experience_env
         self._judge_sweep = judge_sweep
         self._judge_note = judge_note
+        self._coach = coach
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -196,14 +202,29 @@ class PentestLoop:
         counter = stall.StallCounter()
         outcomes: list[StepOutcome] = []
         exit_streak = 0  # 出场三验连败计（W2-1）：每次 done 过验，不过弹回
+        rescue_used = False  # 救场名额（WF5）：每 run 只有一次 LLMC 救场机会
+        plan_note = _BASE_PLAN_NOTE  # 注意力包规划段；救场提案临时替换一个步
         exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
         crashed: SecptError | None = None
         try:
             for step_no in range(start, max_steps + 1):
                 if not budget.try_spend(max_steps, step_no):
                     break  # 撞步线：停执行（§39：非降级收尾，走异常出口落账）
-                outcome, done = self._one_step(task, run, step_no, counter)
+                outcome, done, ring = self._one_step(task, run, step_no, counter, plan_note)
                 outcomes.append(outcome)
+                plan_note = _BASE_PLAN_NOTE  # 提案吸收一次即用掉：下一步还原占位
+                if ring:
+                    hint = self._on_stall_ring(
+                        task, run, outcome.step_no, counter, plan_note, rescue_used
+                    )
+                    if hint is None:
+                        raise SecptError(
+                            "失速计拉铃：连续 N 步工具失败，无实质进展",
+                            code="E_STALL",
+                            context={"run_id": run.id, "step_no": outcome.step_no},
+                        )
+                    rescue_used = True
+                    plan_note = hint
                 # WF6 出场三验：done 先过验再放行——passed 正常收束；not passed
                 # 弹回继续走步（emit exit_failed），连败 3 轮按 E_WALL 走异常出口。
                 if not done:
@@ -268,21 +289,27 @@ class PentestLoop:
         )
 
     def _one_step(
-        self, task: TaskRow, run: RunRow, step_no: int, counter: stall.StallCounter
-    ) -> tuple[StepOutcome, bool]:
+        self,
+        task: TaskRow,
+        run: RunRow,
+        step_no: int,
+        counter: stall.StallCounter,
+        plan_note: str,
+    ) -> tuple[StepOutcome, bool, bool]:
         """WF2 单步：打包 → step → dispatch（批外）→ 收尾事务落账 → 失速计 → 判 done。
 
         为什么 dispatch 在事务边界外收集回执：工具是子进程级慢操作，不能
         占着 BEGIN IMMEDIATE 的写锁等待执行；回执收齐后一笔事务写完 steps+小票+
         水位线，提交成功才补发 ticket_appended（pre-commit 发事件 = 承认未落账的账）。
-        失速计收数同样在账后：拉铃时事实已落账，raise 只负责走异常出口。
+        失速计收数同样在账后；拉铃只置 ring 位返回——救场（WF5）在 _advance 的
+        拉铃段裁决，本方法不再自带 E_STALL 出口。
         """
         if self._bus is not None:
             self._bus.emit("run_step_started", task_id=task.id, run_id=run.id, step_no=step_no)
         pkg = attention.build(
             goal=self._goal_projection(task, run),
             step_no=step_no,
-            plan_summary="（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）",
+            plan_summary=plan_note,
             recent=ledger.recent_tickets(self._conn, task.id),
             graph_summary=graph.graph_summary(self._conn, task.id),
             experiences=experience.fetch_replay(self._conn, self._experience_env),
@@ -347,19 +374,56 @@ class PentestLoop:
                 self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
         # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。
         self._judge_pass(task.id)
-        # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 拉铃）。
+        # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 置铃位）。
+        ring = False
         for receipt in receipts:
             if counter.observe(ok=receipt.exit_code == 0):
-                raise SecptError(
-                    "失速计拉铃：连续 N 步工具失败，无实质进展",
-                    code="E_STALL",
-                    context={"run_id": run.id, "step_no": step_no},
-                )
+                ring = True
+                break  # 同 M1 语义：铃响本轮就算，余下回执不再收数
         self._audit(task.id, f"step {step_no}: {output.thought}, tool_calls={len(tickets)}")
         outcome = StepOutcome(
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
         )
-        return outcome, output.done
+        return outcome, output.done, ring
+
+    def _on_stall_ring(
+        self,
+        task: TaskRow,
+        run: RunRow,
+        step_no: int,
+        counter: stall.StallCounter,
+        plan_note: str,
+        rescue_used: bool,
+    ) -> str | None:
+        """WF5 失速救场段：事件线落铃 → 教练提案；返回下一步的规划段（hint）。
+
+        顺序契约（先账后铃）：本段在 step_transaction 提交之后才被调，铃必落在
+        已落账的事实上。三个分支语义——
+        - 名额没救（coach 缺位 / 已用掉）：返回 None，由调用方按 M1 原语义 raise
+          E_STALL（事件线只管报告，绝不自动接管——R3 风险红线）；
+        - 教练失能（LlmError/idea 空白）：可降级器官——warning + audit(actor=main)
+          留痕后同样返回 None，绝不悬死也不遮错；
+        - 提案在手：audit(actor=llmc) 落账 → reset 连败 → hint 挤进下一步注意力包。
+        """
+        if self._bus is not None:
+            self._bus.emit("stall_alarm", task_id=task.id, run_id=run.id, step_no=step_no)
+        if self._coach is None or rescue_used:
+            return None
+        try:
+            proposal = self._coach.propose(graph.graph_summary(self._conn, task.id), plan_note)
+        except Exception as exc:  # noqa: BLE001  可降级器官兜底（见 docstring）
+            _log.warning("coach_degraded", task_id=task.id, error=str(exc))
+            self._audit(task.id, f"教练提案降级：{exc}")
+            return None
+        if proposal is None:
+            _log.warning("coach_no_proposal", task_id=task.id)
+            self._audit(task.id, "教练提案降级：LLM 无话说，不救场（只提案不裁决红线不变）")
+            return None
+        hint = f"教练提案待吸收（WF5 救场，只提案不裁决）：{proposal.idea}——{proposal.reason}"
+        ledger.audit(self._conn, task.id, "llmc", f"教练提案（只提案不裁决）：{hint}")
+        counter.reset()
+        _log.info("coach_proposal_accepted", task_id=task.id)
+        return hint
 
     def _judge_pass(self, task_id: str) -> None:
         """W3-2 判零刻点（WF4）：每步收尾提交后立即裁决本轮新 claim。

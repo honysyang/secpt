@@ -122,3 +122,16 @@ def test_stall_n_configurable() -> None:
 def test_stall_n_must_be_positive() -> None:
     with pytest.raises(ValueError, match="n"):
         stall.StallCounter(n=0)
+
+
+def test_stall_reset_after_rescue() -> None:
+    """救场重置（W3-3 WF5）：LLMC 提案落地后连败清零——旧连败不算冤枉新打法，
+    n 契约不变：reset 后仍需完整数满 n 才再拉铃。"""
+    counter = stall.StallCounter(n=5)
+    for _ in range(4):
+        counter.observe(ok=False)
+    counter.reset()
+    assert counter.observe(ok=False) is False  # 从零重新计
+    for _ in range(4):
+        counter.observe(ok=False)
+    assert counter.observe(ok=False) is True  # 仍需数满完整 n

@@ -246,7 +246,9 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
     task = ledger.latest_task(conn)
     assert task.exit_kind == "stalled"
     names = [name for name, _ in events]
-    assert names == ["run_step_started", "ticket_appended"] * 5 + ["run_ended"]
+    # 失速环事件契约扩展（W3-3 记 §65）：拉铃必落 stall_alarm（事件线只管报告，
+    # 本方向无 coach，铃后仍按 M1 语义 E_STALL）。
+    assert names == (["run_step_started", "ticket_appended"] * 5 + ["stall_alarm", "run_ended"])
 
 
 # ---------- 方向四：经验沉淀 + 二轮回放（W3-1，验收②基础版） -------------------------

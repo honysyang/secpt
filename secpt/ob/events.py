@@ -25,6 +25,7 @@ EventName = Literal[
     "exit_passed",
     "exit_failed",
     "run_ended",
+    "stall_alarm",
 ]
 
 Subscriber = Callable[[str, Mapping[str, object]], None]

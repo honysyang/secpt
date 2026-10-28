@@ -25,5 +25,12 @@ class StallCounter:
         self._streak = 0 if ok else self._streak + 1
         return self._streak >= self._n
 
+    def reset(self) -> None:
+        """救场重置（W3-3 WF5）：LLMC 提案落地后清零连败——旧连败不算冤枉新打法。
+
+        只清计数不动 n：阈值是装配期契约，reset 语义仅限"换打法之后重新起算"。
+        """
+        self._streak = 0
+
 
 __all__ = ["StallCounter"]
