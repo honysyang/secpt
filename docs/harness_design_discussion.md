@@ -1384,3 +1384,25 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - `fake.remaining==0` 的断言时机要放在最后一段消费之后：正常方向的第 4 条脚本是给 Reporter 的摘要，循环刚结束就断言 remaining 会误报 1。
 
 **DoD 对照**：验收第 1 条（FakeLLM 全流程：进场→主循环→小票→双图→出场三验→结构化终场）、第 3 条（schema 耗尽/失速按错误矩阵落账走异常出口+半场报告）各有可证伪测试；resume 断电续跑（第 2 条）已由 test_loop W1-5 覆盖，此处不重复铺。
+
+## 62. W2-4 施工结论：M1 里程碑验收自检——五样齐，流程通
+
+**纯自检卡：零代码变更**。pytest 141 例退出码 0、ruff format --check 41 files 全绿、ruff check 全绿。
+
+**五样齐（逐样证据）**：
+1. **六表**：migrate 双段式（schema.sql v1 + 0002 v2）user_version=2；tasks/runs/plans/steps/tickets/findings + graph_nodes/graph_edges（v2 增表，走 migration 红线）；append-only（tickets/audit_log/findings）触发器有失败注入测试。
+2. **主循环**：core/loop.py WF1 进场→WF2 逐步（打包→structured→argv dispatch→step_transaction 同笔落账→commit 后补发事件→失速计→done 判定）→WF6 出场三验（弹回/连败 3 轮 E_WALL）→WF7 收束三分支先账后出。
+3. **水位线**：checkpointer step_transaction 同事务推进 + resume_load 只复建不回放（含已 ended 拒续）。
+4. **异常分支**：撞 200 步 E_BUDGET_EXHAUSTED / 连败 3 轮 E_WALL / schema 耗尽 E_SCHEMA / 失速 E_STALL / 超时 E_TIMEOUT_LLM 全按 §9 矩阵落账，stalled 与 abnormal 分档，异常后 run/task 必收束（"炸了但账没收"为零）。
+5. **CLI 可观测**：structlog 角色气泡（【Orchestrator】【小票】【出口】）+ 事件 JSON 流 + 收束摘要行 + 五命令。
+
+**CLI 级跨进程实证（LLM_PROVIDER=mock，零网络，真 sqlite 文件）**：
+- `secpt run --goal`：进场三问→nmap 占位二进制 E_TOOL_FAIL 回执落小票→done→出场三验→normal 收束→终场报告（findings 空、failing_counts 全 0、Markdown 首行"终场报告"）；`secpt tools` 露 manifest+hash；`secpt evidence` 回放 task/run/steps/小票锚点/audit。
+- `secpt resume`（真·kill 语义）：进程 A 铺 task+run+2 步+水位线=2 后退出；另一进程 `secpt resume <task_id>`——run_id 跨进程复用、step_count 2→3、只续走 step 3 不重放前两步、正常收束出终场报告。
+- `secpt chat`：对话模式单轮直答不进闭环；`secpt resume` 已 ended task → E_LEDGER 结构化 JSON 进 stderr + rc=1 + 半场报告兜底落账（abnormal_exit / half_court=True 语义全对）。
+
+**验收五条对照（可证伪口径）**：①FakeLLM 全流程通 = §61 e2e 正常方向 + CLI run 实证；②kill 续跑不重放 = test_loop W1-5 + CLI 跨进程实证；③三异常口落账+半场 = §61 异常/失速方向 + CLI E_LEDGER 半场演示；④pytest/ruff 全绿 = 本节终验；⑤诚实边界 = verified-only 锚点硬规（§55/§59/§61）+ 越界占位不装饰（AgentRunTool 明示占位、LLM_PROVIDER 非 mock 装配期拒绝）。
+
+**教训**：系统 python3.13 的 sqlite3 模块对 LD_LIBRARY_PATH 敏感（_sqlite3 undefined symbol）——本机跑 CLI 一律 `LD_LIBRARY_PATH= .venv/bin/python -m secpt.main ...` 前缀清空。
+
+**M1 收束**：W1-1→W2-4 全部 DoD 达成，流程通。M2 石（经验库激活/R0R4/LLMC/web 面板）不在本程。
