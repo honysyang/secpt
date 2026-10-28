@@ -1570,3 +1570,62 @@ verified）、POST 405、SSE 首帧 = 真实 audit 序列（main/llmb/llma 全�
 （约定 vs 机制），选机制后测试都可以从 UI 层退到 DB 层——ro URI 就是最好的
 "写按钮不可能存在"证明。③SSE 无并发即悬死：同服务卡里"不做并发"与"SSE 推送"
 相斥，拍板拆"引擎侧 vs 服务侧"两口径记档（M3 真并发/多 worker 再全面重审）。
+
+## 67. M3-1 施工结论：Guard 分级闸上线——白名单制最小权限 + agent_run 保底 HIGH
+
+**开工前三拍板**（用户拍板）：①配置入 **profile.toml `[guard]` 段**——靶场档案
+按靶锁边界，不复用 harness.yaml；②HIGH 在 HITL（M3-2）到位前 **fail-closed
+一律拦**（E_GUARD_DENY 回执 + audit 可证，保守面="没有 Guard 就没有合规底线"）；
+③**缺 `[guard]` 段 = no-op**——registry 闸常开，行为与 M1/M2 逐字节一致，
+204 例原班零回退。
+
+**拦点契约（蓝本 §2.1 L102"调用前"落位）**：拦截点=registry 唯一咽点、schema
+校验**之后**、执行器调用**之前**——schema 不合格还轮不到 Guard 劳驾（先 E_SCHEMA
+三次尝试那条线）；agent_run 与外置 nmap 同闸同权（§3.6 规则 4 天然成立，一个
+咽点全覆盖）。
+
+**deny 回家链（架构关键拍板）**：registry **不落账不回调**（registry 无 task_id，
+保持 ledger-free；黑板写入口唯 store/* 红线不破）——拒绝经 `ToolOutput` 新附
+字段 `denied: bool = False`（默认 False 向后兼容）回执，主循环 receipts 收集段
+见 `denied` 即 `ledger.audit(conn, task.id, "main", receipt.summary)` 落账。
+audit actor=main（不新增 guard/controller actor 破契约）；拒绝事实=summary
+全文入审计，审计可从 audit_log 与 tickets(exit_code NULL / raw_ref 空 /
+E_GUARD_DENY 前缀) 双证。
+
+**分级语义**：`ToolTier = Literal["high","mid","low"]`；判定顺序=**先白名单
+后分级**——`whitelist: tuple[str,...] | None`（None=登记即授权；非空且不在列
+→"不在白名单"拒绝）→ tier 判级（HIGH → fail-closed 拒绝）。未声明工具回落
+low；**保底档 `FLOOR_HIGH = frozenset({"agent_run"})`**：内置恒 HIGH，`[guard.tiers]`
+声明成 mid 也被顶回（不可降级，工具执行=派 worker=高危同权）。
+
+**分层红线折衷**：tools 层不能 import judge 层（单向分层），故 guard 的 toml
+装配放 `tools/guard.py` 自带 tomllib 读 profile.toml `[guard]` 段——与 judge 的
+`load_profile` 各读同一文件（不是重复错误的重复实现，是分层下的必然双读）；
+坏 tier 值 / whitelist 非清单 → `SecptError(code="E_PROFILE")`，对齐 judge
+坏 toml 拒跑口径；缺文件/缺段 → None（no-op 降级路径，永不因 Guard 缺配置而
+挡住 M1/M2 已通的流程）。
+
+**CLI 展示**：registry 增 `tier_of(name)` 委托（guard 未部署返空串），
+`secpt tools` 货架行空串不打 tier 列——真实档位只在 Guard 生效时可见，
+不制造"永远 HIGH"的错觉。
+
+**变更清单**：
+- secpt/tools/guard.py（新）：GuardConfig（tiers+whitelist 纯函数 check）、
+  load_guard_config、FLOOR_HIGH。
+- secpt/tools/registry.py：ToolOutput.+denied / reject(*, denied) /
+  __init__(*, guard) / _dispatch 插闸 / tier_of。
+- secpt/core/loop.py：receipts 段 denied → ledger.audit（step_transaction 之前）。
+- secpt/main.py：_registry 装配 load_guard_config；_cmd_tools tier 列。
+- 测试：test_guard.py 9 例（[guard] 段解析/缺段 None/坏 tier E_PROFILE/
+  保底不可降/registry 无 guard no-op/HIGH 拦截零执行/白名单拦未列/mid-low
+  逐字段一致/deny 全链 audit+小票双证）。
+
+**验证**：pytest 213 例全绿（204 原班不跳红 + 9 新例）；ruff format+check 全绿
+（两处自动修复：test_guard.py 未用 import + 排序）。
+
+**遗留给 M3-2/后**：①HIGH 现在 fail-closed，HITL 弹窗接线后 check 的 deny 分支
+改为"提请人工"通道——回执文案已预留"M3-2 接线"措辞；②Guard 拒绝不进 stalled/
+wall 统计口径（拒绝≠连败，工具压根没执行），M3-5 多 worker 需确认该口径无歧义；
+③配置双读（judge/profile.py 与 tools/guard.py 各读 profile.toml）如未来加
+harness 侧校验，须一起验两处。
+
