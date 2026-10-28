@@ -1753,3 +1753,77 @@ ScriptedCapture，meta.mock 消失，R0/判票口径不变；②观测窗只罩�
 启动前后的网络活动（如外带 DNS 解析）不在窗内，M4 如需补可扩窗或网络层探针；
 ③SECPT_PROBE_BACKEND 环境变量仅在开档时生效，关档不读（零开销口径的推论）。
 
+## 70. M3-4 施工结论：判票票盒闭环——R1 只读重放 + 经验判票 + Barrett 收紧
+
+**五拍板（兑现 §63/L371/L377）**：①**R1 重放执行器 = 注入式**：main 装配期把
+`registry.readonly_replay`（绑定方法本体，形态是 callable 的 `__call__`）与
+经验环境键 partial 绑进 sweep——judge 层不见 tools 类型，只用轻量
+`ReplayExecutor/ReplayOutcome` Protocol 咬形状，分层红线"judge 单向不 import
+tools"零违例。②**R2 双路径/R3 反证 = 图纸位悬置**：r1 遇写操作票
+（executor 返 None = 零执行）落 audit"R2/R3 图纸位、M5 接线"，claimed 保持——
+"永不 rerun 写操作"先机制成规，双路径/反证后补。③**SRS 判票增减都接、锚点判
+同**：R1 重放一致 → promote_claimed 同一原子 UPDATE 推两列
+（verify_state='verified' 且 useful_count+1，0003 预留口的唯一启用位）；不一
+致 → decay_votes 降票且 SQL 内 `MAX(useful_count-1, 0)` 地板 0、**减票不动判**
+（verify_state 纹丝不动——重放对立只说明证据不稳，翻案权留给 Distiller）。
+匹配口径 = `raw_ref == finding.evidence_ref` 精确等值（command 是 LLM 自由文
+本无法确定性对齐，锚点链判同 100% 确定）。④**Barrett 收紧（§63 无条件兑现）**：
+fetch_replay 改 `verify_state='verified'`——回放位只收 verified，claimed 线索
+位取消（判票后才有回放位），rejected 延续不进包。⑤**装配期降级口径**：
+environment 未装配（None）时裁决照走、票盒静默——宁可少记账也不能编账。
+
+**只读门的机制位置**：拦在 registry 而非 judge——`read_only` 是工具自身诚
+实声明（ToolManifest 新字段，默认 False=未知即写操作，nmap 显式 True），
+注册表是唯一掌握 manifest 的层。只读工具重放照走 `_dispatch` 全管线：schema
+校验、Guard/HITL 同权过闸（§3.6——重放不是特权通道）、探针窗口照开；写操作/
+未知工具返 None **零执行**。
+
+**R1 五分支全落账**（裁判不 throw 只改账）：空锚→悬置；无票面证据源（锚没落
+在小票上，如 obs 锚/手铺证明）→ 悬置"R2/R3 待 M5 接线"；写操作（executor 返
+None）→ R2/R3 图纸位悬置；重放失败（exit_code 空/非零、raw_ref 空、原证据或
+重放产物文件缺失）→ 悬置"诚实锚点缺位"；一致 → verified(rerun) + 判票 promote
++ audit"裁决 …： verified(rerun)（重放一致）"（audit 在 promote 之后，last
+audit 必含判词）；不一致 → 降票 + 悬置"证据不稳，claimed 保持"。
+
+**sweep 守恒承诺**：`replay`/`environment` 为 keyword-only 缺省 None——不注入
+时行为与 M2 逐字节一致（R4 未中直接 continue，不 audit，204 原班机位不跳红的
+机制保证）；R4 oracle 命中 early 收束永不进票盒（更硬背书不记票）。
+
+**施工期两处修正（记档防考古）**：①ReplayExecutor 契约形态纠偏——初版写成
+`replay.readonly_replay(name, args)` 属性调用，而注入物是就绪 callable 本体，
+9 例 AttributeError 教改回 `replay(name, args)` + Protocol 定 `__call__`；
+②降票 audit 文案定稿"降票（-1，地板 0）…"——不得含"判票"字样：e2e 断言
+`what LIKE '%判票%'` 恰 1 行，只有 promote 审计含"判票"，r1 裁决 audit 用
+"裁决 {fid8}: …"前缀与 sweep R0/R4 同手式。另：测试自相矛盾一处——decay 返回
+值是 rowcount（命中行数）非票数差值，同名测试改用 UPDATE 预置真票后连减验证。
+
+**变更清单**：
+- secpt/judge/r123.py：ReplayOutcome/ReplayExecutor Protocol + r1 五分支。
+- secpt/store/experience.py：promote_claimed/decay_votes 票盒写口；
+  fetch_replay 收紧 verified-only（拍板④，破坏性收紧——claimed 线索位取消，
+  外部读者若依赖请改直查 store）。
+- secpt/judge/sweep.py：注入式参数接线 + 图纸位注释。
+- secpt/tools/registry.py：readonly_replay 门；ToolManifest.+read_only
+  （默认字段对既有注册方无感知，manifest_hash 载荷自然轮换、无 hash 一致性
+  断言破约风险）。
+- secpt/tools/adapters.py：NmapTool 显式 read_only=True。
+- secpt/main.py：装配期 partial 绑定 replay+environment。
+- secpt/judge/__init__.py：r123 导出面。
+- 测试：新增 test_r123.py 27 例（只读门 6/票盒写口 5/R1 分支 7/sweep 接线 4/
+  Barrett 门 1/e2e 闭环 1/写操作防线 1/守门 2/不吞错 1）；存量同步三处——
+  test_experience.test_fetch_replay_filters_environment_and_rejected 断言改
+  只收 verified + test_distilled_rows_visible_to_fetch_replay 更名
+  test_distilled_rows_claimed_until_voted（判票后才可见）、test_loop 经验投影
+  例改 verified 进包含命令 + claimed 不进包、test_e2e_fake_llm 沉淀回放例改
+  "判票前不进位 → promote → verified 全条带命令"。
+
+**验证**：pytest 271 例全绿（244 原班不跳红 + 27 净新增）；ruff format+check
+全绿（judge/isort 序 2 处自动修复）。
+
+**遗留给 M3-5/M4/M5**：①R1 重放执行器只在 main 装配 mock/真链路一句话绑定，
+M3-5 多 worker 各自装配时沿用同手式（注入式天然 worker 安全）；②mitmproxy 接
+线后 obs 锚 findings 一旦有票即可进 R1 票盒（obs 锚无票面证据源悬置是既有正
+确分支）；③R2 双路径/R3 反证图纸位在 M5 接线；④fetch_replay 收紧让
+"attention 层 claimed 线索投影"成为死代码路径（fetch_replay 已给不出 claimed
+行）——M5 前如无新增 claimed 消费者，考虑在 M5 连同判票语义一并清理。
+
