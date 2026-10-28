@@ -23,6 +23,7 @@ build/
 missions/
 snapshots/
 outputs/
+raw/
 
 # --- 密钥与本地配置（永不入库） ---
 .env
