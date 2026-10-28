@@ -1289,3 +1289,28 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - **环境坑（重要）**：`LD_LIBRARY_PATH` 含 trae-server 的 nss 目录，其中旧版 `libsqlite3.so.0` 遮蔽系统库，`_sqlite3` 报 `undefined symbol: sqlite3_deserialize`——所有 pytest/ruff 命令必须前缀 `LD_LIBRARY_PATH=`（清空后用 `.venv/bin/python -m ...`）。
 
 **DoD 对照**：撞 200 步/连败拉铃（E_STALL）/schema 重试耗尽三类异常出口均按 §9 错误矩阵落账（exit_kind 三值/voided step/run_ended 事件）并走异常出口；FSM/budget/stall 三面 contract test 19 例（含边界 try_spend(200,200)=True、非法迁移状态不动、失速清零再数满）。
+
+---
+
+## 58. W1-7 施工结论：CLI 可观测——五命令入口 + 双通道纪律 + evidence 检查窗
+
+**commit 0a4ba85 `feat(ob,main): W1-7 CLI 可观测——五命令入口 + 角色气泡 + evidence 检查窗`**。108 测全绿（90→108）、ruff format+check 全绿、真机冒烟通过（零网络）。
+
+**双通道纪律（本卡钉死）**：对话面板（角色气泡/小票摘要/出口行）走 stdout 人读；structlog JSON 事件流走 stderr 机器读。M2 web 面板接 stderr 之上的事件流契约即可复用，同订阅接口（CliView 即示例实现）。
+
+**ob/cli_view.py**：
+- `configure_logging()` 的 logger_factory 不用 `PrintLoggerFactory(file=sys.stderr)`——后者在 configure 时捕获 stderr **对象引用**，pytest 等环境会整块替换 sys.stderr，旧引用闭合再写即抛 `ValueError: I/O operation on closed file`。改为 `_StderrFactory`：每次实例化 logger 现取当前 sys.stderr（structlog 默认 `cache_logger_on_first_use=False`，底层 logger 每次 emit 重建，二者配合即"写到哪当时才裁决"）。
+- `CliView` 是 EventBus 两种订阅语义的示例：只读旁观、载荷逐键 `get` 缺省兜底不炸、未知事件（M2 的 exit_passed/exit_failed）静默零渲染——接口在、接线留给后续里程碑，不假实现。
+- `evidence_report()` 六段只读快照（tasks/runs 水位线/steps/小票含 raw_ref 锚点/findings 计数/audit 尾 10 行），查无 task 抛 LedgerError 由 main.py 兜底转非零。
+
+**main.py（唯一入口）**：
+- 五命令：run --goal（WF1 三问 → 主循环；空 goal 落对话模式兜底不开 task）/ chat（单轮直答 TEMPERATURE_FREESTYLE，不进闭环）/ resume task_id / tools（manifest+hash 齐露）/ evidence task_id。
+- provider 诚实边界：`_require_mock()` M1 仅认 `LLM_PROVIDER=mock`，其余装配期抛 SecptError（真实 provider 是 M2 接线件，不装饰）。
+- demo script = 目标 JSON + nmap 摸扫步 + done 收工步（三步脚本让 FakeLLM 离线全流程跑通）；goal JSON 的 target 取 `goal_text[:60] or "(demo)"`，保证 resume 传空 goal_text 也能解析出合法 Goal。
+- main() 兜底链：SecptError → `{"event": "abnormal_exit", ...to_dict()}` 单行 JSON 进 stderr + 返回 1；KeyboardInterrupt → 130；argparse SystemExit(2) 自然透传。stderr JSON 用 `json.dumps(..., default=str)` 防整段序列化失败。
+
+**施工教训**：
+- 异常注入测试的 FakeLLM 脚本首项必须是合法 goal JSON——首项即抛会在 enter() 阶段炸、task 行尚未落账，"先落账再出口"的断言就落空。测试即流程：想验落账，就得让异常发生在 step 阶段。
+- pytest 默认封锁 stdin（DontReadFromInput 读即 OSError）——空输入分支测试须 monkeypatch `sys.stdin = StringIO("")`，别指望真实 EOF。
+
+**DoD 对照**：structlog 角色气泡 + 小票摘要行 + `secpt` 五命令齐备；main.py 兜底异常出口有测试证伪（abnormal → 先落账 → 非零，stderr 无 Traceback）；冒烟显示 stdout/stderr 双通道互不污染。
