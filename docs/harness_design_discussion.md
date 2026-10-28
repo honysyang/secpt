@@ -1206,3 +1206,31 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - core/loop.py = PentestLoop（enter：空 goal 拒入→三问固化→tasks+runs 落账；run：max_steps 涨停循环 _one_step；_one_step 与 WF2 对表且 emit run_step_started；三问投影 _goal_projection 从 tasks.goal+runs.config_json 还原——不依赖内存态，W1-5 resume 同一函数；dispatcher 只依赖 Protocol 不 import tools 层，bus 经 _ticket_bus 适配 emit 签名）。
 - 测试 4 面 24 项：events（订阅/扇出/异常吞/noop）、ledger（官门写入/FK/CHECK/越权 UPDATE 被触发器拒=失败注入）、attention（投影字段/渲染/占位/缺省段隐藏）、loop（两步 FakeLLM 端到端+事件序列+涨停 finished_naturally=False+LlmError 原样上抛）。
 **DoD 对照**：45 测全绿、ruff format+check 全绿、六表可写、主循环可跑、水位线落 signal（step_count 字段立好）、异常分支骨架（LlmError 上抛）——五样齐还差 W1-5/W1-6/W1-7 三件。
+
+---
+
+## 55. W1-4 施工结论：工具 registry + nmap + agent_run 登记框架
+
+**commit 47f3e2e `feat(tools): W1-4 工具 registry/manifest+hash + nmap 适配器 + agent_run 登记框架`**。58 测全绿、ruff 全绿。
+
+**tools/registry.py（manifest+hash+dispatch 三段语义）**：
+- ToolManifest：name/kind（mcp|in-process）/description/params（dict[str, Literal["str","int","float"]]）/required/hash（str|None）。manifest_hash = 全字段确定性 sha256，同 manifest 同 hash、改一字段变 hash——M3 Guard 比对锚与 CLI `secpt tools` 货架同一来源。
+- ToolRegistry：注册即校重（重复注册抛 McpError）；`manifests()` 货架带 hash；`dispatch[name]` 入口统一。
+- dispatch 三段语义（不抛、只落回执 ModelOutput）：①未知工具 → E_SCHEMA_TOOL 拒；②参数校验（未知参数/缺必填/类型 parse/控制字符 C0+DEL 注入任一命中即拒，schema_failures 计数）；③in-process 先查调用栈：数 `_execute_in_process` 模块级帧（含 filename 校验），栈深>0 再点 in-process 即套娃 → "E_SCHEMA_TOOL: in-process 工具禁递归"拒绝。失败路径111=落回执不重试，exit_code≠0（E_TOOL_FAIL）照落小票——**失败≠目标不存在**（开发文档 §3.6 对表③）。
+- 工具双重身份：nmap=kind"mcp" 本地适配器；agent_run=kind"in-process" 登记占位（worker 执行器 M2 接线）。
+
+**tools/adapters.py（唯一外部工具）**：NmapTool argv 序=[binary, -Pn, -sV, -p ports, target]；subprocess.run(argv 列表、capture_output、text、timeout、check=False)——绝无 shell=True；缺二进制/超时均走 E_TOOL_FAIL 回执；raw_ref 真实落盘 raw_dir/nmap_{uuid}.txt（argv echo+stdout+stderr）。AgentRunTool.run() 恒回执"M1 占位——worker 执行器 M2 接线"。
+
+**归壳决策（依赖红线产物）**：ToolOutput 模型从 core/loop.py 下沉到 tools/registry.py——tools 层不得 import core，core/loop.py re-export `ToolOutput` 保公开 API 兼容；core/loop Dispatcher Protocol docstring 注明由 tools/registry.ToolRegistry 结构性实现（core→tools 单向）。
+
+**errors.py**：补 McpError（code=E_MCP）——登记层抛、dispatch 层不抛只落回执，错误分层 LedgerError/McpError/LlmError 就位（JudgeError W2-1 再补）。
+
+**测试 13 例**（test_tools_registry.py）：hash 确定性与敏感/重复注册/manifests 带 hash/未知工具/额外与缺必填参/控制字符 \x00 注入拒/int 参 schema_failures/禁递归（RecursiveWorker fake 探针调栈验证）/in-process 顶级不拦/nmap 假二进制 run 落 raw、raw_ref 真文件存在/exit=7 回执落地不 raise/缺二进制回执。基础设施：_write_script + EchoLikeTool 假二进制，绝不依赖真 nmap。
+
+**施工教训**：
+- Write 工具污染（`from pathlib import.Path`，点号吃掉空格）导致 pytest parse 失败——修复后需 ast.parse 字节级自检新写文件。
+- ruff 指定 .md 文件时强制格式化：pyproject 补 extend-exclude README.md，旧参照 README 不重排。
+- recent_tickets 同秒平局 + uuid 主键 → uuid DESC 排序随机，recent_tickets 端点危险；改 rowid（插入序）tie-break。
+- _single_line 折叠行内空格丢真（`22/tcp open  ssh` 双空格丢失）：summary 只压换行保行内原文，全文保真靠 raw_ref。
+
+**DoD 对照**：manifest 货架可查、 ParadiseTool dispatch 统一、argv 列表+控制字注入拒、agent_run 登记不假实现、nmap 小票锚点真实。测试总账 45→58。
