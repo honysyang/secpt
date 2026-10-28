@@ -40,6 +40,9 @@ class ToolManifest(BaseModel):
     description: str = ""
     params: dict[str, Literal["str", "int", "float"]] = Field(default_factory=dict)
     required: tuple[str, ...] = ()
+    # read_only（M3-4 拍板①）：工具自身的诚实声明——R1 只读重放门据此放行。
+    # 默认 False（未知即写操作），NmapTool 显式 True；写操作永不 rerun 是机制。
+    read_only: bool = False
     hash: str | None = None
 
 
@@ -153,6 +156,19 @@ class ToolRegistry:
 
     def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
         """§6.2 契约入口：schema 校验→dispatch→（落票归主循环）。业务失败不抛不重试。"""
+        return self._dispatch(name, args)
+
+    def readonly_replay(self, name: str, args: Mapping[str, str]) -> ToolOutput | None:
+        """R1 只读重放门（M3-4 拍板①）：写操作/未知工具返回 None 且**零执行**。
+
+        为什么拦在这里而不是 judge：manifest 的 read_only 是工具自身的诚实声明，
+        注册表是唯一掌握 manifest 的层——"永不 rerun 写操作"（蓝本 L371）在此
+        机制化，不靠裁判自觉。只读工具照走 _dispatch 全管线：schema 校验、Guard/HITL 同权过闸
+        （§3.6 Guard 同权——重放不是特权通道）、探针窗口照开。
+        """
+        tool = self._adapters.get(name)
+        if tool is None or not tool.manifest.read_only:
+            return None
         return self._dispatch(name, args)
 
     def _dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:

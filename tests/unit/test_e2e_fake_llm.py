@@ -30,7 +30,7 @@ from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import ledger
+from secpt.store import experience, ledger
 from secpt.store import migrate as migrate_store
 from secpt.tools.adapters import NmapTool
 from secpt.tools.registry import ToolRegistry
@@ -255,8 +255,8 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
 
 
 def test_things_learned_then_replayed_across_runs(tmp_path: Path) -> None:
-    """第一轮 run 收尾经 Distiller 落 experience（audit llmb）；第二轮同环境 run 的
-    第一个注意力包出现回放位——条款是 claimed，命令原样藏住。"""
+    """第一轮 run 收尾经 Distiller 落 experience（audit llmb）；M3-4 收紧（拍板④）下
+    claimed 判票前不进回放位，promote_claimed 升 verified 后第二轮包正面出条带命令。"""
     nmap = _write_script(tmp_path, 'echo "22/tcp open ssh"')
     registry = ToolRegistry([NmapTool(binary=str(nmap), raw_dir=str(tmp_path / "raw"))])
     conn = _make_db()
@@ -297,7 +297,16 @@ def test_things_learned_then_replayed_across_runs(tmp_path: Path) -> None:
     audits = conn.execute("SELECT actor, what FROM audit_log WHERE actor = 'llmb'").fetchall()
     assert len(audits) == 2  # 落账 1 行 + 蒸馏收束 1 行
 
-    # 第二轮同环境 run：首个注意力包出现回放位；claimed 只当线索，命令藏住。
+    # 第二轮同环境 run：Barrett 收紧（拍板④）——判票前 claimed 不进回放位；
+    # 经票盒写口 promote_claimed 升 verified 后回放位出现正典条目（命令原样带出）。
+    assert experience.fetch_replay(conn, "lab") == []
+    exp_rows = conn.execute("SELECT task_id, raw_ref FROM experience").fetchall()
+    assert len(exp_rows) == 1
+    promoted = experience.promote_claimed(
+        conn, exp_rows[0]["task_id"], "lab", exp_rows[0]["raw_ref"]
+    )
+    assert promoted and promoted[0].verify_state == "verified"
+
     fake2 = FakeLLM([_goal_json("10.0.0.5"), _step_json("收工", calls=[], done=True)])
     bus2, _ = _recorder()
     loop2 = PentestLoop(
@@ -313,8 +322,8 @@ def test_things_learned_then_replayed_across_runs(tmp_path: Path) -> None:
     assert result2.finished_naturally is True
     pack_text = fake2.calls[1][1].content  # 第 1 通是进场三问，第 2 通才是注意力包
     assert "## 可用经验" in pack_text
-    assert "[claimed|仅当线索] 22 端口扫描可达" in pack_text
-    assert "nmap -p 22" not in pack_text
+    assert "[verified] 22 端口扫描可达" in pack_text
+    assert "（命令：nmap -p 22）" in pack_text
 
 
 # ---------- 方向五：裁判 R0/R4 上线（W3-2，验收①） ------------------------------------

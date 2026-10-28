@@ -3,7 +3,7 @@
 分组：
 - 迁移：0003 建表 + schema_version=3 + DELETE 触发器失败注入（经验永不满血搬家）；
 - record_experience：store 唯一写口，audit actor=llmb，空锚点条目拒落 + audit 丢弃行；
-- fetch_replay：环境过滤 + top_k + rejected 不进回放；
+- fetch_replay：环境过滤 + top_k + 只收 verified（M3-4 拍板④收紧，claimed/rejected 均不进回放）；
 - Distiller：verify_state 由代码 derive（LLM 无权改判）、无候选不烧 LLM、
   idx 越界跳过、全部经 store 收口落账。
 """
@@ -97,7 +97,7 @@ def test_record_experience_audits_llmb(
     assert row is not None
     assert row.task_id == task_id and row.environment == "lab"
     assert row.verify_state == "verified"
-    assert row.useful_count == 0  # M2 判票不接线：useful_count 恒默认
+    assert row.useful_count == 0  # 初始 0 票：票数由 M3-4 判票写口（promote/decay）推进
     audits = c.execute("SELECT actor, what FROM audit_log WHERE task_id = ?", (task_id,)).fetchall()
     assert any(r["actor"] == "llmb" for r in audits)
 
@@ -145,7 +145,9 @@ def test_fetch_replay_filters_environment_and_rejected(
     _fill(c, "prod", 3, "verified", "丙")
     _fill(c, "lab", 4, "rejected", "丁")
     replay = experience.fetch_replay(c, "lab")
-    assert [e.summary for e in replay] == ["乙", "甲"]  # rejected 不进包、异环境不混、最新优先
+    # M3-4 收紧（拍板④）：只收 verified——乙（claimed 线索位取消）/丁（rejected）
+    # 都不进包，Barrett 式收紧在 SQL 层收死；异环境不混、最新优先。
+    assert [e.summary for e in replay] == ["甲"]
     assert [e.summary for e in experience.fetch_replay(c, "prod")] == ["丙"]
     assert experience.fetch_replay(c, "no-such-env") == []
 
@@ -278,14 +280,18 @@ def test_distiller_propagates_llm_error(
         ).distill(c, task_id, "lab")
 
 
-def test_distilled_rows_visible_to_fetch_replay(
+def test_distilled_rows_claimed_until_voted(
     conn: Callable[[], sqlite3.Connection],
 ) -> None:
-    """One peace：distill 落 experience 行（audit llmb），fetch_replay 有回放位。"""
+    """One peace：distill 落 experience 行（audit llmb）；M3-4 收紧（拍板④）下
+    claimed 判票前不进回放位——promote_claimed 升 verified 后才可见。"""
     c = conn()
     task_id = _seed_task(c)
     ledger.append_finding(c, task_id, "可复用发现", "d", "runs/a.txt")
     draft = json.dumps({"entries": [{"idx": 0, "summary": "老经验一句话", "command": "nmap"}]})
     Distiller(LlmClient(FakeLLM([draft]))).distill(c, task_id, "lab")
-    replay = experience.fetch_replay(c, "lab")
-    assert [e.summary for e in replay] == ["老经验一句话"]
+    row = c.execute("SELECT verify_state, raw_ref FROM experience").fetchone()
+    assert row["verify_state"] == "claimed"
+    assert experience.fetch_replay(c, "lab") == []  # 未判票：claimed 不进回放位
+    experience.promote_claimed(c, task_id, "lab", row["raw_ref"])
+    assert [e.summary for e in experience.fetch_replay(c, "lab")] == ["老经验一句话"]

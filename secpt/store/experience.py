@@ -5,8 +5,10 @@
   器官/脚本都只能调 :func:`record_experience`——锚点不可证（raw_ref 空白）的条目
   在这里被当场拒落并留一行丢弃审计，经验库因此永远不会填满自我肯定话术。
 - 读不需要特权：:func:`fetch_replay` 是普通纯读查询，注意力打包/回放/面板随便用。
-- M2 判票不接线：useful_count 恒默认 0，建表保留字段与 UPDATE 放行（0003 触发器），
-  等三分判票（W3-2/M3）来了只需推进这一列。
+- M3-4 判票接线：票盒写口 promote_claimed/decay_votes 收在本层（蓝本 §3.2
+  "本 run 复核命中经验可升 verified" 的豁口正式兑现，audit actor=judge 背书——
+  与"唯 LLMB 写"红线的张力由蓝本载明豁口 + 0003 UPDATE 放行触发器兜底），
+  命根 useful_count 从此如实记账：重放通过 +1 并升 verified，不匹配 −1 地板 0。
 """
 
 from __future__ import annotations
@@ -106,20 +108,112 @@ def record_experience(
     return row
 
 
+def promote_claimed(
+    conn: sqlite3.Connection, task_id: str, environment: str, anchor: str
+) -> list[ExperienceRow]:
+    """票盒写口·升（判票）：R1 重放通过，同环境同锚的 claimed 经验升级记票。
+
+    锚点判同口径（拍板）：``raw_ref == anchor`` 精确等值——同一条证据链就是同
+    一条经验，不做模糊口径。只升 claimed（verified 不重复记票），
+    UPDATE 同步推进两列（verify_state→verified 且 useful_count+1，一次落账
+    一个原子动作）；UPDATE 放行是 0003 迁移预留口，此处为唯一启用位。
+
+    Returns:
+        升级后的行（含 +1 后的新票数）；锚点空白 = 纯 no-op 返 []（不炸不编账）。
+
+    Raises:
+        LedgerError: sqlite 故障原样分层上抛（库层不吞错）。
+    """
+    if not anchor.strip():
+        return []
+    try:
+        matched = conn.execute(
+            "SELECT id FROM experience WHERE task_id = ? AND environment = ?"
+            " AND raw_ref = ? AND verify_state = 'claimed'",
+            (task_id, environment, anchor),
+        ).fetchall()
+        for r in matched:
+            conn.execute(
+                "UPDATE experience SET verify_state = 'verified',"
+                " useful_count = useful_count + 1 WHERE id = ?",
+                (r["id"],),
+            )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("experience 判票失败", context={"task_id": task_id}) from exc
+    if not matched:
+        return []
+    ledger.audit(
+        conn,
+        task_id,
+        "judge",
+        f"判票 promote：{len(matched)} 条经验升 verified 且 +1 票（锚 {anchor[:80]}）",
+    )
+    rows = conn.execute(
+        "SELECT * FROM experience WHERE id IN"
+        f" ({','.join('?' * len(matched))}) ORDER BY created_at, rowid",
+        tuple(r["id"] for r in matched),
+    ).fetchall()
+    return [ExperienceRow.model_validate(dict(r)) for r in rows]
+
+
+def decay_votes(conn: sqlite3.Connection, task_id: str, environment: str, anchor: str) -> int:
+    """票盒写口·降（判票）：R1 重放不匹配，同环境同锚的经验降票（地板 0）。
+
+    为什么减票不动 verify_state：重放对立意味着"这条经验不可靠"，还没到
+    "这不是真本事"——直接踢 verified 是翻案，会计上留给 Distiller 与直觉对照；
+    useful_count 用 SQL 内 ``MAX(-1, 0)`` 钉地板，票空再减也是 no-op，
+    有条目命中才落一行降票审计（audit actor=judge，票盒动作全部可证）。
+
+    Returns:
+        命中并处理的经验条数（锚点空白或无匹配 = 0，纯 no-op 不审计）。
+
+    Raises:
+        LedgerError: sqlite 故障原样分层上抛（库层不吞错）。
+    """
+    if not anchor.strip():
+        return 0
+    try:
+        cursor = conn.execute(
+            "UPDATE experience SET useful_count = MAX(useful_count - 1, 0)"
+            " WHERE task_id = ? AND environment = ? AND raw_ref = ?",
+            (task_id, environment, anchor),
+        )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("experience 降票失败", context={"task_id": task_id}) from exc
+    if cursor.rowcount <= 0:
+        return 0
+    ledger.audit(
+        conn,
+        task_id,
+        "judge",
+        f"降票（-1，地板 0）：{cursor.rowcount} 条经验投票下调（锚 {anchor[:80]}）",
+    )
+    return cursor.rowcount
+
+
 def fetch_replay(
     conn: sqlite3.Connection, environment: str, *, top_k: int = 5
 ) -> list[ExperienceRow]:
-    """同环境经验回放（纯读）：投票多的优先，M2 无票时退化为最新优先。
+    """同环境经验回放（纯读）：只收 verified、投票多优先（Barrett 式收紧）。
 
-    rejected 在 SQL 一层就被挡住（三态规则：verified=凭据进包 / claimed=线索 /
-    rejected=不进包）——attention 投影层还会再挡一次，双闸互为备份。
+    三态规则在 SQL 一层收死：verified=凭据进包 / claimed=线索不进包 / rejected=
+    不进包——M3-4 拍板④兑现 §63：判票接线后，回放位要的是"验证过的真本事"，
+    而不是待验证的直觉（attention 投影层还会再挡一次，双闸互为备份）。
     """
     rows = conn.execute(
-        "SELECT * FROM experience WHERE environment = ? AND verify_state != 'rejected'"
+        "SELECT * FROM experience WHERE environment = ? AND verify_state = 'verified'"
         " ORDER BY useful_count DESC, created_at DESC, rowid DESC LIMIT ?",
         (environment, top_k),
     ).fetchall()
     return [ExperienceRow.model_validate(dict(r)) for r in rows]
 
 
-__all__ = ["ExperienceRow", "fetch_replay", "record_experience"]
+__all__ = [
+    "ExperienceRow",
+    "decay_votes",
+    "fetch_replay",
+    "promote_claimed",
+    "record_experience",
+]

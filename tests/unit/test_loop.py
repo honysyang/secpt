@@ -373,7 +373,8 @@ def test_distill_failure_degrades_and_keeps_close(
 def test_experience_replay_enters_attention_pack(
     rig: Callable[..., SimpleNamespace],
 ) -> None:
-    """W3-1 接线：同环境经验经 fetch_replay 投影进包——claimed 命令藏住、异环境不混。"""
+    """W3-1 接线 + M3-4 收紧（拍板④）：verified 经验经 fetch_replay 投影进包并
+    原样带命令；claimed 判票前不进回放位；异环境不混。"""
     t = rig(
         [_step_json("收工", calls=[], done=True)], distiller=SpyDistiller(), experience_env="prod"
     )
@@ -385,10 +386,12 @@ def test_experience_replay_enters_attention_pack(
     record_experience(
         conn, task.id, "prod", "claimed", "端口 22 曾验证开放", "nmap -p 22", "runs/r.txt"
     )
+    record_experience(conn, task.id, "prod", "verified", "端口 22 常开", "nmap -p 22", "runs/v.txt")
     record_experience(conn, task.id, "lab", "verified", "lab 环境的经验", None, "runs/l.txt")
     t.loop.resume(task.id)
     user_msg = t.fake.calls[0][1].content
     assert "## 可用经验" in user_msg
-    assert "[claimed|仅当线索] 端口 22 曾验证开放" in user_msg
-    assert "nmap -p 22" not in user_msg  # claimed 命令藏住
+    assert "[verified] 端口 22 常开" in user_msg
+    assert "（命令：nmap -p 22）" in user_msg
+    assert "端口 22 曾验证开放" not in user_msg  # claimed 判票前不进包（收紧）
     assert "lab 环境的经验" not in user_msg  # 异环境不混包

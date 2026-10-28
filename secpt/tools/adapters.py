@@ -39,6 +39,9 @@ class NmapTool:
         description="nmap 端口与服务扫描（-sV 恒开）",
         params={"target": "str", "ports": "str"},
         required=("target",),
+        # 只读声明（M3-4 拍板①）：nmap 扫描无副作用，R1 重放可原样复跑；
+        # agent_run/declare_finding 不声明 = 写操作，永不进重放（默认 False）。
+        read_only=True,
     )
 
     def __init__(

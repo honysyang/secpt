@@ -170,15 +170,23 @@ def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
     probe_cfg = load_probe_config(_profile_path())
+    reg = _registry()
+    # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
+    # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
     return PentestLoop(
         conn,
         MainLlm(client),
-        _registry(),
+        reg,
         bus=bus,
         exit_checker=ExitChecklist(),
         distiller=ExperienceDistiller(client),
         experience_env=_experience_env(),
-        judge_sweep=partial(sweep, profile=prof),
+        judge_sweep=partial(
+            sweep,
+            profile=prof,
+            replay=reg.readonly_replay,
+            environment=_experience_env(),
+        ),
         judge_note=note_for(prof),
         coach=Coach(client),
         probe_note=probe_note_for(probe_cfg),
