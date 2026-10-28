@@ -1216,7 +1216,7 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **tools/registry.py（manifest+hash+dispatch 三段语义）**：
 - ToolManifest：name/kind（mcp|in-process）/description/params（dict[str, Literal["str","int","float"]]）/required/hash（str|None）。manifest_hash = 全字段确定性 sha256，同 manifest 同 hash、改一字段变 hash——M3 Guard 比对锚与 CLI `secpt tools` 货架同一来源。
 - ToolRegistry：注册即校重（重复注册抛 McpError）；`manifests()` 货架带 hash；`dispatch[name]` 入口统一。
-- dispatch 三段语义（不抛、只落回执 ModelOutput）：①未知工具 → E_SCHEMA_TOOL 拒；②参数校验（未知参数/缺必填/类型 parse/控制字符 C0+DEL 注入任一命中即拒，schema_failures 计数）；③in-process 先查调用栈：数 `_execute_in_process` 模块级帧（含 filename 校验），栈深>0 再点 in-process 即套娃 → "E_SCHEMA_TOOL: in-process 工具禁递归"拒绝。失败路径111=落回执不重试，exit_code≠0（E_TOOL_FAIL）照落小票——**失败≠目标不存在**（开发文档 §3.6 对表③）。
+- dispatch 三段语义（不抛、只落回执 ToolOutput）：①未知工具 → E_SCHEMA_TOOL 拒；②参数校验（未知参数/缺必填/类型 parse/控制字符 C0+DEL 注入任一命中即拒，schema_failures 计数）；③in-process 先查调用栈：数 `_execute_in_process` 模块级帧（含 filename 校验），栈深>0 再点 in-process 即套娃 → "E_SCHEMA_TOOL: in-process 工具禁递归"拒绝。失败=落回执不重试，exit_code≠0（E_TOOL_FAIL）照落小票——**失败≠目标不存在**（开发文档 §3.6 对表③）。
 - 工具双重身份：nmap=kind"mcp" 本地适配器；agent_run=kind"in-process" 登记占位（worker 执行器 M2 接线）。
 
 **tools/adapters.py（唯一外部工具）**：NmapTool argv 序=[binary, -Pn, -sV, -p ports, target]；subprocess.run(argv 列表、capture_output、text、timeout、check=False)——绝无 shell=True；缺二进制/超时均走 E_TOOL_FAIL 回执；raw_ref 真实落盘 raw_dir/nmap_{uuid}.txt（argv echo+stdout+stderr）。AgentRunTool.run() 恒回执"M1 占位——worker 执行器 M2 接线"。
@@ -1230,7 +1230,7 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **施工教训**：
 - Write 工具污染（`from pathlib import.Path`，点号吃掉空格）导致 pytest parse 失败——修复后需 ast.parse 字节级自检新写文件。
 - ruff 指定 .md 文件时强制格式化：pyproject 补 extend-exclude README.md，旧参照 README 不重排。
-- recent_tickets 同秒平局 + uuid 主键 → uuid DESC 排序随机，recent_tickets 端点危险；改 rowid（插入序）tie-break。
+- recent_tickets 同秒平局 + uuid 主键 → uuid DESC 排序随机，recency 危险；改 rowid（插入序）tie-break。
 - _single_line 折叠行内空格丢真（`22/tcp open  ssh` 双空格丢失）：summary 只压换行保行内原文，全文保真靠 raw_ref。
 
-**DoD 对照**：manifest 货架可查、 ParadiseTool dispatch 统一、argv 列表+控制字注入拒、agent_run 登记不假实现、nmap 小票锚点真实。测试总账 45→58。
+**DoD 对照**：manifest 货架可查、 dispatch 入口统一、argv 列表+控制字注入拒、agent_run 登记不假实现、nmap 小票锚点真实。测试总账 45→58。
