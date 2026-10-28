@@ -1524,3 +1524,49 @@ call_count 重点核对：救场成功 = 进场+5 败+教练 1+吸收步+收工 
 
 **遗留给 W3-4/M3**：双图变化事件线 M2 未接（择机 M3）；coach 提案只在 attention
 侧吸收，未进预算/FSM 任何字段——提案不改预算不裁，契约保持。
+
+## 66. W3-4 施工结论：只读 web 面板上墙——账本/双图/报告/audit 可视且无写路径
+
+**开工前拍板三点**（用户拍板）：①HTTP 方案=引入 **Flask**（唯一新依赖，pyproject
++flask>=3.0）；②入口=**第六命令 `panel`**（不污染五命令语义，`--host` 默认
+127.0.0.1 仅本机、`--port` 默认 8711）；③报告=**账本直读 verified-only**（不烧
+LLM 复跑 Reporter，离线可演示）+ 刷新=手动 + **SSE 事件流**。
+
+**并发口径（§65 前置裁决记档）**："M2 不做并发"约束指**引擎侧**器官不做并行；
+HTTP 服务侧 threaded=True 只为 SSE 长连接不阻塞其它页面请求——面板 SQL 全只读，
+多线程读 sqlite 安全，引擎仍单线程。
+
+**面上墙（§8 M1 行的网页化）**：
+- `GET /` 任务总览（tasks 倒序）；
+- `GET /task/<id>` 黑板六块 = 任务+最新 run / 小票卡（最近 50）/ findings 状态机
+  明细（如实含 rejected）/ **报告块（verified-only）**/ 双图（summary 文案+
+  边表）/ audit 流（倒序 200 条）；
+- `GET /task/<id>/stream` SSE：先吐 audit 全快照帧，之后每 2s 轮询 rowid 增量，
+  无增量发 `: ping` 哨兵。
+
+**无写路径=机制而非约定**：①全部路由 `app.get()` 注册，非 GET 自动 405；②连接
+`file:...?mode=ro` URI 打开——缺库 404 且**不建档**，面板侧任何写尝试当场抛错；
+③测试静例：POST 打已知路由 405、ghost.db 不存在时页面 404 且文件未创建。
+（踩坑注意：audit_log 是 `id INTEGER PRIMARY KEY`，`SELECT rowid` 必须显式
+`AS rid` 才能按列名取；ro 连接必须设 `row_factory=sqlite3.Row` 否则 dict(r) 收
+裸元组——两坑都是首轮面板测试当场抓的。）
+
+**双图摘要同口径**：面板不 import store 写口模块，`_graph_note` 按 graph_summary
+同口径渲染（kind 计数+边数）；空图返回"（空图）"占位不空白害怕。
+
+**变更清单**：
+- pyproject.toml：+flask>=3.0。
+- secpt/ob/web_view.py（新）：create_app (ro 连接工厂 + GET-only 路由 + SSE)。
+- secpt/main.py：panel 命令 + `_open_db_path`（只取路径不开连接）。
+- 测试：test_web_view.py 10 例（总览/黑板六块/verified-only 报告块拒绝 rejected/
+  未知 task 404/POST 405/缺库不建档/SSE 首块快照/SSE 只读）。
+
+**验证**：pytest 204 例全绿；ruff format+check 全绿；mock CLI 冒烟：
+`run` 收束 → `panel --port` 起服 → `curl /task/<id>` 四板块齐（报告块如实 0 条
+verified）、POST 405、SSE 首帧 = 真实 audit 序列（main/llmb/llma 全员在场）。
+
+**教训**：①环境变量在 `&&` 后台链里会被吃（`A=x && ... & SPID=$!` 把赋值圈进
+后台 job）——演示编排里赋值一条独立语句；②M2 面板验收的"无写路径"有两种作法
+（约定 vs 机制），选机制后测试都可以从 UI 层退到 DB 层——ro URI 就是最好的
+"写按钮不可能存在"证明。③SSE 无并发即悬死：同服务卡里"不做并发"与"SSE 推送"
+相斥，拍板拆"引擎侧 vs 服务侧"两口径记档（M3 真并发/多 worker 再全面重审）。
