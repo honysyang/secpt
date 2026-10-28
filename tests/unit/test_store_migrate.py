@@ -7,7 +7,16 @@ import pytest
 from secpt.errors import LedgerError
 from secpt.store import connect, ensure_schema, schema_version
 
-EXPECTED_TABLES = {"tasks", "runs", "plans", "steps", "tickets", "findings", "audit_log"}
+EXPECTED_TABLES = {
+    "tasks",
+    "runs",
+    "plans",
+    "steps",
+    "tickets",
+    "findings",
+    "audit_log",
+    "experience",
+}
 
 
 @pytest.fixture()
@@ -32,7 +41,7 @@ class TestMigration:
         assert EXPECTED_TABLES <= tables
 
         fresh = connect(":memory:")
-        assert schema_version(fresh) == 2  # 1（baseline 六表）+ 1（W2-2 双图迁移）
+        assert schema_version(fresh) == 3  # 1 baseline + 1 双图 + 1（W3-1 经验库）
         fresh.close()
 
     def test_migration_idempotent(self, db: sqlite3.Connection) -> None:

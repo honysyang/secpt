@@ -1,18 +1,24 @@
 """注意力包（§2.3：store/attention.py，纯函数，现打包即弃）。
 
 包内容按 WF2 时序：goal / 最近小票 / 规划概要 / 步号 / 双图摘要（W2-2 已接线，
-graph.graph_summary 投影，空图返回空串时不渲染该节）。M1 的三条边界（写进规则注释）：
-- 经验不进包：经验库 M2 才激活，三态规则（verified=正典进含命令 / claimed=只当线索
-  隐藏命令 / 连续 0 命中=降级不进包）作为注释与模型字段预留，禁止提前实现。
-- 打包即弃：包是一步一现的临时物，不落库、不缓存——黑板里只有事实（小票/双图），
+graph.graph_summary 投影，空图返回空串时不渲染该节）/ 经验回放位（W3-1 激活）。
+
+经验三态规则（W3-1 拍板，§63 续记）：
+- 经验回放三态（W3-1 激活）：verified=正典进包、命令原样带出；claimed=仅当线索、
+  命令藏住；rejected=不进包。fetch_replay 在 SQL 层已排 rejected，build 的投影层
+  再挡一次——双闸互为备份，谁独立失效包里也不能出现已死经验。
+- 打包即弃：包是一步一现的临时物，不落库、不缓存——黑板里只有事实（小票/双图/经验），
   包只是把事实投影给主 LLM 的一次性视图。
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pydantic import BaseModel, Field
 
 from secpt.llms.client import Goal
+from secpt.store.experience import ExperienceRow
 from secpt.store.ledger import TicketRow
 
 
@@ -58,14 +64,36 @@ class AttentionPack(BaseModel):
         return "\n".join(lines)
 
 
+def _project_experience(rows: Sequence[ExperienceRow]) -> list[str]:
+    """经验条目的三态投影（双闸第二道：rejected 在此再挡一次）。
+
+    - verified：正典进包，命令原样带出（回放即复用）；
+    - claimed：仅当线索，命令藏住（裁判未过不许给命令，防半真经验误导）；
+    - rejected：不进包（fetch_replay SQL 层已排，这里兜底防独立失效）。
+    """
+    lines: list[str] = []
+    for row in rows:
+        if row.verify_state == "rejected":
+            continue
+        if row.verify_state == "verified":
+            rendered = f"[verified] {row.summary}"
+            if row.command:
+                rendered += f"（命令：{row.command}）"
+        else:
+            rendered = f"[claimed|仅当线索] {row.summary}"
+        lines.append(rendered)
+    return lines
+
+
 def build(
     goal: Goal,
     step_no: int,
     plan_summary: str,
     recent: list[TicketRow],
     graph_summary: str = "",
+    experiences: Sequence[ExperienceRow] = (),
 ) -> AttentionPack:
-    """从账本事实装配注意力包（纯函数现打包即弃；M1 经验不进包）。"""
+    """从账本事实装配注意力包（纯函数现打包即弃；经验经三态投影进包）。"""
     return AttentionPack(
         goal=goal,
         step_no=step_no,
@@ -75,6 +103,7 @@ def build(
             PackTicket(tool_name=t.tool_name, exit_code=t.exit_code, summary=t.summary)
             for t in recent
         ],
+        experience_snapshot=_project_experience(experiences),
     )
 
 

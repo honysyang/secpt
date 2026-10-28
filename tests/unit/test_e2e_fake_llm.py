@@ -24,6 +24,7 @@ import pytest
 from secpt.core.loop import PentestLoop
 from secpt.errors import LlmError, SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
+from secpt.finalize.experience import Distiller
 from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
@@ -54,6 +55,18 @@ def _step_json(thought: str, *, calls: list[dict[str, object]], done: bool) -> s
 def _summary_json(text: str) -> str:
     """合规报告摘要 JSON（LLMA 的 structured 输出契约）。"""
     return json.dumps({"summary": text}, ensure_ascii=False)
+
+
+def _goal_json(target: str) -> str:
+    """合规进场三问 JSON（Goal 的 structured 输出契约，多个方向共用）。"""
+    return json.dumps(
+        {
+            "target": target,
+            "objective": "确认 ssh 暴露面",
+            "success_criteria": "小票里出现 ssh banner",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _make_db() -> sqlite3.Connection:
@@ -234,3 +247,69 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
     assert task.exit_kind == "stalled"
     names = [name for name, _ in events]
     assert names == ["run_step_started", "ticket_appended"] * 5 + ["run_ended"]
+
+
+# ---------- 方向四：经验沉淀 + 二轮回放（W3-1，验收②基础版） -------------------------
+
+
+def test_things_learned_then_replayed_across_runs(tmp_path: Path) -> None:
+    """第一轮 run 收尾经 Distiller 落 experience（audit llmb）；第二轮同环境 run 的
+    第一个注意力包出现回放位——条款是 claimed，命令原样藏住。"""
+    nmap = _write_script(tmp_path, 'echo "22/tcp open ssh"')
+    registry = ToolRegistry([NmapTool(binary=str(nmap), raw_dir=str(tmp_path / "raw"))])
+    conn = _make_db()
+
+    distill_draft = json.dumps(
+        {"entries": [{"idx": 0, "summary": "22 端口扫描可达", "command": "nmap -p 22"}]},
+        ensure_ascii=False,
+    )
+    fake1 = FakeLLM(
+        [
+            _goal_json("10.0.0.5"),
+            _step_json(
+                "摸排 22",
+                calls=[{"name": "nmap", "args": {"target": "10.0.0.5", "ports": "22"}}],
+                done=False,
+            ),
+            _step_json("收工", calls=[], done=True),
+            distill_draft,  # 第 4 通 = Distiller 蒸馏材料
+        ]
+    )
+    client1 = LlmClient(fake1)
+    bus1, events1 = _recorder()
+    loop1 = PentestLoop(
+        conn,
+        MainLlm(client1),
+        registry,
+        bus=bus1,
+        exit_checker=ExitChecklist(),
+        distiller=Distiller(client1),
+        experience_env="lab",
+    )
+    result1 = loop1.run("经验沉淀演示 10.0.0.5")
+    assert result1.exit_kind == "normal"
+    assert fake1.call_count == 4  # 进场 1 + 两步 1 + 蒸馏 1（成功小票烧了一次 LLM）
+    rows = conn.execute("SELECT * FROM experience").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["verify_state"] == "claimed"  # 判票在 M3，claims 如实入库
+    audits = conn.execute("SELECT actor, what FROM audit_log WHERE actor = 'llmb'").fetchall()
+    assert len(audits) == 2  # 落账 1 行 + 蒸馏收束 1 行
+
+    # 第二轮同环境 run：首个注意力包出现回放位；claimed 只当线索，命令藏住。
+    fake2 = FakeLLM([_goal_json("10.0.0.5"), _step_json("收工", calls=[], done=True)])
+    bus2, _ = _recorder()
+    loop2 = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake2)),
+        registry,
+        bus=bus2,
+        exit_checker=ExitChecklist(),
+        distiller=Distiller(LlmClient(fake2)),
+        experience_env="lab",
+    )
+    result2 = loop2.run("同环境二轮 10.0.0.5")
+    assert result2.finished_naturally is True
+    pack_text = fake2.calls[1][1].content  # 第 1 通是进场三问，第 2 通才是注意力包
+    assert "## 可用经验" in pack_text
+    assert "[claimed|仅当线索] 22 端口扫描可达" in pack_text
+    assert "nmap -p 22" not in pack_text

@@ -24,7 +24,8 @@ def db() -> sqlite3.Connection:
 class TestMigration:
     def test_v2_builds_graph_tables(self) -> None:
         fresh = connect(":memory:")
-        assert schema_version(fresh) == 2
+        # v2 只建双图；v3 补经验表——本测试仍锚 v2 的双图 DDL 是否在。
+        assert schema_version(fresh) == 3
         tables = {r["name"] for r in fresh.execute("SELECT name FROM sqlite_master")}
         assert {"graph_nodes", "graph_edges"} <= tables
         fresh.close()

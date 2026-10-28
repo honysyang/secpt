@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
+from secpt.finalize.experience import Distiller as ExperienceDistiller
 from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOutput, ToolCall
 from secpt.llms.fake import FakeLLM
@@ -100,12 +101,31 @@ def _registry() -> ToolRegistry:
     return ToolRegistry([NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool()])
 
 
-def _assemble(conn: sqlite3.Connection, llm: MainLlm) -> PentestLoop:
+def _experience_env() -> str:
+    """经验库环境键（W3-1 拍板）：SECPT_ENV 环境变量，默认 lab。
+
+    为什么用环境键而不是配置文件：回放的隔离粒度是"环境相同才回流"，
+    演示与测试各指各的环境互不串账，一个 env 足够，不必引入配置层。
+    """
+    env = os.environ.get("SECPT_ENV", "lab").strip()
+    return env or "lab"
+
+
+def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
-    出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）。"""
+    出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
+    W3-1 起收尾挂经验蒸馏器（与 MainLlm 共用同一条 chat 协议 client）。"""
     bus = EventBus()
     bus.subscribe(CliView())
-    return PentestLoop(conn, llm, _registry(), bus=bus, exit_checker=ExitChecklist())
+    return PentestLoop(
+        conn,
+        MainLlm(client),
+        _registry(),
+        bus=bus,
+        exit_checker=ExitChecklist(),
+        distiller=ExperienceDistiller(client),
+        experience_env=_experience_env(),
+    )
 
 
 def _emit_report(conn: sqlite3.Connection, fake: FakeLLM, task_id: str, *, half: bool) -> None:
@@ -158,9 +178,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("goal 为空 → 对话模式兜底（WF1）：不进闭环；需要对话请用 secpt chat。")
         return 0
     fake = _demo_provider(goal)  # provider 校验在进场前
+    client = LlmClient(fake)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
     conn = _open_db()
     try:
-        result = _assemble(conn, MainLlm(LlmClient(fake))).run(goal)
+        result = _assemble(conn, client).run(goal)
         _print_result(result)
         _emit_report(conn, fake, result.task_id, half=False)
     except SecptError:
@@ -176,7 +197,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     conn = _open_db()
     try:
         fake = _demo_provider("")
-        result = _assemble(conn, MainLlm(LlmClient(fake))).resume(str(args.task_id))
+        result = _assemble(conn, LlmClient(fake)).resume(str(args.task_id))
         _print_result(result)
         _emit_report(conn, fake, result.task_id, half=False)
     except SecptError:

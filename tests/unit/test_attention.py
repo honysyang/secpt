@@ -1,9 +1,10 @@
-"""attention.build / render 契约：纯函数投影，M1 边界字段恒缺省。"""
+"""attention.build / render 契约：纯函数投影，双图摘要与经验三态回放按位渲染。"""
 
 from __future__ import annotations
 
 from secpt.llms.client import Goal
 from secpt.store import attention
+from secpt.store.experience import ExperienceRow
 from secpt.store.ledger import TicketRow
 
 GOAL = Goal(
@@ -67,3 +68,48 @@ def test_render_hidden_sections_when_fields_absent() -> None:
     text = attention.build(GOAL, 1, "", []).render()
     assert "## 可用经验" not in text
     assert "（暂无）" in text  # plan_summary 空时给模型明示占位
+
+
+def _exp(seq: int, state: str, summary: str, command: str | None = None) -> ExperienceRow:
+    return ExperienceRow(
+        id=f"e{seq}",
+        task_id="task",
+        environment="lab",
+        verify_state=state,
+        useful_count=0,
+        summary=summary,
+        command=command,
+        raw_ref=f"runs/{seq}.txt",
+        created_at=seq,
+    )
+
+
+def test_build_experiences_verified_carries_command() -> None:
+    """verified = 正典进包：命令原样带出（回放即复用）。"""
+    pack = attention.build(
+        GOAL, 1, "暂无", [], experiences=[_exp(1, "verified", "22 端口常开", "nmap -p 22")]
+    )
+    assert pack.experience_snapshot == ["[verified] 22 端口常开（命令：nmap -p 22）"]
+    assert "命令：nmap -p 22" in pack.render()
+
+
+def test_build_experiences_claimed_hides_command() -> None:
+    """claimed = 仅当线索：线索给得出，命令藏得住（M2 裁判未过不许给命令）。"""
+    pack = attention.build(
+        GOAL, 1, "暂无", [], experiences=[_exp(1, "claimed", "疑似存在管理界面", "secret-cmd")]
+    )
+    assert pack.experience_snapshot == ["[claimed|仅当线索] 疑似存在管理界面"]
+    text = pack.render()
+    assert "[claimed|仅当线索] 疑似存在管理界面" in text
+    assert "secret-cmd" not in text
+
+
+def test_build_experiences_rejected_blocked_double_gate() -> None:
+    """rejected 连线都别进 build（双闸第二道）：fetch_replay 已挡 SQL 层，这里再兜底。"""
+    pack = attention.build(GOAL, 1, "暂无", [], experiences=[_exp(1, "rejected", "已被拆穿的骗局")])
+    assert pack.experience_snapshot == []
+
+
+def test_render_experience_section_absent_when_no_experiences() -> None:
+    text = attention.build(GOAL, 1, "暂无", []).render()
+    assert "## 可用经验" not in text

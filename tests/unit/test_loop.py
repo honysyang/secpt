@@ -18,6 +18,7 @@ from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
 from secpt.store import ledger, migrate
+from secpt.store.experience import record_experience
 
 GOAL_JSON = json.dumps(
     {
@@ -53,17 +54,44 @@ class FakeDispatcher:
         )
 
 
+class SpyDistiller:
+    """蒸馏 hook 探针：记 (task_id, env, 所见 exit_kind)——验证"先账后蒸"时点。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def distill(self, conn: sqlite3.Connection, task_id: str, environment: str) -> list[object]:
+        row = conn.execute("SELECT exit_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        self.calls.append((task_id, environment, row["exit_kind"] if row else None))
+        return []
+
+
+class ExplodingDistiller:
+    """故障注入蒸馏器：验证 learning 降级不挡收束（W3-1 红线）。"""
+
+    def distill(self, conn: sqlite3.Connection, task_id: str, environment: str) -> list[object]:
+        raise RuntimeError("蒸馏器故障注入")
+
+
 @pytest.fixture()
-def rig() -> Callable[[list[object]], tuple[SimpleNamespace, sqlite3.Connection]]:
-    def _make(script: list[object]) -> SimpleNamespace:
+def rig() -> Callable[..., SimpleNamespace]:
+    def _make(
+        script: list[object], *, distiller: object | None = None, experience_env: str = "lab"
+    ) -> SimpleNamespace:
         conn = migrate.connect(":memory:")
-        fake = FakeLLM(script)
+        fake = FakeLLM(script)  # type: ignore[arg-type]
         dispatcher = FakeDispatcher()
         events: list[tuple[str, Mapping[str, object]]] = []
         bus = EventBus()
         bus.subscribe(lambda name, payload: events.append((name, payload)))
         loop = PentestLoop(
-            conn, MainLlm(LlmClient(fake)), dispatcher, bus=bus, exit_checker=ExitChecklist()
+            conn,
+            MainLlm(LlmClient(fake)),  # type: ignore[arg-type]
+            dispatcher,
+            bus=bus,
+            exit_checker=ExitChecklist(),
+            distiller=distiller,  # type: ignore[arg-type]
+            experience_env=experience_env,
         )
         return SimpleNamespace(
             conn=conn, fake=fake, loop=loop, dispatcher=dispatcher, events=events
@@ -306,3 +334,61 @@ def test_checklist_three_round_failure_raises_wall(
     assert names.count("exit_failed") == 3 and names[-1] == "run_ended"
     audits = conn.execute("SELECT what FROM audit_log WHERE task_id = ?", (task_id,)).fetchall()
     assert any("E_WALL" in row["what"] for row in audits)
+
+
+# ---- W3-1 收尾蒸馏 hook：先账后蒸 / 降级不挡收束 / 回放进包 ----------------------
+
+
+def test_distill_hook_runs_after_ledger_closed(
+    rig: Callable[..., SimpleNamespace],
+) -> None:
+    """正常收束时蒸馏 hook 只在收尾烧一次，且所触发时 exit_kind 已落账（先账后蒸）。"""
+    spy = SpyDistiller()
+    t = rig(
+        [
+            GOAL_JSON,
+            _step_json("收工", calls=[], done=True),
+        ],
+        distiller=spy,
+    )
+    result = t.loop.run("摸底 10.0.0.5")
+    assert result.finished_naturally is True
+    assert spy.calls == [(result.task_id, "lab", "normal")]
+
+
+def test_distill_failure_degrades_and_keeps_close(
+    rig: Callable[..., SimpleNamespace],
+) -> None:
+    """learning 可降级：蒸馏器当场爆炸也不改变收束结论，audit 留降级告警。"""
+    t = rig([GOAL_JSON, _step_json("收工", calls=[], done=True)], distiller=ExplodingDistiller())
+    result = t.loop.run("摸底 10.0.0.5")
+    assert result.finished_naturally is True and result.exit_kind == "normal"
+    assert t.events[-1][0] == "run_ended"
+    run = t.conn.execute("SELECT status FROM runs").fetchone()
+    assert run["status"] == "ended"
+    audits = t.conn.execute("SELECT what FROM audit_log WHERE actor = 'main'").fetchall()
+    assert any("经验蒸馏降级" in row["what"] for row in audits)
+
+
+def test_experience_replay_enters_attention_pack(
+    rig: Callable[..., SimpleNamespace],
+) -> None:
+    """W3-1 接线：同环境经验经 fetch_replay 投影进包——claimed 命令藏住、异环境不混。"""
+    t = rig(
+        [_step_json("收工", calls=[], done=True)], distiller=SpyDistiller(), experience_env="prod"
+    )
+    conn = t.conn
+    task = ledger.start_task(conn, "回放场主机", goal="10.0.0.5")
+    ledger.start_run(
+        conn, task.id, config={"objective": "确认暴露面", "success_criteria": "banner"}
+    )
+    record_experience(
+        conn, task.id, "prod", "claimed", "端口 22 曾验证开放", "nmap -p 22", "runs/r.txt"
+    )
+    record_experience(conn, task.id, "lab", "verified", "lab 环境的经验", None, "runs/l.txt")
+    t.loop.resume(task.id)
+    user_msg = t.fake.calls[0][1].content
+    assert "## 可用经验" in user_msg
+    assert "[claimed|仅当线索] 端口 22 曾验证开放" in user_msg
+    assert "nmap -p 22" not in user_msg  # claimed 命令藏住
+    assert "lab 环境的经验" not in user_msg  # 异环境不混包

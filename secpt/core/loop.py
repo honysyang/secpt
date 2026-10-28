@@ -11,6 +11,9 @@ M1 边界（诚实声明，不做假实现）：
   兜底，W1-7 转半场报告；错误矩阵语义一致，不吞错）。
 - 断电续跑（WF8）：run() 进场跑 fresh；resume(task_id) 经 checkpointer 复建——
   只复建不回放，step_no 从水位线+1 续，run id 跨 kill 连续。
+- M2（W3-1）：经验回放进包（store.experience.fetch_replay 同环境 top-k）；
+  收尾蒸馏 hook（WF10）挂在收束段后（先账后蒸），learning 是可降级器官——
+  蒸馏失败只告警降级，绝不改变收束结论与已落账的 exit_kind。
 - 事件：run_step_started / ticket_appended（事务提交后补发，绝不 pre-commit 发
   未落账的账）/ run_ended 由本循环/store 触发；exit_passed|failed 属 W2-1。
 - 三问投影从账本还原（target=tasks.goal、objective/success_criteria=runs.config_json）：
@@ -24,6 +27,7 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Protocol
 
+import structlog
 from pydantic import BaseModel, Field
 
 from secpt.core import budget, checkpointer, fsm, stall
@@ -31,9 +35,12 @@ from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import attention, graph, ledger
+from secpt.store import attention, experience, graph, ledger
+from secpt.store.experience import ExperienceRow
 from secpt.store.ledger import RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
+
+_log = structlog.get_logger(__name__)
 
 # 异常出口矩阵（§9 外圈）：这些 code 是"跑不动/没进展"，算 stalled（撞限类）；
 # 其余（E_SCHEMA/E_TIMEOUT_LLM/E_LEDGER…）算 abnormal（事故类），都落 tasks.exit_kind
@@ -66,6 +73,17 @@ class Dispatcher(Protocol):
 
     def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
         """schema 校验 + 执行 + 回执；失败/未知工具也回 ToolOutput（exit_code≠0/null 落小票）。"""
+        ...
+
+
+class Distiller(Protocol):
+    """经验蒸馏口（依赖倒置）：core 不 import finalize（分层红线单向），
+    装配方把 finalize.experience.Distiller 实例从最外层塞进来。"""
+
+    def distill(
+        self, conn: sqlite3.Connection, task_id: str, environment: str
+    ) -> list[ExperienceRow]:
+        """收尾蒸馏：候选 = 账本全 findings + 成功小票 → LLM 写摘要 → store 收口落账。"""
         ...
 
 
@@ -104,12 +122,16 @@ class PentestLoop:
         bus: EventBus | None = None,
         *,
         exit_checker: ExitChecker,
+        distiller: Distiller | None = None,
+        experience_env: str = "lab",
     ) -> None:
         self._conn = conn
         self._llm = main_llm
         self._dispatcher = dispatcher
         self._bus = bus
         self._exit_checker = exit_checker
+        self._distiller = distiller
+        self._experience_env = experience_env
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -199,6 +221,7 @@ class PentestLoop:
         # 收束（WF7）：done / 步线耗尽 / 工序异常 三条来路统一走到这里——先账后出。
         ledger.end_run(self._conn, run.id)
         ledger.end_task(self._conn, task.id, exit_kind)
+        self._distill(task.id)
         if crashed is not None:
             self._audit(task.id, f"异常出口 {crashed.code}: {crashed}")
             machine.go(fsm.FSMState.ABNORMAL)
@@ -245,6 +268,7 @@ class PentestLoop:
             plan_summary="（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）",
             recent=ledger.recent_tickets(self._conn, task.id),
             graph_summary=graph.graph_summary(self._conn, task.id),
+            experiences=experience.fetch_replay(self._conn, self._experience_env),
         )
         try:
             output = self._llm.step(pkg)
@@ -300,6 +324,30 @@ class PentestLoop:
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
         )
         return outcome, output.done
+
+    def _distill(self, task_id: str) -> None:
+        """收尾经验蒸馏 hook（WF10）：任何出口（normal/stalled/abnormal）都收尾进。
+
+        为什么吞在这里：learning 是可降级器官——蒸馏失败（LlmError/账本故障）绝不能
+        改变收束结论（end_task 已落账）或掩盖原异常（crashed 也可能在此之后 re-raise），
+        但降级必须有痕：structlog 告警（机器频道）+ audit 一行（账本证据）。
+        Distiller 对非法 verify_state 抛的 LedgerError 不在此拦——那是代码缺陷，
+        不是降级场景，静默吞掉会掩盖 bug。
+        """
+        if self._distiller is None:
+            return  # M1 老装配（无蒸馏器）：hook 不存在，无事发生
+        try:
+            rows = self._distiller.distill(self._conn, task_id, self._experience_env)
+        except Exception as exc:  # noqa: BLE001  可降级器官兜底（设计边界，见 docstring）
+            _log.warning("experience_distill_degraded", task_id=task_id, error=str(exc))
+            ledger.audit(self._conn, task_id, "main", f"经验蒸馏降级：{exc}")
+            return
+        _log.info(
+            "experience_distilled",
+            task_id=task_id,
+            environment=self._experience_env,
+            entries=len(rows),
+        )
 
     def _goal_projection(self, task: TaskRow, run: RunRow) -> Goal:
         """从账本还原进场三问（不依赖任何内存态，resume 路径同一个函数）。"""

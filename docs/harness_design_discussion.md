@@ -1406,3 +1406,25 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **教训**：系统 python3.13 的 sqlite3 模块对 LD_LIBRARY_PATH 敏感（_sqlite3 undefined symbol）——本机跑 CLI 一律 `LD_LIBRARY_PATH= .venv/bin/python -m secpt.main ...` 前缀清空。
 
 **M1 收束**：W1-1→W2-4 全部 DoD 达成，流程通。M2 石（经验库激活/R0R4/LLMC/web 面板）不在本程。
+
+## 63. W3-1 施工结论：经验库激活——v3 建 experience 表 + Distiller 收尾蒸馏 + 三态回放双闸
+
+**开庭前四点拍板**（§63 起新决策）：
+1. **沉淀口径**=按蓝本 WF10：claimed/rejected 照沉淀进条目，verify_state 如实标注——经验库记"我们以为学到什么"，不是只记"确认为真"。 Barrett 式只收 verified 推迟到 M3 判票接线后顺带生效（fetch_replay 已排 rejected，判票一开即闭环）。
+2. **回放入选**=三态：verified=含命令进包；claimed=隐藏命令只当线索；rejected=SQL 层 + 投影层双闸不进包（`fetch_replay` WHERE verify_state != 'rejected'；`_project_experience` 再兜一次）。
+3. **environment 键**=`SECPT_ENV` 环境变量，默认 lab——回放隔离粒度是"环境相同才回流"。
+4. **useful_count** M2 恒 0 不接线，建表留默认——判票票盒 M3 再接。
+
+**变更清单**：
+- 迁移：`0003_experience_table.sql`（DDL §5 原样：environment/verify_state/useful_count 三命根 + summary/command/raw_ref + idx_experience_env 索引 + `CREATE TRIGGER trg_experience_no_delete`——`BEFORE DELETE` → `SELECT RAISE(ABORT, 'E_APPEND_ONLY: ...')`；RAISE 在 SQLite 里是 trigger 体内表达式不是语句，裸写必炸）。append-only 只锁 DELETE，UPDATE 放行留给 M3 SRS 判票改 verify_state。
+- store/experience.py：`ExperienceRow`（pydantic 九字段）+ `record_experience` **唯一写口**（非法 verify_state 抛 LedgerError；空锚留丢弃 audit；成功落账 audit actor=llmb）+ `fetch_replay`（ORDER BY useful_count DESC, created_at DESC, rowid DESC——注意**最新优先**，测试曾把期望写反）。
+- finalize/experience.py（LLMB=Distiller）：候选序位表 = findings 全态 + 成功小票（exit_code==0）一律 claimed、**失败小票根本不进候选表**；LLM 草案 idx 越界跳过计入 audit；无候选 0 条 → 不烧 LLM 直接 audit「无蒸馏候选，0 条落账」——mock 演示脚本长度与蒸馏解耦；LlmError 原样上抛（由 loop hook 降级）。
+- core/loop.py：`Distiller` Protocol（core 不 import finalize，同 ExitChecklist 手式）+ `distiller/experience_env` 双注入 + `_advance` 收束段 end_run→end_task 之后挂 `_distill(task.id)`——**先账后蒸**，蒸馏是可降级器官：失败 structlog warning + audit 留痕，绝不改变收束结论或掩盖原异常；DLL 非法 verify_state 的 LedgerError 不拦（代码缺陷不是降级场景，吞了会盖 bug）。`_one_step` 打包加 `experiences=fetch_replay(self._experience_env)`。
+- main.py：`_assemble` 改收 `LlmClient`——MainLlm 与 Distiller **共用同一条 chat 协议通道**；`_experience_env()` helper 读 SECPT_ENV 默认 lab；run/resume 两装配点各传 client。
+- ob/attention.py：`build` 加 `experiences: Sequence[ExperienceRow] = ()` + `_project_experience` 三态投影（verified=`[verified] {summary}（命令：{cmd}）`；claimed=`[claimed|仅当线索] {summary}` 命令藏住；rejected 再兜底）。
+
+**测试**：总数 141→163（+22）。test_experience 五组 14 例（迁移/唯一写口含越权 write 失败注入/回放排序含 top-k 最新优先/Distiller 含失败小票越界与空候选收束）；test_attention +4（三态投影各有断言 + 无经验节缺省）；test_loop +3（distill hook 于收束后运行、失败降级收束干净且 audit 留痕、跨环境回放只混同环境）；test_e2e +1（跨 run 回放：run1 沉淀 claimed → run2 注意力包出现 `[claimed|仅当线索] ...` 且命令藏住）；test_store_migrate/test_graph 版本断言 2→3。
+
+**验证**：pytest 163 例退出码 0；ruff format（44 files）+ check 全绿；CLI 冒烟（SECPT_NMAP_BIN=占位、LLM_PROVIDER=mock）：失败小票不进候选 → audit llmb「经验蒸馏收束：无蒸馏候选，0 条落账」，报告正常、不烧 LLM。**冒烟注意**：若把 SECPT_NMAP_BIN 指向真会成功的命令（如 /bin/true），成功小票进候选 → Distiller 会烧 LLM 吃掉出厂脚本尾项 → schema 耗尽降级（有痕）。演示/冒烟一律用**不存在的占位路径**。
+
+**教训**：①`SELECT RAISE(...)`——RAISE 不是语句是表达式，migrate 读回 SQL 片段实测；②"最新优先"排序写测试前最好把 SQL 里的 ORDER BY 再读一遍，两处曾写反；③先测后码在唯一写口处最值钱——直接写表的失败注入（audit 断言越权尝试被留痕）要在写口定型前来一发。
