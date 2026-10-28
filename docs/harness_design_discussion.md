@@ -1259,3 +1259,33 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - FakeLLM 续跑脚本最后一项必须 done=True，否则续走第 5 步把脚本耗尽（E_FAKE_SCRIPT_EXHAUSTED）——测试即流程的副作用提醒。
 
 **DoD 对照**：小票+step_count 同一事务写（双图 W2-2 接线进同一批）、kill 后续跑只复建不回放（水位线+残留忽略均有测试证伪）、resume 复用原 run（用户已拍板）。
+
+---
+
+## 57. W1-6 施工结论：异常出口矩阵——步数线/失速计/FSM/错误矩阵落账
+
+**commit da75107 `feat(core): W1-6 异常出口矩阵——步数线/失速计/FSM/错误矩阵落账`**。90 测全绿（71→90）、ruff format+check 全绿。
+
+**core/budget.py（纯函数，契约在测试里钉死）**：
+- `try_spend(max_steps, step_no, *, cost=1) -> bool`：语义定案 `step_no + cost - 1 <= max_steps`——第 200 步自身仍在线内（`try_spend(200, 200)` 为 True）；预算不足返回 False 不抛错，抛错归属 loop。
+- `try_tool_calls(count, limit) -> bool`：`0 <= count <= limit`。
+- 非法入参（非正步号/负成本/非正上限）保守判 False：宁可拦下也不放行脏预算。
+
+**core/fsm.py（四铁律"FSM 管状态"的落地）**：ENTER/WORK/EXIT/ABNORMAL 四态，迁移矩阵 `_TRANSITIONS` 常量表（ENTER→WORK、WORK→WORK/EXIT/ABNORMAL、终态零出边）；自迁 = 幂等 no-op；非法迁移抛 `SecptError("非法迁移 …")` 且状态保持原样；构造器支持显式给起点 `Fsm(state)`（终态只能这样进场，测试需要）。
+
+**core/stall.py（失速计契约）**：`StallCounter(n=5).observe(ok=*) -> bool`，连败累加、成功清零、数满 N 返回 True。M1 判据仅 exit_code≠0（E_TOOL_FAIL +1）；"规划无变化/判零"判重留给 M2。
+
+**store/ledger.py**：新增 `end_task(conn, task_id, exit_kind)`，exit_kind 三值校验（normal/abnormal/stalled，非法抛 LedgerError）——tasks.exit_kind 的官门收口。
+
+**core/loop.py（异常出口统一收束 = WF7）**：
+- `_STALLED_CODES = frozenset({"E_BUDGET_EXHAUSTED", "E_STALL", "E_WALL"})`，映射定案：code ∈ 失速集 → exit_kind="stalled"；其余 SecptError → "abnormal"；done=True → "normal"；默认值 = 步数线走完没 done（也是 stalled）。
+- `_advance` 收束顺序（先账后出）：`end_run` + `end_task(exit_kind)` + audit → FSM `go(EXIT|ABNORMAL)` → `run_ended` 事件 → crashed 原样 re-raise（main.py 兜底是 W1-7）。
+- `_one_step` 接线：LLM 调用包 try/except LlmError——`code == "E_SCHEMA"` 时该步 `record_step(status="voided")` 落 `exc.to_dict()` 原文后 re-raise；批量事务落账后、事件后，失速计逐小票收数，`counter.observe(ok=receipt.exit_code == 0)` 拉铃即抛 `E_STALL`。
+- LoopResult 新增 `exit_kind` 字段（向后兼容纯增量）。
+
+**施工教训**：
+- 参数化 FSM 测试首版用 `Fsm(); go(start)` 从 EXIT/ABNORMAL 起步自爆（终态不可 go 进）——改为 `Fsm(start)` 构造进场，测试即契约：终态无条件进入的唯一途径是事件剧情本身。
+- 原拟抽 `_settle_run` helper 收束退出，但事件步数与 outcome 传参会引入假占位——内联收束更诚实，回退了抽象。
+- **环境坑（重要）**：`LD_LIBRARY_PATH` 含 trae-server 的 nss 目录，其中旧版 `libsqlite3.so.0` 遮蔽系统库，`_sqlite3` 报 `undefined symbol: sqlite3_deserialize`——所有 pytest/ruff 命令必须前缀 `LD_LIBRARY_PATH=`（清空后用 `.venv/bin/python -m ...`）。
+
+**DoD 对照**：撞 200 步/连败拉铃（E_STALL）/schema 重试耗尽三类异常出口均按 §9 错误矩阵落账（exit_kind 三值/voided step/run_ended 事件）并走异常出口；FSM/budget/stall 三面 contract test 19 例（含边界 try_spend(200,200)=True、非法迁移状态不动、失速清零再数满）。
