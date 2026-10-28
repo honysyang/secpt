@@ -31,7 +31,7 @@ from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import attention, ledger
+from secpt.store import attention, graph, ledger
 from secpt.store.ledger import RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
 
@@ -244,6 +244,7 @@ class PentestLoop:
             step_no=step_no,
             plan_summary="（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）",
             recent=ledger.recent_tickets(self._conn, task.id),
+            graph_summary=graph.graph_summary(self._conn, task.id),
         )
         try:
             output = self._llm.step(pkg)

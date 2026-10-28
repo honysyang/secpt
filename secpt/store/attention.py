@@ -1,7 +1,7 @@
 """注意力包（§2.3：store/attention.py，纯函数，现打包即弃）。
 
-包内容按 WF2 时序：goal / 最近小票 / 规划概要 / 步号。M1 的三条边界（写进规则注释）：
-- 双图摘要：M1 双图未建（W2-2 起 pilot），本版留占位字段（恒空串），W2-2 补接线。
+包内容按 WF2 时序：goal / 最近小票 / 规划概要 / 步号 / 双图摘要（W2-2 已接线，
+graph.graph_summary 投影，空图返回空串时不渲染该节）。M1 的三条边界（写进规则注释）：
 - 经验不进包：经验库 M2 才激活，三态规则（verified=正典进含命令 / claimed=只当线索
   隐藏命令 / 连续 0 命中=降级不进包）作为注释与模型字段预留，禁止提前实现。
 - 打包即弃：包是一步一现的临时物，不落库、不缓存——黑板里只有事实（小票/双图），
@@ -30,7 +30,7 @@ class AttentionPack(BaseModel):
     goal: Goal
     step_no: int
     plan_summary: str
-    graph_summary: str = ""  # W2-2 接线前恒空
+    graph_summary: str = ""  # 空串 = 双图尚无事实，render() 省略该节
     recent_tickets: list[PackTicket] = Field(default_factory=list)
     experience_snapshot: list[str] = Field(default_factory=list)  # M2：三态规则接线位
 

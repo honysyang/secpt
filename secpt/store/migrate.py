@@ -18,7 +18,7 @@ from secpt.errors import LedgerError
 
 # baseline（schema.sql，version=1）之后的增量迁移：后续 W 卡按序追加。
 # 每个条目 = (迁移后的 schema_version, 迁移文件名)。
-_MIGRATIONS: tuple[tuple[int, str], ...] = ()
+_MIGRATIONS: tuple[tuple[int, str], ...] = ((2, "0002_graph_tables.sql"),)
 
 _STORE_DIR = "store"
 

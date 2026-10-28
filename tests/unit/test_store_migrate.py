@@ -32,7 +32,7 @@ class TestMigration:
         assert EXPECTED_TABLES <= tables
 
         fresh = connect(":memory:")
-        assert schema_version(fresh) == 1
+        assert schema_version(fresh) == 2  # 1（baseline 六表）+ 1（W2-2 双图迁移）
         fresh.close()
 
     def test_migration_idempotent(self, db: sqlite3.Connection) -> None:
