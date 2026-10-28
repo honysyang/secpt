@@ -13,7 +13,8 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from pydantic import BaseModel
@@ -22,10 +23,51 @@ from secpt.errors import LedgerError
 
 TicketObserver = Callable[[str, Mapping[str, object]], None]
 
+# 批量事务记账表：sqlite3.Connection 既不能挂属性（无 __dict__）也不能弱引用，
+# 批量状态只能记在模块级；id → 强引用（存活的连接 id 不会被复用，防误判），
+# finally 保证清表不泄漏。
+_BATCHED: dict[int, sqlite3.Connection] = {}
+
 
 def _now() -> int:
     """统一时间源：epoch 秒。"""
     return int(time.time())
+
+
+def _maybe_commit(conn: sqlite3.Connection) -> None:
+    """写函数统一收口：不在批量内当场 commit；在批量内服从外层边界。
+
+    单笔写（历史路径）保持"写一笔交一笔"的旧语义；批量收尾（WF8）由
+    :func:`write_batch` 一锤定音——批内任何写函数都没有越权递交的权力。
+    """
+    if id(conn) not in _BATCHED:
+        conn.commit()
+
+
+@contextmanager
+def write_batch(conn: sqlite3.Connection) -> Iterator[None]:
+    """多笔写入批成一个事务（WF8 收尾原子性的机制底座）。
+
+    - 进场要求"干净交易"：批嵌套、或带着未提交脏状态进场一律 LedgerError，
+      宁可拒绝也不悄悄吞掉别人的未提交作业；
+    - 批内所有写函数经 :func:`_maybe_commit` 放弃私下 commit；
+    - 出场一锤定音：正常 → COMMIT；任何异常 → 整批 ROLLBACK 后原样上抛。
+    """
+    if id(conn) in _BATCHED:
+        raise LedgerError("write_batch 不允许嵌套", context={"conn_id": id(conn)})
+    if conn.in_transaction:
+        raise LedgerError("write_batch 需要干净的账本连接（存在未提交脏状态）")
+    conn.execute("BEGIN IMMEDIATE")
+    _BATCHED[id(conn)] = conn
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        _BATCHED.pop(id(conn), None)
 
 
 class TaskRow(BaseModel):
@@ -96,7 +138,7 @@ def start_task(conn: sqlite3.Connection, input_text: str, goal: str) -> TaskRow:
             " VALUES (?, ?, ?, ?, ?, ?)",
             (task.id, task.input_text, task.goal, task.mode, task.exit_kind, task.created_at),
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("tasks 写入失败", context={"input_text": input_text[:64]}) from exc
     return task
@@ -121,7 +163,7 @@ def start_run(
             " VALUES (?, ?, ?, ?, ?, ?)",
             (run.id, run.task_id, run.status, run.step_count, run.config_json, run.started_at),
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("runs 写入失败", context={"task_id": task_id}) from exc
     return run
@@ -133,7 +175,7 @@ def end_run(conn: sqlite3.Connection, run_id: str, *, status: str = "ended") -> 
         conn.execute(
             "UPDATE runs SET status = ?, ended_at = ? WHERE id = ?", (status, _now(), run_id)
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("runs 收尾失败", context={"run_id": run_id}) from exc
 
@@ -144,6 +186,76 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> RunRow:
     if row is None:
         raise LedgerError("runs 查无此行", context={"run_id": run_id})
     return RunRow.model_validate(dict(row))
+
+
+def latest_run(conn: sqlite3.Connection, task_id: str) -> RunRow:
+    """该 task 最近一次 run（WF8 续跑的入口查询）：started_at 降序、同秒用 rowid。"""
+    row = conn.execute(
+        "SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise LedgerError("该 task 查无 run", context={"task_id": task_id})
+    return RunRow.model_validate(dict(row))
+
+
+def mark_step(conn: sqlite3.Connection, run_id: str, step_no: int) -> None:
+    """水位线唯一推进口：只进不退、同号幂等、干净失败（不落半截脏事务）。
+
+    为什么 SQL 收在 ledger 而语义在 checkpointer：写入口只经 store/*（铁律），
+    核心的"何时推进"由 core.checkpointer.mark_step 委托到这里。
+    """
+    row = conn.execute("SELECT step_count FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise LedgerError("水位线推进失败：runs 查无此行", context={"run_id": run_id})
+    current = int(row["step_count"])
+    if step_no < current:
+        raise LedgerError(
+            "水位线倒退被拒（只进不退）",
+            context={"run_id": run_id, "current": current, "target": step_no},
+        )
+    if step_no == current:
+        return  # 同号重放 = 幂等 no-op（纯 SELECT 不开预备事务，零副作用返回）
+    try:
+        conn.execute("UPDATE runs SET step_count = ? WHERE id = ?", (step_no, run_id))
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("水位线推进失败", context={"run_id": run_id, "step_no": step_no}) from exc
+
+
+def reopen_run(conn: sqlite3.Connection, run_id: str) -> None:
+    """事故复建：被 kill 的 run 放回 running（已正常收尾的 run 拒绝复活）。"""
+    if conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone() is None:
+        raise LedgerError("run 复建失败：runs 查无此行", context={"run_id": run_id})
+    try:
+        conn.execute(
+            "UPDATE runs SET status = 'running', ended_at = NULL"
+            " WHERE id = ? AND status != 'ended'",
+            (run_id,),
+        )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("run 复建失败", context={"run_id": run_id}) from exc
+
+
+def get_task(conn: sqlite3.Connection, task_id: str) -> TaskRow:
+    """按 id 读 task（resume 还原目标投影用）。查无此行抛 LedgerError。"""
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        raise LedgerError("tasks 查无此行", context={"task_id": task_id})
+    return TaskRow.model_validate(dict(row))
+
+
+def ticket_event_payload(ticket: TicketRow) -> dict[str, object]:
+    """ticket_appended 事件载荷的唯一构造点（append_ticket 与 loop 批后补发共用）。"""
+    return {
+        "task_id": ticket.task_id,
+        "run_id": ticket.run_id,
+        "ticket_id": ticket.id,
+        "tool_name": ticket.tool_name,
+        "exit_code": ticket.exit_code,
+        "summary": ticket.summary,
+    }
 
 
 def recent_tickets(conn: sqlite3.Connection, task_id: str, *, limit: int = 10) -> list[TicketRow]:
@@ -194,7 +306,7 @@ def record_step(
                 step.ended_at,
             ),
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("steps 写入失败", context={"run_id": run_id, "step_no": step_no}) from exc
     return step
@@ -247,21 +359,11 @@ def append_ticket(
                 ticket.created_at,
             ),
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("tickets 写入失败", context={"tool_name": tool_name}) from exc
     if bus is not None:
-        bus(
-            "ticket_appended",
-            {
-                "task_id": task_id,
-                "run_id": run_id,
-                "ticket_id": ticket.id,
-                "tool_name": tool_name,
-                "exit_code": exit_code,
-                "summary": summary,
-            },
-        )
+        bus("ticket_appended", ticket_event_payload(ticket))
     return ticket
 
 
@@ -272,7 +374,7 @@ def audit(conn: sqlite3.Connection, task_id: str, actor: str, what: str) -> None
             "INSERT INTO audit_log (task_id, actor, what, created_at) VALUES (?, ?, ?, ?)",
             (task_id, actor, what, _now()),
         )
-        conn.commit()
+        _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError(
             "audit_log 写入失败", context={"task_id": task_id, "actor": actor}
@@ -288,8 +390,14 @@ __all__ = [
     "audit",
     "end_run",
     "get_run",
+    "get_task",
+    "latest_run",
+    "mark_step",
     "recent_tickets",
     "record_step",
+    "reopen_run",
     "start_run",
     "start_task",
+    "ticket_event_payload",
+    "write_batch",
 ]

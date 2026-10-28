@@ -9,13 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from secpt.core import checkpointer
 from secpt.core.loop import PentestLoop, ToolOutput
-from secpt.errors import LlmError
+from secpt.errors import LedgerError, LlmError
 from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import migrate
+from secpt.store import ledger, migrate
 
 GOAL_JSON = json.dumps(
     {
@@ -159,3 +160,58 @@ def test_llm_error_propagates_and_run_not_ended(
         t.loop.run("摸底")
     tasks = t.conn.execute("SELECT * FROM tasks").fetchall()
     assert len(tasks) == 1  # 进场已落账，炸在第一步
+
+
+# ---- W1-5 resume：只复建不回放 -------------------------------------------------
+
+
+def test_resume_continues_from_waterline(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """手工铺 kill 现场账本 → resume：step_no 从水位线+1 续、run id 复用、不回放。"""
+    t = rig([_step_json("踩点 22", calls=[{"name": "probe1"}], done=True)])
+    # 铺被 kill 的账本：task + run + 3 步（1 步有小票）+ 水位线=3，status=running
+    conn = t.conn
+    task = ledger.start_task(conn, "kill 注入主机", goal="10.0.0.5")
+    run = ledger.start_run(
+        conn,
+        task.id,
+        config={"objective": "确认暴露面", "success_criteria": "小票记端口 banner"},
+    )
+    step = ledger.record_step(conn, task.id, run.id, 1, _step_json("断电前", calls=[], done=False))
+    ledger.append_ticket(conn, task.id, run.id, step.id, "nmap", {}, 0, "扫过", "raw/a.txt")
+    for n in (2, 3):
+        ledger.record_step(conn, task.id, run.id, n, _step_json(f"续走 {n}", calls=[], done=False))
+    checkpointer.mark_step(conn, run.id, 3)
+    assert ledger.get_run(conn, run.id).status == "running"
+
+    result = t.loop.resume(task.id)
+    assert result.run_id == run.id  # 复用原 run：run id 跨 kill 连续
+    assert result.steps_taken == 1
+    assert result.finished_naturally is True
+    # 只对续跑的第一步（step4）调了一次 LLM——1~3 没有回放
+    assert t.fake.call_count == 1
+    steps = conn.execute("SELECT step_no, llm_output FROM steps ORDER BY step_no").fetchall()
+    assert [s["step_no"] for s in steps] == [1, 2, 3, 4]
+    assert json.loads(steps[3]["llm_output"])["thought"] == "踩点 22"
+    run_after = ledger.get_run(conn, run.id)
+    assert run_after.step_count == 4 and run_after.status == "ended"
+    # 续跑进场包从账本还原：目标投影带 tasks.goal
+    user_msg = t.fake.calls[0][1].content
+    assert "目标: 10.0.0.5" in user_msg
+
+
+def test_resume_refuses_when_run_already_ended(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """正常收尾的 run 拒续：LedgerError 上抛，一次 LLM 都不调。"""
+    t = rig([_step_json("收工", calls=[], done=True)])
+    conn = t.conn
+    task = ledger.start_task(conn, "已完成的主机", goal="10.0.0.5")
+    run = ledger.start_run(conn, task.id, config={})
+    ledger.record_step(conn, task.id, run.id, 1, _step_json("做完", calls=[], done=True))
+    checkpointer.mark_step(conn, run.id, 1)
+    ledger.end_run(conn, run.id)
+    with pytest.raises(LedgerError, match="正常收尾"):
+        t.loop.resume(task.id)
+    assert t.fake.call_count == 0
