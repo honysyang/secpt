@@ -1,4 +1,4 @@
-"""CLI 唯一入口（§6.3 五命令）：secpt run / chat / resume / tools / evidence。
+"""CLI 唯一入口：secpt run / chat / resume / tools / evidence（§6.3 五命令）+ panel（W3-4）。
 
 装配与兜底纪律：
 - main() 是库层异常的第一兜底（§9：库层不吞错、统一上抛）——SecptError 落一行
@@ -33,6 +33,7 @@ from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
+from secpt.ob.web_view import create_app
 from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
@@ -261,6 +262,25 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_panel(args: argparse.Namespace) -> int:
+    """``secpt panel``：只读 web 面板（账本/双图/报告/audit 流，无写路径）。
+
+    为什么只连 GET-only 的 Flask app：面板与引擎仅共享账本文件，ro 连接打开——
+    服务永远不会写账本；threaded=True 只为 SSE 长连接不阻塞其它页面请求，
+    引擎侧"M2 不做并发"约束不涉此处（§66 记档口径）。
+    """
+    app = create_app(_open_db_path())
+    app.run(
+        host=str(args.host), port=int(args.port), threaded=True, debug=False, use_reloader=False
+    )
+    return 0
+
+
+def _open_db_path() -> str:
+    """面板专用的账本路径读取（不开连接：create_app 内部各自 ro 连接）。"""
+    return os.environ.get("SECPT_DB", "secpt.db")
+
+
 def _print_result(result: LoopResult) -> None:
     """收束摘要：身份 + 步数 + 出口类型（CLI 面板的最后一行）。"""
     print(f"== run 收束 == task_id={result.task_id} run_id={result.run_id}")
@@ -294,6 +314,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_evidence = sub.add_parser("evidence", help="账本落地检查窗（小票/双图）")
     p_evidence.add_argument("task_id", help="要检查的 task")
     p_evidence.set_defaults(func=_cmd_evidence)
+
+    p_panel = sub.add_parser("panel", help="只读 web 面板（账本/双图/报告/audit 流）")
+    p_panel.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
+    p_panel.add_argument("--port", type=int, default=8711, help="监听端口")
+    p_panel.set_defaults(func=_cmd_panel)
     return parser
 
 
