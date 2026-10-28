@@ -1,5 +1,8 @@
 # Agent Harness - 通用智能体运行框架
 
+> **归档说明（2026-10-28）**：本仓库已转向渗透测试智能体自研骨架（见 [docs/pentest-agent-development-doc-v0.1.md](docs/pentest-agent-development-doc-v0.1.md)）。
+> 下文描述的通用 harness 代码已从磁盘移除，完整内容保留在 git 历史（commit `0d0ffd0` 及之前），仅供查阅参照；本 README 亦为归档文档，与新骨架不再对表。
+
 一个模块化的 AI 智能体 harness（运行框架/载体），提供运行引擎、会话管理、工具协议、适配器层和插件系统，用于构建各种具体智能体应用。
 
 ## 快速开始
@@ -10,10 +13,21 @@ pip install -e ".[dev]"
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 API Key
+# 编辑 .env，填入 API Key（LLM_PROVIDER=mock 可离线演示，无需 Key）
 
-# 运行 CLI
-python -m app.cli.main
+# 统一入口：secpt <命令>（等价 python -m app.main <命令>）
+secpt doctor                 # 环境自检
+secpt cli                    # 交互式终端（single/team/swarm 三种模式）
+secpt web [--host --port]    # Web 界面（SSE 流式对话 + 运行回放 + 配置中心）
+```
+
+Web 与 CLI 共享同一份构造逻辑（`app/bootstrap.py`）和配置文件
+（`configs/skills/*.md`、`configs/mcp.json`），任一入口都能管理配置：
+
+```bash
+secpt tools                        # 列出全部工具（含危险标记）
+secpt skills list|show|test        # 技能管理（与 Web 配置中心同源）
+secpt mcp list|connect|call        # MCP 服务器管理（连接测试 / 工具调用）
 ```
 
 ## CLI 交互命令
