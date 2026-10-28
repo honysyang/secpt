@@ -201,13 +201,14 @@ agent 只能写证据；FSM 才能改全局状态；Guard 否决任何越界动�
 ```python
 # harness.py — 主流程（安全/道德部分以 GUARD★/HITL★ 占位）
 
+
 async def run(task: TaskRequest) -> Report:
     # ①② 任务接收 + 剧本装载（三分支裁决：显式 > 推断确认 > fail-fast）
     profile = await resolve_profile(task)
 
-    fsm: FSM   = FSM.from_profile(profile)    # 阶段链 + milestone 触发表
-    store: Store = Store(profile.db)          # sqlite: findings · checkpoint · 审计
-    guard: Guard = Guard(profile.risk)        # ★占位：本版只做 argv 校验 + 输出截断
+    fsm: FSM = FSM.from_profile(profile)  # 阶段链 + milestone 触发表
+    store: Store = Store(profile.db)  # sqlite: findings · checkpoint · 审计
+    guard: Guard = Guard(profile.risk)  # ★占位：本版只做 argv 校验 + 输出截断
 
     run_id = store.new_run(task, profile)
     workers: list[Worker] = []
@@ -217,25 +218,27 @@ async def run(task: TaskRequest) -> Report:
 
         # ③④ 编排：按阶段描述派活——L1 直通批处理 / L2L3 agent 深链
         dispatch = plan_dispatch(phase, store.snapshot(run_id), profile)
-        results = await asyncio.gather(*(
-            [exec_l1(t, guard) for t in dispatch.l1]         # 不经 LLM 的确定性动作
-          + [spawn_agent(w, guard) for w in dispatch.l2l3]   # Agents SDK Runner 循环
-        ))
+        results = await asyncio.gather(
+            *(
+                [exec_l1(t, guard) for t in dispatch.l1]  # 不经 LLM 的确定性动作
+                + [spawn_agent(w, guard) for w in dispatch.l2l3]  # Agents SDK Runner 循环
+            )
+        )
 
         # ⑤ 证据沉淀：agent 只能写证据（claimed 状态）
         for finding in parse_results(results, task.scope):
             store.append_finding(run_id, finding)
-        store.checkpoint(run_id, fsm)                          # 每轮落盘，可恢复
+        store.checkpoint(run_id, fsm)  # 每轮落盘，可恢复
 
         # ⑥ milestone 回环：verify 裁决 → FSM 跃迁（★verify 本版用 PoC 冒烟占位）
         for f in store.findings(run_id, status="claimed"):
-            if await verify(f):                                # claimed → verified
+            if await verify(f):  # claimed → verified
                 store.mark_verified(f, run_id)
-                verdict = fsm.ingest(f)                        # advance / broadcast / 完成?
+                verdict = fsm.ingest(f)  # advance / broadcast / 完成?
                 if verdict.broadcast:
                     workers = halt_workers(workers, keep=verdict.keep)
-                if verdict.human_gate:                         # 换剧本 / 报警动作
-                    await hitl_gate(store, fsm)                # ★HITL 占位
+                if verdict.human_gate:  # 换剧本 / 报警动作
+                    await hitl_gate(store, fsm)  # ★HITL 占位
 
     # ⑦ 交付：只聚合 verified 结论
     report = gen_report(store.findings(run_id, verified_only=True), profile.report)
@@ -247,10 +250,13 @@ async def run(task: TaskRequest) -> Report:
 
 ```python
 async def spawn_agent(w: Worker, guard: Guard) -> FindingList:
-    agent = Agent(name=w.name, model=w.model,
-                  tools=guard.wrap(w.tools),           # Guard 过滤后的工具集
-                  instructions=w.prompt,               # 剧本轮次上下文注入
-                  output_type=FindingList)             # 结构化输出 → 直接进黑板
+    agent = Agent(
+        name=w.name,
+        model=w.model,
+        tools=guard.wrap(w.tools),  # Guard 过滤后的工具集
+        instructions=w.prompt,  # 剧本轮次上下文注入
+        output_type=FindingList,
+    )  # 结构化输出 → 直接进黑板
     r = await Runner.run(agent, w.mission, context=w.ctx)
     return r.final_output
 ```
@@ -1185,3 +1191,18 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **顺手修正的 DDL 硬伤**：`method IN (NULL,...)` 不合法 → `method IS NULL OR method IN (...)`；§5 标题"六表+三表"补上 experience/audit_log 计数。
 **附记**：重写过程引入的约二十处行文瑕疵（外文残留/半角冒号/"桌数""pcP""eil:"等）已逐一清除，全文 grep 复扫零残留。
 **下一步**：图纸与施工图两层都收口，进入 M1 开工——按开发文档第 11 节 W1-1~W2-4 任务拆分逐件动工（六表 DDL → llms/client.py+FakeLLM contract test → 主循环骨架 → nmap 适配器 → 水位线 → 异常分支 → CLI 可观测）。
+
+---
+
+## 54. M1 开工：W1-1/W1-2/W1-3 三张卡落账（流程通第一段）
+
+**W1-1（04ab71b）store/schema.sql + 幂等 migration**：baseline v1（tasks/runs/plans/steps/tickets/findings 七表含 audit_log）+ 5 索引 + append-only 触发器（tickets no_update/no_delete、findings no_delete、audit no_update/no_delete，RAISE(ABORT,'E_APPEND_ONLY:...')）；migrate.py 双段式（baseline + _MIGRATIONS 增量，PRAGMA user_version 推进，重跑天然幂等）。落账测试 8 项含"重跑 migration 幂等"。
+**W1-2（fe71368）llms/client.py 统一 chat 协议 + FakeLLM contract test**：LlmProvider 最小原语 complete→LlmClient 守纪律（structured[T] schema 带错重试≤2 消息 append-only、TimeoutError 指数退避≤3、温度分档常量 0.2/0.8、```json 围栏剥离、Any 只在响应边界）；FakeLLM 脚本化 provider（str/Exception/BaseModel/Callable 四型脚本，耗尽抛 E_FAKE_SCRIPT_EXHAUSTED）。contract test 13 项全绿。嵌进 errors.py：SecptError 支持 code kwarg 覆盖、补 LlmError。
+**W1-3（cafdb1e）主循环骨架 + 注意力包 + 账本官门/事件桩**：
+- store/ledger.py = 账本唯一官门（tasks/runs/steps/tickets/audit_log 全部 INSERT 收敛，pydantic 行模型，sqlite3.Error→LedgerError）；append_ticket 写后触发 ticket_appended 回调（store 不 import ob，回调签名注入）。
+- ob/events.py = EventBus 桩（structlog emit + 订阅者 try/except 只告警；structlog 首位参数即 event，kwargs 去重）。
+- llms/main_llm.py = Orchestrator facade（entrance 三问固定 Goal schema / step(pkg)→StepOutput），无状态。
+- store/attention.py = 打包即弃纯函数 AttentionPack.render()（三问/步号/规划/小票行/占位行；graph_summary 与 experience M1 不进包）。
+- core/loop.py = PentestLoop（enter：空 goal 拒入→三问固化→tasks+runs 落账；run：max_steps 涨停循环 _one_step；_one_step 与 WF2 对表且 emit run_step_started；三问投影 _goal_projection 从 tasks.goal+runs.config_json 还原——不依赖内存态，W1-5 resume 同一函数；dispatcher 只依赖 Protocol 不 import tools 层，bus 经 _ticket_bus 适配 emit 签名）。
+- 测试 4 面 24 项：events（订阅/扇出/异常吞/noop）、ledger（官门写入/FK/CHECK/越权 UPDATE 被触发器拒=失败注入）、attention（投影字段/渲染/占位/缺省段隐藏）、loop（两步 FakeLLM 端到端+事件序列+涨停 finished_naturally=False+LlmError 原样上抛）。
+**DoD 对照**：45 测全绿、ruff format+check 全绿、六表可写、主循环可跑、水位线落 signal（step_count 字段立好）、异常分支骨架（LlmError 上抛）——五样齐还差 W1-5/W1-6/W1-7 三件。
