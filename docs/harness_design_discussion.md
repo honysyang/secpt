@@ -1234,3 +1234,28 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - _single_line 折叠行内空格丢真（`22/tcp open  ssh` 双空格丢失）：summary 只压换行保行内原文，全文保真靠 raw_ref。
 
 **DoD 对照**：manifest 货架可查、 dispatch 入口统一、argv 列表+控制字注入拒、agent_run 登记不假实现、nmap 小票锚点真实。测试总账 45→58。
+
+## 56. W1-5 施工结论：水位线续跑——step_count 与小票同事务推进，kill 后复建不回放
+
+**commit f19d436 `feat(core): W1-5 水位线续跑——step_count 与小票同事务推进，kill 后复建不回放`**。71 测全绿（45→58→71）、ruff format+check 全绿。
+
+**store/ledger.py（SQL 归 ledger）**：
+- write_batch：多笔一事务的机制底座。进场要求"干净交易"（嵌套 / conn.in_transaction 有未提交脏状态 → LedgerError）；BEGIN IMMEDIATE 起、正常 COMMIT / 异常整批 ROLLBACK；写函数经 _maybe_commit 被批内剥夺私下 commit 权力（单笔路径 6 个写函数逐处改收口）。
+- mark_step：先 SELECT 判 outcome——查无 raise"runs 查无此行"、倒退 raise"只进不退"（账面不动）、同号 return 幂等 no-op（纯 SELECT 零副作用）、前进 UPDATE+_maybe_commit；干净失败不留半截脏事务。
+- latest_run（started_at DESC、rowid tie-break）/ reopen_run（status!='ended' 才放回 running、ended 拒复活）/ get_task / ticket_event_payload（事件载荷唯一构造点，append_ticket 与 loop 批后补发共用）。
+- **sqlite3.Connection 既不能挂属性（无 __dict__、setattr 即 AttributeError）也不能弱引用**——批内状态记账改为模块级 `_BATCHED: dict[id, conn]`，id→强引用（存活的连接 id 不会被复用，防误判），finally 清表。
+
+**core/checkpointer.py（语义归 core，§6.2 API 表）**：mark_step 委托 ledger；resume_load = latest_run → ended 拒续（"最近一次 run 已正常收尾，无需续跑"）→ reopen_run → ResumeState(waterline=run.step_count)；step_transaction = ledger.write_batch 的薄壳。
+
+**core/loop.py（WF8 收尾时序）**：
+- run() 保留 fresh（start=1）、新增 resume(task_id)（不复造 LLM 调用、三问从账本还原），共用 _advance；resume 纪律 = 只复建不回放，step_no 从水位线+1 续、run id 跨 kill 连续。
+- 一步收尾 = step_transaction（一次 BEGIN IMMEDIATE）内 record_step + append_ticket×N(bus=None) + mark_step 同笔推进；**dispatch 在事务外收集回执**（子进程级慢操作不占写锁）；**ticket_appended 在提交后补发**——pre-commit 发事件=承认未落账的账；事件序保持 run_step_started → ticket_appended 不变，旧 5 测无感通过。
+- 删 _ticket_bus/TicketObserver 转接层，loop 直接 emit（payload 出 ticket_event_payload 单点）。
+
+**测试 13 例（test_checkpointer.py 11 + test_loop.py 增 2）**：水位线前进/倒退被拒且账面不动/同号幂等；resume_load 选最近 run/水位线后孤儿步残留忽略（append-only 红线，只是无视不删除）/ended 拒续/查无 raise；write_batch 回滚 all-or-nothing（批内炸 RuntimeError 整批清零）/嵌套与脏进场拒；step_transaction 三表一笔同事务提交；kill -9 注入= fork 子进程（脚本第 5 项 _kill_on_step4 → os._exit(9)，fork 免 pickle）+ 父进程断 exitcode==9、水位线=3 → loop.resume → run id 复用、step_count=4、fake.call_count==1；loop 侧 resume 续走/ended run 拒续零 LLM 调用。
+
+**施工教训**：
+- step_transaction 首版 `yield from ledger.write_batch(conn)` 是类型陷阱——@contextmanager 返回的是 _GeneratorContextManager，yield from 它是 yield 其生成器的值、没有 CM 协议；正确形态是 step_transaction 自身 @contextmanager + `with ledger.write_batch(conn): yield`。
+- FakeLLM 续跑脚本最后一项必须 done=True，否则续走第 5 步把脚本耗尽（E_FAKE_SCRIPT_EXHAUSTED）——测试即流程的副作用提醒。
+
+**DoD 对照**：小票+step_count 同一事务写（双图 W2-2 接线进同一批）、kill 后续跑只复建不回放（水位线+残留忽略均有测试证伪）、resume 复用原 run（用户已拍板）。
