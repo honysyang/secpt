@@ -1683,3 +1683,73 @@ off）时连"问审批"都不应发生——探针 wrapper 要在 Guard 前零�
 拒绝不进 stalled/wall 口径的 §67 遗留②在多 worker 下再确认；③guard 双读校验
 遗留③仍挂账。
 
+## 69. M3-3 施工结论：探针 observations 全链——客观流量真相入账 + obs 锚点双锚
+
+**四拍板**（用户拍板）：①enable_http_probe 开关落 **profile.toml `[probes]` 段**
+（R6 独立开关默认关，缺文件/缺段/非 true 一律关——关=装配探针 None，连窗都不
+开，零开销口径）；②注入点 = **registry `_dispatch` 执行窗全包**：guard 分级/
+HITL 裁决全部在窗前完成，窗只包执行器调用（in-process 与 mcp 两分支）——
+denied/递归拒绝零抓取 = "没执行就没流量"，取证窗口跟着动作走；③后端 = **注入
+式 CaptureBackend Protocol（start/stop 同形对称，事件只在 stop 交割）+ 图纸
+位**：默认 mock=ScriptedCapture（伪 HTTP 事件源，meta 诚实标 `mock:true`、
+snapshot 真文件落 raw/；`mitmproxy` 档 E_PROBE fail-fast "M4 接线"，零依赖不
+假装在抓）；④锚点 = **`obs:<id>` 双锚 + R0 扩判**：R0 认 obs 前缀锚 = 查行
+存在且 meta_json/snapshot_ref 非空，文件锚原判据不回退。
+
+**分层红线遵约**：store 不 import tools——observations.append 收原始基元参数
+（channel/meta/snapshot_ref/ts），CaptureEvent→基元的转换归 loop；tools 层
+禁 import judge 层；registry↔probe 循环 import 以 TYPE_CHECKING 化解（probe
+运行时不依赖 registry，registry 运行时 import probe 无环）。
+
+**R0 签名演进（Breaking，须知）**：`r0(finding)` → `r0(conn, finding)`——
+obs 锚要查 observations 表，纯函数拿不到行；调用面全仓同步（sweep 单调用方 +
+TestR0 四例 + test_probe 六例），无第三方消费者，兼容性已在 feat(probe) 提交
+说明并留在此档备查。
+
+**观测窗边界（诚实声明，§48a 双通道口径一致）**：窗罩的是"工具执行的那一段"，
+in-process 工具（如 agent_run）**函数调用本身**确实发生、窗确实开合，但 mock
+事件源交割的是脚本流量（meta.mock=true 可证不是真网流）——读账的人不会被
+"看起来像真抓包"骗到。M4 接 mitmproxy 后同形后端替换，口径不变。
+
+**事件/锚点格式**：obs id = uuid4().hex（无前缀，锚点侧带 `obs:` 前缀寻址，
+`ref[4:]` 反解校验行）；snapshot_ref = `raw_dir/http_<hex>.txt` 真文件指针；
+meta_json = `ensure_ascii=False, sort_keys=True` 确定性序列化；ts = 落账即
+epoch 秒（官门缺省，可显式传）。官门 append 拒空 channel/snapshot_ref——
+"snapshot 非空"过官门是先验；R0 的空壳行检查是纵深防线（历史/异常行直插可造，
+测试即以直 INSERT 卫戍该边界）。
+
+**降级三态（可降级器官口径）**：start 炸 → 告警照常执行（probe_start_
+degraded）；execute 炸 → 先收窗再原样上抛（窗口开过就要收，不悬窗）；stop 炸
+→ 告警交割空事件（probe_stop_degraded）。探针炸绝不挡渗透动作，只有装配期
+配置笔误（E_PROFILE）与未知后端/mitmproxy 档（E_PROBE）才拒跑。
+
+**变更清单**：
+- secpt/store/migrations/0004_observations_table.sql：蓝本 §5 L496-503 DDL
+  原样；migrate._MIGRATIONS 追加 v4（幂等）。
+- secpt/store/observations.py：ObservationRow + append 官门 + task_observations
+  按时序读。
+- secpt/tools/probe.py：ProbeConfig/load_probe_config（三档语义仿 judge.profile：
+  缺→关，笔误 E_PROFILE）/note_for/CaptureEvent/CaptureBackend/ScriptedCapture/
+  build_backend/wrap_execution。
+- secpt/tools/registry.py：ToolOutput.+probe_events；__init__(+, probe)；
+  `_dispatch` 执行窗两分支 + 尾部统一 updates 署旗（hitl+probe_events 合并签，
+  M3-1/M3-2 在无 probe 时逐字节守恒）。
+- secpt/core/loop.py：收尾事务内 probe_events 转基元落 observations（与小票/
+  水位线同一笔提交）；__init__(+, probe_note)；enter() 烙"探针装配：…" audit
+  （与裁判装配同手式两态可读）。
+- secpt/judge/r0_self.py：obs 锚分支 + 扩签；sweep 调用侧同步。
+- secpt/main.py：_probe_backend 装配（SECPT_PROBE_BACKEND 默认 mock）；
+  _assemble 传 probe_note。
+- 测试：test_probe.py 19 例（配置 4/mitmproxy fail-fast/mock 三件/wrap 三态/
+  registry 无 probe 逐字段守恒/开窗挂窗/denied 零抓取/in-process 过窗/
+  e2e 开关两例/R0 扩判三例/obs 锚 verified 全链/官门拒空/note 两态）；
+  test_judge.r0/two store 版本断言随 v4 同步（schema_version 只进不退）。
+
+**验证**：pytest 244 例全绿（225 原班不跳红 + 19 净新增）；ruff format+check
+全绿（import 排序 4 处自动修复，probe.py 复核未引入越层 import）。
+
+**遗留给 M3-4/M4**：①mitmproxy 后端是图纸位——接线时 CaptureBackend 同形换
+ScriptedCapture，meta.mock 消失，R0/判票口径不变；②观测窗只罩工具执行段：工具
+启动前后的网络活动（如外带 DNS 解析）不在窗内，M4 如需补可扩窗或网络层探针；
+③SECPT_PROBE_BACKEND 环境变量仅在开档时生效，关档不读（零开销口径的推论）。
+
