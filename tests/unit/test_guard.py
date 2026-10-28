@@ -90,8 +90,10 @@ def test_agent_run_floor_is_high_and_not_lowerable() -> None:
     cfg = GuardConfig(tiers={"agent_run": "mid", "danger": "low"})
     assert cfg.tier_of("agent_run") == "high"
     assert cfg.tier_of("danger") == "low"
-    ok, _ = cfg.check("agent_run")
-    assert ok is False  # 保底拦下，声明降不了级
+    # hitl_mode=off（M3-1 fail-closed 语义锁定）：HIGH 不放行，声明降不了级。
+    off = GuardConfig(tiers={"agent_run": "mid"}, hitl_mode="off")
+    ok, _ = off.check("agent_run")
+    assert ok is False
 
 
 def test_registry_without_guard_is_noop() -> None:
@@ -107,9 +109,13 @@ def test_registry_without_guard_is_noop() -> None:
 
 
 def test_high_denied_before_execution() -> None:
-    """fail-closed：HIGH 工具零执行（calls=0 可证），回执照出但 denied 无 raw_ref。"""
+    """fail-closed：HIGH 工具零执行（calls=0 可证），回执照出但 denied 无 raw_ref。
+
+    hitl_mode=off 是 M3-1 fail-closed 语义的锁定（缺省 auto 属 M3-2 拍板，
+    HITL 测试见 test_hitl.py）。
+    """
     tool = _EchoTool()
-    registry = ToolRegistry([tool], guard=GuardConfig(tiers={"danger": "high"}))
+    registry = ToolRegistry([tool], guard=GuardConfig(tiers={"danger": "high"}, hitl_mode="off"))
     receipt = registry.dispatch("danger", {})
     assert tool.calls == 0
     assert receipt.denied is True
@@ -183,7 +189,7 @@ def test_e2e_deny_lands_in_ledger() -> None:
         ]
     )
     conn = migrate_store.connect(":memory:")
-    registry = ToolRegistry([AgentRunTool()], guard=GuardConfig())
+    registry = ToolRegistry([AgentRunTool()], guard=GuardConfig(hitl_mode="off"))
     loop = PentestLoop(conn, MainLlm(LlmClient(fake)), registry, exit_checker=ExitChecklist())
     result = loop.run("deny 演示 10.0.0.5")
 

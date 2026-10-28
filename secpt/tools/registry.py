@@ -23,7 +23,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 from secpt.errors import McpError
-from secpt.tools.guard import GuardConfig
+from secpt.tools.guard import E_GUARD_DENY, Approver, GuardConfig
 
 
 class ToolManifest(BaseModel):
@@ -46,6 +46,8 @@ class ToolOutput(BaseModel):
 
     ``denied``（M3-1 附加字段，默认 False）：Guard 拒绝标记——True 即"工具没有
     执行"，主循环据此落 audit（registry 不带 task_id，账归 loop 收口）。
+    ``hitl_approved``/``hitl_note``（M3-2 附加字段）：HIGH 级过审批的准旗与其
+    来源（auto=非交互自动通过 / 人工=真点过人），audit 文案永远说真话。
     """
 
     tool_name: str
@@ -54,6 +56,8 @@ class ToolOutput(BaseModel):
     summary: str
     raw_ref: str
     denied: bool = False
+    hitl_approved: bool = False
+    hitl_note: str = ""
 
 
 class ToolAdapter(Protocol):
@@ -110,10 +114,15 @@ class ToolRegistry:
     """唯一登记点：tools 层只此一个 dispatch，主循环经 Dispatcher 协议转进来。"""
 
     def __init__(
-        self, adapters: Sequence[ToolAdapter], *, guard: GuardConfig | None = None
+        self,
+        adapters: Sequence[ToolAdapter],
+        *,
+        guard: GuardConfig | None = None,
+        approver: Approver | None = None,
     ) -> None:
         self._adapters: dict[str, ToolAdapter] = {}
         self._guard = guard  # None = 闸常开（拍板③ no-op），上班后拦截点在执行器调用前
+        self._approver = approver  # M3-2：HIGH 级审批人；Guard 上班但缺人 = fail-closed
         self._lock = threading.Lock()
         self.schema_failures: dict[str, int] = {}
         for adapter in adapters:
@@ -151,16 +160,42 @@ class ToolRegistry:
             return reject(f"E_SCHEMA_TOOL: {problem}", name, args)
         # M3-1 拦截点（§2.1 L102"调用前"）：schema 合格的调用才劳 Guard 动闸——
         # 白名单在外、分级在内两级语义；拒绝不发执行器，回执照落小票（audit 归 loop）。
+        # M3-2：HIGH 级带 HITL 准旗回家；无审批人=缺通道 fail-closed；拒=走 denied 通道。
+        hitl_approved = False
+        hitl_note = ""
         if self._guard is not None:
             allowed, verdict = self._guard.check(name)
             if not allowed:
                 return reject(verdict, name, args, denied=True)
+            if self._guard.tier_of(name) == "high":
+                if self._approver is None:
+                    return reject(
+                        f"{E_GUARD_DENY}: {name} 为 HIGH 级动作且无审批通道，fail-closed",
+                        name,
+                        args,
+                        denied=True,
+                    )
+                if not self._approver.decide(name):
+                    return reject(
+                        f"{E_GUARD_DENY}: 人工拒绝执行 {name}（HITL 弹窗拒路）",
+                        name,
+                        args,
+                        denied=True,
+                    )
+                hitl_approved = True
+                # note 展示层用中文可读文案；kind 只区分 auto/人工两族。
+                hitl_note = "auto" if self._approver.kind == "auto" else "人工"
         if tool.manifest.kind == "in-process":
             if _in_process_depth() > 0:
                 # §3.6 规则 2：栈上已有 in-process 帧又点名派单 = 套娃，拒绝
                 return reject("E_SCHEMA_TOOL: in-process 工具禁递归", name, args)
-            return _execute_in_process(self, tool, args)
-        return tool.run(args)
+            output = _execute_in_process(self, tool, args)
+        else:
+            output = tool.run(args)
+        if hitl_approved:
+            # 准旗由本层署在执行结果上——执行器自身不知道审批这件事。
+            return output.model_copy(update={"hitl_approved": True, "hitl_note": hitl_note})
+        return output
 
     def _validate(self, manifest: ToolManifest, args: Mapping[str, str]) -> str | None:
         """manifest 输入 schema 校验：未知/缺失/类型，以及控制字符注入（§7 安全表）。"""

@@ -37,7 +37,7 @@ from secpt.ob.web_view import create_app
 from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
-from secpt.tools.guard import load_guard_config
+from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
 from secpt.tools.registry import ToolRegistry
 
 _NULL_TARGET = "(demo)"
@@ -103,13 +103,19 @@ def _open_db():
 def _registry() -> ToolRegistry:
     """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）；
     M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
-    （闸常开，与 M1/M2 行为逐字节一致），坏 tier 值才 E_PROFILE 拒跑。"""
+    （闸常开，与 M1/M2 行为逐字节一致），坏 tier 值才 E_PROFILE 拒跑。
+    M3-2 起 HITL：prompt 档=CliApprover（stdin 阻塞提问，蓝本 v0.1 形态），
+    其余档（含缺省 auto）装配非交互审批人；off 档审批人闲置（闸内已拦死）。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
     guard = load_guard_config(_profile_path())
+    approver: Approver | None = None
+    if guard is not None:
+        approver = CliApprover() if guard.hitl_mode == "prompt" else AutoApprover()
     return ToolRegistry(
         [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()],
         guard=guard,
+        approver=approver,
     )
 
 
