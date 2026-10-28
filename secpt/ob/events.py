@@ -16,8 +16,8 @@ from typing import Literal
 
 import structlog
 
-_log = structlog.get_logger()
 _std_log = logging.getLogger(__name__)
+_log = structlog.get_logger(__name__)
 
 EventName = Literal[
     "run_step_started",
