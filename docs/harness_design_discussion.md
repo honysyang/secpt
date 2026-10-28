@@ -1344,3 +1344,26 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **施工教训**：
 - FakeLLM callable 脚本项做测试副作用（弹回测试里"验证后补 verified"）：闭包捕获早于 rig 建好的变量会 NameError，用局部 dict 中转（调用时才读键）即稳。
 - audit 文案要与测试断言的 LIKE 词相互对表（"剔除"只进剔除专用行，收尾行换措辞，否则计数断言二义）。
+
+---
+
+## 60. W2-2 施工结论：双图 graph_nodes/graph_edges 读写 pilot——v2 迁落库 + 注意力包接线
+
+**commit d38a248 `feat(store): W2-2 双图 graph_nodes/graph_edges 读写 pilot`**。134 测全绿（128→134）、ruff format+check 全绿。
+
+**版本 2 迁移（store/migrations/0002_graph_tables.sql）**：DDL 原样照搬蓝本 §5（node kind CHECK 四值 asset/hypo/step/finding、边 kind 不设 CHECK、无外键——图是事实投影允许先于小票落键）；补 task_id 索引两枚。migrate.py `_MIGRATIONS` 登记 `(2, "0002_graph_tables.sql")`，test_store_migrate 版本断言 1→2。**schema.sql baseline 六表一字未动**（结构变更必须走 migration 的红线首战兑现）。
+
+**store/graph.py 五函数 pilot**（多一个都是提前实现）：
+- `put_node` / `put_edge`：upsert 同 (task_id, kind, key)（边同 src/dst/kind）version+1 + updated_at 刷新——先查后写而非 INSERT..ON CONFLICT，因为 DDL 没给唯一约束、不为 pilot 私改 schema。写路径与 ledger 同纪律：`_maybe_commit` 服从外层 write_batch 边界、sqlite3.Error 统一包 LedgerError 上抛。
+- `task_nodes`（kind 可过滤）/ `task_edges`：纯读，updated_at asc + id tie-break 输出稳定可测。
+- `graph_summary`：一屏摘要 = kind 计数 + 边数 + 最近五键；**空图返回空串**——attention.render() 以"非空才出现双图段"为节制，不给模型看空气，也不给已有测试（graph 段本就不在）引入回归。
+
+**接线（core/loop.py + attention.py）**：`_one_step` 的 attention.build 补传 `graph_summary=graph.graph_summary(...)`——attention 的占位字段与 docstring 中"W2-2 补接线"注释就地兑现；双图摘要在 WF2 时序图里本就是包内件，接线零新增抽象。
+
+**测试 6 例（test_graph.py）**：v2 建表+版本断言 / 节点首插读回 / 同键 upsert version=2 且(props, row 唯一性) / kind 过滤 / 非法 kind→LedgerError / 边首插+upsert / 空图空串 / 计数+边数+最近键（含同键重放计数不虚胖） / attention.build(render 出"## 双图摘要")接线证明。
+
+**施工教训**：
+- json.dumps 默认分隔符带空格（`{"open": [22]}`），测试断言别手敲紧凑串。
+- 同键 upsert 的 UPDATE 分支遗漏 `_maybe_commit` 的话，外层 write_batch 会因 conn.in_transaction 脏进场而炸——写函数"每条路径都过收口"是纪律不是风格。
+
+**DoD 对照**：双图最简读写 pilot 有证伪测试（写/读/upsert 防漂移/摘要/循环接线），M1 未做：图查询/裁剪/可视全留给后续里程碑，无装饰。
