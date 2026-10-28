@@ -1482,3 +1482,45 @@ run 内 fake 就只消耗进场+两步；游标数错了先数协议层手，不
 `cast("JudgeSweep", ...)` 会吃 F821——公开契约放进真实 import，`__all__` 同步。
 ③列表推导造账不如 for 循环直白：推导是"要结果"，落账循环是"要副作用"，推导把
 未使用变量留给 ruff 提醒——落账场景 first-class 副作用。
+
+## 65. W3-3 施工结论：失速救场——LLMC 拉铃提案只提不裁，主循环单步吸收（§63 起新决策续记）
+
+**语义拍板（照蓝本 WF5 + §64 教训沿用）**：
+1. **救场名额每 run 一次**（`rescue_used` 局部旗）：省名额 = 救场成立（提案非空且
+   无异常）才置位；coach 缺位 / 名额已用 / propose 抛异常 / idea 空白 → 四路全部
+   返回 None，由 `_advance` 统一 raise E_STALL——降级单点化，无第二个出口。
+2. **提案只吸收一步即用掉**：`_advance` 局部 `plan_note`（初值=新模块常量
+   `_BASE_PLAN_NOTE`，即 M1 的占位注记）；救场成立 → plan_note = hint，`_one_step`
+   每次调用后立即还原——输出零新 API，attention.render 的 plan_summary 参数直吃。
+3. **铃必落（事件管唤醒不管钱）**：`_on_stall_ring` 无论 coach 在不在、名额剩不剩
+   一律先 emit `stall_alarm`，再决定救不救——R3 红线：事件线仅报告，无自动接管。
+   **事件契约随之扩展**：每拉铃 emit 一次，救场失败路径（教练无话）前一铃后一
+   run_ended；救场成功路径 = 铃 + 吸收步继续。
+4. **Coach 器官纪律**（照 Distiller/Reporter 手式）：单一 structured 调用
+   （temperature=TEMPERATURE_PLAN、schema 重试 ≤2 三次尝试耗尽 E_SCHEMA 上抛）；
+   idea 空白→None（"教练无话"）；**Coach 不落账**（audit actor=llmc 由 loop 落，
+   器官保持无状态纯函数式）；无第二个 public 方法——不提供改预算/替跑的口。
+5. **失速环重构**：`_one_step` 不再自带 raise，改返 `(outcome, done, ring)`；E_STALL
+   raise 上移 `_advance` 拉铃段——仍在同一 try 内，M1 收束语义（stalled 出口、
+   先账后出）零变化。`StallCounter.reset()` 只在救场成立时调（旧连败不冤枉新打法，
+   铃后从零计数、仍需数满完整 n）。
+
+**变更清单**：
+- secpt/llms/coach.py（新）：Proposal(BaseModel idea/reason) + Coach.propose(graphs, plan)。
+- secpt/core/stall.py：+reset()。
+- secpt/ob/events.py：EventName 追加 stall_alarm。
+- secpt/core/loop.py：_one_step 返三元组 + _advance 拉铃段 + _on_stall_ring
+  （先账后铃顺序：铃在 step_transaction 提交后）+ audit(actor=llmc) 提案留痕 +
+  audit(actor=main) 降级留痕（"教练提案降级：…"）。
+- secpt/main.py：_assemble 装配 coach=Coach(client)。
+- 测试：test_coach.py 8 例（器官 3：prompt 含双图/空白→None/schema 耗尽；接线
+  3：救场成功回 normal/名额用完二次拉铃 stalled/无教练保 M1 语序；降级 2：脚本
+  耗尽降级+空白提案降级）；test_budget_fsm_stall.py +1（reset 语义）；
+  test_e2e_fake_llm.py 方向三事件序 +stall_alarm 同步。
+
+**验证**：pytest 196 例全绿；ruff format+check 全绿；mock CLI 冒烟（normal 收束）。
+call_count 重点核对：救场成功 = 进场+5 败+教练 1+吸收步+收工 = 9；名额耗尽 =
+12；降级耗尽 = 7（教练那通真实调用算在手，§64 教训①的实效）。
+
+**遗留给 W3-4/M3**：双图变化事件线 M2 未接（择机 M3）；coach 提案只在 attention
+侧吸收，未进预算/FSM 任何字段——提案不改预算不裁，契约保持。
