@@ -1367,3 +1367,20 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - 同键 upsert 的 UPDATE 分支遗漏 `_maybe_commit` 的话，外层 write_batch 会因 conn.in_transaction 脏进场而炸——写函数"每条路径都过收口"是纪律不是风格。
 
 **DoD 对照**：双图最简读写 pilot 有证伪测试（写/读/upsert 防漂移/摘要/循环接线），M1 未做：图查询/裁剪/可视全留给后续里程碑，无装饰。
+
+## 61. W2-3 施工结论：FakeLLM 端到端双向 e2e——真实装配三方向全走通
+
+**commit 49eb5b4 `feat(tests): W2-3 FakeLLM 端到端双向 e2e 全走通`**。141 测全绿（134→141）、ruff format+check 全绿。零生产代码改动，纯测试面——M1 验收第 1/3 条"可证伪"口径就此落实。
+
+**与面上单测的分工定案**：不再用 Fake dispatcher / 手铺小票假设，e2e 换真实装配三件套——真 ToolRegistry（nmap→假二进制 `/bin/sh` 脚本 chmod S_IXUSR，零网络）+ 真 ExitChecklist（三验跑真的）+ 真 LlmClient 协议链（schema 重试/退避全在）。事件断言走 `_recorder()` 订阅回调，不引 CliView（避免 stdout 噪声入测）。
+
+**三方向测试（test_e2e_fake_llm.py）**：
+- **正常**：`loop.run()` 进场三问→step1 nmap 真调度→step2 done→出场三验过→normal 收束→终场报告。断言面：小票 raw_ref 指实文件且内容含 `22/tcp open ssh`（诚实锚点）、水位线 step_count=2、graph_nodes 计 0（主循环只读图不写图，W2-2 红线复查）、事件序 `run_step_started→ticket_appended→run_step_started→exit_passed→run_ended`、报告 findings 空/failing_counts 全 0/Markdown 首行 `# 终场报告`。
+- **异常（schema 链耗尽）**：test_loop 同款手式铺账 task+run(三问 config)+claimed 悬置后 `loop.resume()`；脚本 = 3×坏 JSON——协议层 1+2 重试共 3 次尝试全坏 → `LlmError(E_SCHEMA)`（call_count=3、remaining=0 严丝合缝）→ voided step 落账（steps 恰一行 status=voided，run.step_count=0）→ abnormal 出口；半场报告按 main.py 兜底同款手式 `Reporter.generate(conn, task_id, half_court=True)`，failing_counts={exit_checklist:1, abnormal:1}（claimed 悬置被 run_checklist 重验如实上数），claimed≠verified 进不了 findings。
+- **失速**：nmap 缺二进制连败 5 步（脚本 = 进场 Goal + 5 步，call_count=6）→ 失速计 N=5 拉铃 `SecptError(E_STALL)` 上抛；五张失败小票 exit_code=NULL/raw_ref 空（E_TOOL_FAIL 语义照落账）、task.exit_kind=stalled、事件序 5×(step_started,ticket_appended)+run_ended——先账后铃顺序契约在 e2e 里露原形。
+
+**施工教训**：
+- FakeLLM 脚本计数要把"进场三问"计入：`loop.run()` 第 0 次调用吃 Goal schema，脚本漏排 → 第一条 step JSON 被当 Goal 解析 → schema_retry ×3 → E_SCHEMA 冒顶（首跑即为此炸）。
+- `fake.remaining==0` 的断言时机要放在最后一段消费之后：正常方向的第 4 条脚本是给 Reporter 的摘要，循环刚结束就断言 remaining 会误报 1。
+
+**DoD 对照**：验收第 1 条（FakeLLM 全流程：进场→主循环→小票→双图→出场三验→结构化终场）、第 3 条（schema 耗尽/失速按错误矩阵落账走异常出口+半场报告）各有可证伪测试；resume 断电续跑（第 2 条）已由 test_loop W1-5 覆盖，此处不重复铺。
