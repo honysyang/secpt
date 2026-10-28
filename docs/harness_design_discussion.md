@@ -1629,3 +1629,57 @@ wall 统计口径（拒绝≠连败，工具压根没执行），M3-5 多 worker
 ③配置双读（judge/profile.py 与 tools/guard.py 各读 profile.toml）如未来加
 harness 侧校验，须一起验两处。
 
+## 68. M3-2 施工结论：HITL 人工弹窗上线——HIGH 动作批/拒两路均落账可证
+
+**两拍板**（用户拍板）：①`hitl_mode` **缺省 = auto（非交互自动通过）**——拍板
+覆盖 M3-1 的"fail-closed 缺省"过渡语义：装了 `[guard]` 段但未声明档位者，HIGH
+动作从拦截变为自动放行（mock 演示离线可复跑的口径）；需要旧保守行为者**显式配
+`hitl_mode = "off"`**（off 档=M3-1 的 fail-closed 语义锁定，审批人装配了也不
+问，杜绝"装了就放行"）。②approve 落账 **audit actor=main**——同拒绝路径，不
+新增 actor 破 M2 契约。
+
+**三档语义（`HitlMode = Literal["off","prompt","auto"]`）**：
+- `off`＝fail-closed（M3-1 语义零漂移）：HIGH 一律拦，审批通道未开；
+- `prompt`＝CliApprover stdin 阻塞提问（`[HITL] HIGH 级动作 … 待审批——批准?
+  [y/N]`），蓝本 v0.1 口径"后端语义先行，UI 后补"（施工结论史 L750/L640）；
+- `auto`＝AutoApprover 自动过闸（缺省演示档）。
+
+**架构手式（沿 M3-1 ledger-free 红线）**：Guard 保持纯函数不碰 I/O——"人"以
+`Approver` 注入 registry 而非档内挂钟（`kind` 标注 auto/human 两族）；裁决在
+registry 弹窗闸：HIGH→白名单/off 检查（off 即拦）→审批人裁决；**缺审批人=
+fail-closed 拦**（保守，"审批"字样可证）；拒→denied 通道（E_GUARD_DENY +
+"人工拒绝执行 …"文案，M3-1 语义零漂移）；批→执行且回执署准旗
+`hitl_approved: bool` + `hitl_note`（note 展示层映射：kind=auto→"auto"、其余
+→"人工"——中文可读文案出自本层，kind 只当两族判据）。audit 全归主循环收口：
+receipts 段见 `hitl_approved` 即 `ledger.audit(conn, task.id, "main", "HITL
+批准（…）: …")`，批/拒两路各有账（完成定义②）。
+
+**error 口径**：`_E_GUARD_DENY` 私有常量转公开 `E_GUARD_DENY`（M3-1 内已用的
+字面前缀不变）；hitl_mode 坏值同坏 tier 口径 `E_PROFILE` 拒跑。
+
+**M3-1 三处显式 off 锁定**：test_guard 的 e2e deny、HIGH 拦截、保底不可降三例
+原依赖"HIGH 一律 deny"，随缺省 auto 拍板改为显式 `hitl_mode="off"` 断言——
+fail-closed 语义不因缺省变化而不可证。
+
+**变更清单**：
+- secpt/tools/guard.py：HitlMode/三档校验/Approver(Protocol)/AutoApprover/
+  CliApprover/GuardConfig.hitl_mode（缺省 auto）/E_GUARD_DENY 公开。
+- secpt/tools/registry.py：ToolOutput.+hitl_approved/hitl_note；__init__(+,
+  approver)；_dispatch HIGH→缺人 fail-closed→拒→批署准旗（note 本层映射）。
+- secpt/core/loop.py：receipts 段 hitl_approved→audit(actor=main)（denied 分支
+  之前，先批后拒的分支序）。
+- secpt/main.py：装配 approver——prompt=CliApprover，其余档（含缺省 auto）
+  AutoApprover；off 档审批人装配了也不问（registry 不发起询问）。
+- 测试：test_hitl.py 13 例新增（配置 4：缺省 auto/三档回读/坏值 E_PROFILE；
+  registry 6：auto 执行带准旗/prompt 拒零执行/prompt 批带"人工"/off 不问/
+  缺审批人 fail-closed/mid 不弹；CliApprover y/n/Enter 三值；e2e 2：auto 批落
+  audit、prompt 拒 audit+小票双证"占位绝无交集"）；test_guard.py 3 例显式 off。
+
+**验证**：pytest 225 例全绿（213 原班不跳红 + 12 净新增）；ruff format+check
+全绿（test_hitl 6 处折行 + 两处 import 排序自动修复）。
+
+**遗留给 M3-3/M3-5**：①probe 类工具若分级 HIGH，探针默认关（enable_http_probe
+off）时连"问审批"都不应发生——探针 wrapper 要在 Guard 前零开销短路；②Guard
+拒绝不进 stalled/wall 口径的 §67 遗留②在多 worker 下再确认；③guard 双读校验
+遗留③仍挂账。
+
