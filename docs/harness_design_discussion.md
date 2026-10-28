@@ -1314,3 +1314,33 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 - pytest 默认封锁 stdin（DontReadFromInput 读即 OSError）——空输入分支测试须 monkeypatch `sys.stdin = StringIO("")`，别指望真实 EOF。
 
 **DoD 对照**：structlog 角色气泡 + 小票摘要行 + `secpt` 五命令齐备；main.py 兜底异常出口有测试证伪（abnormal → 先落账 → 非零，stderr 无 Traceback）；冒烟显示 stdout/stderr 双通道互不污染。
+
+---
+
+## 59. W2-1 施工结论：出场三验 + LLMA 终场/半场报告——验不过弹回、连败走墙、报告带锚
+
+**commit d5d087d `feat(finalize,core,main): W2-1 出场三验 + LLMA 终场/半场报告`**。128 测全绿（108→128）、ruff format+check 全绿。
+
+**分层解法（依赖倒置）**：core 不 import finalize（单向红线）——core/loop.py 只定义 `ExitVerdict(passed, failures)` 形状 + `ExitChecker` Protocol，`PentestLoop` 新增必填 keyword-only `exit_checker`（**破坏性变更**，装配点显式注入 `ExitChecklist()`），实现体落在最外层 finalize 包。
+
+**出场三验（WF6）语义**：
+- 三条：①孤儿小票（tickets LEFT JOIN steps，step_id 无对应行=账目缺口）②claimed 悬置=0（M1 裁判未实现，claim 必须先收口）③进场三问齐全（task.goal + latest_run.config_json 还原，缺项文案如实列出）。
+- 弹回语义：done 不过验 → 发 `exit_failed`（带 streak+failures）+ audit 留痕 → 弹回继续走步；连败 3 轮 `_EXIT_CHECK_MAX_STREAK` → `SecptError(E_WALL)`——E_WALL 已在 `_STALLED_CODES`，自然落 stalled + runs=ended + run_ended 事件（错误矩阵全兜住）。
+
+**findings 状态机骨架（store/ledger）**：`claimed→verified/rejected`，**终态锁死**（"禁止改判"，翻案=记新 finding）；method 五值校验（rerun/dual-path/negative/oracle/manual）；应用层校验 + schema CHECK 兜底双闸，绕官门直写被 IntegrityError 拒（失败注入测试在案）。
+
+**LLMA（finalize/reporter）纪律**：
+- verified-only 机制化：findings 由纯代码 `task_findings(verify_state='verified')` 取，LLM 结构上进不了列表；
+- 锚点硬规：evidence_ref 空白的 verified 行剔除 + audit(actor='llma', 含"剔除") 留痕；
+- LLM 只写 summary（schema `_Summary{"summary": str}`，TEMPERATURE_PLAN），LlmError 原样上抛不吞；
+- failing_counts 语义：**normal 收束以机制为准计 0**（能落 normal 说明出口三验当场已过，报告不回溯重抓人）；异常/半场按当下账本重验如实上数。
+- Report/ReportFinding pydantic 模型 + `render_markdown`（终场/半场字样、逐条锚点）；报告落账 audit 收尾。
+
+**main.py 报告接线**：
+- `_demo_provider` 脚本尾项即报告 summary（run：4 项脚本；resume：收工步+摘要 2 项）——正常收束复用同一 FakeLLM consume 剩余项；
+- 正常路径 run 后 `_emit_report`（JSON + Markdown 落 stdout）；SecptError 兜底路径 `_half_report`（task_id 未知则 `ledger.latest_task` 取最近 task）——机构定局动作，宁落 audit 不静默跳过；
+- **呈现层降级边界**：`_emit_report`/`_half_report` 允许宽捕获（全库唯一两处）——报告是呈现，失败绝不掩盖 run 结论或原异常，stderr 结构化告警后照常收束。
+
+**施工教训**：
+- FakeLLM callable 脚本项做测试副作用（弹回测试里"验证后补 verified"）：闭包捕获早于 rig 建好的变量会 NameError，用局部 dict 中转（调用时才读键）即稳。
+- audit 文案要与测试断言的 LIKE 词相互对表（"剔除"只进剔除专用行，收尾行换措辞，否则计数断言二义）。
