@@ -23,6 +23,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 from secpt.errors import McpError
+from secpt.tools.guard import GuardConfig
 
 
 class ToolManifest(BaseModel):
@@ -41,13 +42,18 @@ class ToolManifest(BaseModel):
 
 
 class ToolOutput(BaseModel):
-    """单次工具调用的回执：小票三字段由本层署名（raw_ref 指向 raw 产物）。"""
+    """单次工具调用的回执：小票三字段由本层署名（raw_ref 指向 raw 产物）。
+
+    ``denied``（M3-1 附加字段，默认 False）：Guard 拒绝标记——True 即"工具没有
+    执行"，主循环据此落 audit（registry 不带 task_id，账归 loop 收口）。
+    """
 
     tool_name: str
     args: dict[str, str]
     exit_code: int | None
     summary: str
     raw_ref: str
+    denied: bool = False
 
 
 class ToolAdapter(Protocol):
@@ -79,10 +85,17 @@ def _in_process_depth() -> int:
     )
 
 
-def reject(summary: str, tool_name: str, args: Mapping[str, str]) -> ToolOutput:
-    """构造拒绝回执的小工厂（schema 不过=拒绝落票，不是抛错）。"""
+def reject(
+    summary: str, tool_name: str, args: Mapping[str, str], *, denied: bool = False
+) -> ToolOutput:
+    """构造拒绝回执的小工厂（schema 不过=拒绝落票，不是抛错；M3-1 起可带 denied 标记）。"""
     return ToolOutput(
-        tool_name=tool_name, args=dict(args), exit_code=None, summary=summary, raw_ref=""
+        tool_name=tool_name,
+        args=dict(args),
+        exit_code=None,
+        summary=summary,
+        raw_ref="",
+        denied=denied,
     )
 
 
@@ -96,8 +109,11 @@ def manifest_hash(manifest: ToolManifest) -> str:
 class ToolRegistry:
     """唯一登记点：tools 层只此一个 dispatch，主循环经 Dispatcher 协议转进来。"""
 
-    def __init__(self, adapters: Sequence[ToolAdapter]) -> None:
+    def __init__(
+        self, adapters: Sequence[ToolAdapter], *, guard: GuardConfig | None = None
+    ) -> None:
         self._adapters: dict[str, ToolAdapter] = {}
+        self._guard = guard  # None = 闸常开（拍板③ no-op），上班后拦截点在执行器调用前
         self._lock = threading.Lock()
         self.schema_failures: dict[str, int] = {}
         for adapter in adapters:
@@ -110,6 +126,10 @@ class ToolRegistry:
     def manifests(self) -> list[ToolManifest]:
         """``secpt tools`` 的货架清单（manifest+hash 一并露出）。"""
         return [adapter.manifest for adapter in self._adapters.values()]
+
+    def tier_of(self, name: str) -> str:
+        """货架分级查询（CLI 展示用）：guard 不上班时空串（M1/M2 老口径）。"""
+        return self._guard.tier_of(name) if self._guard is not None else ""
 
     def get(self, name: str) -> ToolAdapter | None:
         return self._adapters.get(name)
@@ -129,6 +149,12 @@ class ToolRegistry:
             with self._lock:
                 self.schema_failures[name] = self.schema_failures.get(name, 0) + 1
             return reject(f"E_SCHEMA_TOOL: {problem}", name, args)
+        # M3-1 拦截点（§2.1 L102"调用前"）：schema 合格的调用才劳 Guard 动闸——
+        # 白名单在外、分级在内两级语义；拒绝不发执行器，回执照落小票（audit 归 loop）。
+        if self._guard is not None:
+            allowed, verdict = self._guard.check(name)
+            if not allowed:
+                return reject(verdict, name, args, denied=True)
         if tool.manifest.kind == "in-process":
             if _in_process_depth() > 0:
                 # §3.6 规则 2：栈上已有 in-process 帧又点名派单 = 套娃，拒绝

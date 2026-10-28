@@ -332,6 +332,11 @@ class PentestLoop:
             self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
             for call in output.tool_calls
         ]
+        # M3-1：Guard 拒绝经 receipt.denied 回家（registry ledger-free），audit 由
+        # 主循环收口——此处是全库唯一同时握有 task_id 与 deny 事实的地方。
+        for receipt in receipts:
+            if receipt.denied:
+                ledger.audit(self._conn, task.id, "main", receipt.summary)
         with checkpointer.step_transaction(self._conn):
             step = ledger.record_step(
                 self._conn, task.id, run.id, step_no, output.model_dump_json(exclude_none=True)

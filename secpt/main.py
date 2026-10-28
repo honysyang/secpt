@@ -37,6 +37,7 @@ from secpt.ob.web_view import create_app
 from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
+from secpt.tools.guard import load_guard_config
 from secpt.tools.registry import ToolRegistry
 
 _NULL_TARGET = "(demo)"
@@ -100,11 +101,15 @@ def _open_db():
 
 
 def _registry() -> ToolRegistry:
-    """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）。"""
+    """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）；
+    M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
+    （闸常开，与 M1/M2 行为逐字节一致），坏 tier 值才 E_PROFILE 拒跑。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
+    guard = load_guard_config(_profile_path())
     return ToolRegistry(
-        [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()]
+        [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()],
+        guard=guard,
     )
 
 
@@ -241,10 +246,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 def _cmd_tools(args: argparse.Namespace) -> None:
     """``secpt tools``：货架清单（manifest+hash，M3 Guard 的比对锚同源）。"""
-    for manifest in _registry().manifests():
+    registry = _registry()
+    for manifest in registry.manifests():
         params = ",".join(f"{k}:{v}" for k, v in manifest.params.items())
         required = ",".join(manifest.required)
-        print(f"{manifest.name}  kind={manifest.kind}")
+        tier = registry.tier_of(manifest.name)
+        tier_part = f"  tier={tier}" if tier else ""
+        print(f"{manifest.name}  kind={manifest.kind}{tier_part}")
         print(f"    desc={manifest.description}")
         print(f"    params={params}  required={required}")
         print(f"    hash={manifest.hash}")
