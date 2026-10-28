@@ -20,8 +20,17 @@ class SecptError(Exception):
 
     code: str = "E_SECPT"
 
-    def __init__(self, message: str, *, context: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
+        """``code`` 仅在同层子类间细分错误时覆盖类默认（如 LlmError 的 E_SCHEMA）。"""
         super().__init__(message)
+        if code is not None:
+            self.code = code
         self.context: dict[str, Any] = dict(context or {})
 
     def to_dict(self) -> dict[str, Any]:
@@ -33,3 +42,9 @@ class LedgerError(SecptError):
     """事实层错误：非法写入、schema 违反、越权直写 sqlite（摸到 append-only 红线等）。"""
 
     code = "E_LEDGER"
+
+
+class LlmError(SecptError):
+    """LLM 接口层错误：E_SCHEMA（输出不合 schema）/ E_TIMEOUT_LLM（超时退避耗尽）。"""
+
+    code = "E_LLM"
