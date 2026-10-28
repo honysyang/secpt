@@ -151,15 +151,21 @@ def test_max_steps_exhaustion_not_natural_finish(
     assert len(t.events) and t.events[-1][0] == "run_ended"
 
 
-def test_llm_error_propagates_and_run_not_ended(
+def test_llm_error_exits_abnormal_and_propagates(
     rig: Callable[[list[object]], SimpleNamespace],
 ) -> None:
-    """异常出口纪律：LlmError 原样上抛，main.py 兜底（W1-7）；本层不吞不降级。"""
+    """异常出口（W1-6）：LlmError 原样上抛给 main.py 兜底，但收尾先落全账——
+    该步记 voided、run 收尾、tasks.exit_kind=abnormal，绝不让账悬在半空。"""
     t = rig([GOAL_JSON, LlmError("协议层炸了", code="E_SCHEMA")])
     with pytest.raises(LlmError, match="协议层炸了"):
         t.loop.run("摸底")
     tasks = t.conn.execute("SELECT * FROM tasks").fetchall()
     assert len(tasks) == 1  # 进场已落账，炸在第一步
+    assert tasks[0]["exit_kind"] == "abnormal"
+    steps = t.conn.execute("SELECT * FROM steps").fetchall()
+    assert len(steps) == 1 and steps[0]["status"] == "voided"
+    run = t.conn.execute("SELECT * FROM runs").fetchone()
+    assert run["status"] == "ended"
 
 
 # ---- W1-5 resume：只复建不回放 -------------------------------------------------

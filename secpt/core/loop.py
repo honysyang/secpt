@@ -3,11 +3,14 @@
 M1 边界（诚实声明，不做假实现）：
 - 一步序 = 打注意力包 → main_llm.step → 逐个 dispatch → WF8 收尾事务
   （steps + 小票 + 水位线 mark_step 同一笔提交）→ 提交后补发 ticket_appended
-  → audit。真正的步数线（200/≤4）/失速计/出场纪律在 W1-6/W2-1 插进本类。
+  → audit → 失速计收数。
+- 异常分支（W1-6）：步数线 try_spend（200 默认，撞限 E_BUDGET_EXHAUSTED 停执行）
+  → 失速计 N=5（连续工具失败 E_STALL）→ LLM 侧 E_SCHEMA/E_TIMEOUT_LLM（schema
+  失败落 voided step 原样上抛）——撞限落 stalled、其余 SecptError 落 abnormal、
+  done=True 落 normal，统一 end_task + end_run 后收束（LlmError 仍上抛给 main.py
+  兜底，W1-7 转半场报告；错误矩阵语义一致，不吞错）。
 - 断电续跑（WF8）：run() 进场跑 fresh；resume(task_id) 经 checkpointer 复建——
   只复建不回放，step_no 从水位线+1 续，run id 跨 kill 连续。
-- 异常出口：LlmError 等分层异常本版原样上抛（main.py 兜底是 W1-7 的事），循环
-  绝不吞错，也不做半路降级。
 - 事件：run_step_started / ticket_appended（事务提交后补发，绝不 pre-commit 发
   未落账的账）/ run_ended 由本循环/store 触发；exit_passed|failed 属 W2-1。
 - 三问投影从账本还原（target=tasks.goal、objective/success_criteria=runs.config_json）：
@@ -23,13 +26,19 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from secpt.core import checkpointer
+from secpt.core import budget, checkpointer, fsm, stall
+from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
 from secpt.store import attention, ledger
 from secpt.store.ledger import RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
+
+# 异常出口矩阵（§9 外圈）：这些 code 是"跑不动/没进展"，算 stalled（撞限类）；
+# 其余（E_SCHEMA/E_TIMEOUT_LLM/E_LEDGER…）算 abnormal（事故类），都落 tasks.exit_kind
+# 后收束，绝不让循环吞错悬死。
+_STALLED_CODES: frozenset[str] = frozenset({"E_BUDGET_EXHAUSTED", "E_STALL", "E_WALL"})
 
 
 class Dispatcher(Protocol):
@@ -50,12 +59,13 @@ class StepOutcome(BaseModel):
 
 
 class LoopResult(BaseModel):
-    """整个 run 的结果：task/run 身份 + 步数 + 是否自然收工（done=True）。"""
+    """整个 run 的结果：task/run 身份 + 步数 + 收束类型（§9：normal/abnormal/stalled）。"""
 
     task_id: str
     run_id: str
     steps_taken: int
     finished_naturally: bool
+    exit_kind: str
     outcomes: list[StepOutcome]
 
 
@@ -112,38 +122,71 @@ class PentestLoop:
         return self._advance(state.task, state.run, start=state.waterline + 1, max_steps=max_steps)
 
     def _advance(self, task: TaskRow, run: RunRow, *, start: int, max_steps: int) -> LoopResult:
-        """共用循环体：fresh 从 step 1 起跑、resume 从水位线+1 起跑（不重放已落账步）。"""
+        """共用循环体：fresh 从 step 1 起跑、resume 从水位线+1 起跑（不重放已落账步）。
+
+        收束三分支统一落账（WF7）：done → exit_kind=normal；步线走完没 done /
+        撞限 → stalled（E_BUDGET_EXHAUSTED）；工序异常（schema/超时/失速）→ 按
+        异常出口矩阵落 abnormal/stalled 并把 SecptError 原样上抛——本方法
+        永远保证 end_task + end_run 先落账，绝不出现"炸了但账没收"。
+        """
+        machine = fsm.Fsm()
+        machine.go(fsm.FSMState.WORK)
+        counter = stall.StallCounter()
         outcomes: list[StepOutcome] = []
-        finished = False
-        for step_no in range(start, max_steps + 1):
-            outcome, done = self._one_step(task, run, step_no)
-            outcomes.append(outcome)
-            if done:
-                finished = True
-                break
+        exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
+        crashed: SecptError | None = None
+        try:
+            for step_no in range(start, max_steps + 1):
+                if not budget.try_spend(max_steps, step_no):
+                    break  # 撞步线：停执行（§39：非降级收尾，走异常出口落账）
+                outcome, done = self._one_step(task, run, step_no, counter)
+                outcomes.append(outcome)
+                if done:
+                    exit_kind = "normal"
+                    break
+        except SecptError as exc:
+            exit_kind = "stalled" if exc.code in _STALLED_CODES else "abnormal"
+            crashed = exc
+        # 收束（WF7）：done / 步线耗尽 / 工序异常 三条来路统一走到这里——先账后出。
         ledger.end_run(self._conn, run.id)
+        ledger.end_task(self._conn, task.id, exit_kind)
+        if crashed is not None:
+            self._audit(task.id, f"异常出口 {crashed.code}: {crashed}")
+            machine.go(fsm.FSMState.ABNORMAL)
+        elif exit_kind == "stalled":
+            self._audit(task.id, "异常出口 E_BUDGET_EXHAUSTED: 步数线走完未收工")
+            machine.go(fsm.FSMState.ABNORMAL)
+        else:
+            machine.go(fsm.FSMState.EXIT)
         if self._bus is not None:
             self._bus.emit(
                 "run_ended",
                 task_id=task.id,
                 run_id=run.id,
                 steps=len(outcomes),
-                finished=finished,
+                finished=exit_kind == "normal",
+                exit_kind=exit_kind,
             )
+        if crashed is not None:
+            raise crashed
         return LoopResult(
             task_id=task.id,
             run_id=run.id,
             steps_taken=len(outcomes),
-            finished_naturally=finished,
+            finished_naturally=exit_kind == "normal",
+            exit_kind=exit_kind,
             outcomes=outcomes,
         )
 
-    def _one_step(self, task: TaskRow, run: RunRow, step_no: int) -> tuple[StepOutcome, bool]:
-        """WF2 单步：打包 → step → dispatch（批外）→ 收尾事务落账 → 判 done。
+    def _one_step(
+        self, task: TaskRow, run: RunRow, step_no: int, counter: stall.StallCounter
+    ) -> tuple[StepOutcome, bool]:
+        """WF2 单步：打包 → step → dispatch（批外）→ 收尾事务落账 → 失速计 → 判 done。
 
         为什么 dispatch 在事务边界外收集回执：工具是子进程级慢操作，不能
         占着 BEGIN IMMEDIATE 的写锁等待执行；回执收齐后一笔事务写完 steps+小票+
         水位线，提交成功才补发 ticket_appended（pre-commit 发事件 = 承认未落账的账）。
+        失速计收数同样在账后：拉铃时事实已落账，raise 只负责走异常出口。
         """
         if self._bus is not None:
             self._bus.emit("run_step_started", task_id=task.id, run_id=run.id, step_no=step_no)
@@ -153,7 +196,20 @@ class PentestLoop:
             plan_summary="（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）",
             recent=ledger.recent_tickets(self._conn, task.id),
         )
-        output = self._llm.step(pkg)
+        try:
+            output = self._llm.step(pkg)
+        except LlmError as exc:
+            if exc.code == "E_SCHEMA":
+                # §9 错误矩阵：schema 反复不合 → 该步 voided 记账，原文升异常。
+                ledger.record_step(
+                    self._conn,
+                    task.id,
+                    run.id,
+                    step_no,
+                    json.dumps(exc.to_dict(), ensure_ascii=False),
+                    status="voided",
+                )
+            raise
         receipts = [
             self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
             for call in output.tool_calls
@@ -181,6 +237,14 @@ class PentestLoop:
         for ticket in tickets:
             if self._bus is not None:
                 self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
+        # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 拉铃）。
+        for receipt in receipts:
+            if counter.observe(ok=receipt.exit_code == 0):
+                raise SecptError(
+                    "失速计拉铃：连续 N 步工具失败，无实质进展",
+                    code="E_STALL",
+                    context={"run_id": run.id, "step_no": step_no},
+                )
         self._audit(task.id, f"step {step_no}: {output.thought}, tool_calls={len(tickets)}")
         outcome = StepOutcome(
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)

@@ -238,6 +238,22 @@ def reopen_run(conn: sqlite3.Connection, run_id: str) -> None:
         raise LedgerError("run 复建失败", context={"run_id": run_id}) from exc
 
 
+def end_task(conn: sqlite3.Connection, task_id: str, exit_kind: str) -> None:
+    """tasks.exit_kind 收尾写入（WF7：normal/abnormal/stalled 三值）。
+
+    为什么在 tasks 而非 runs：异常出口的"为什么结束"是 task 级事实（LLMA 半场
+    报告、CLAU 终场都按 task 交差），run 只是本次执行载体。非法 exit_kind 在
+    本函数拒绝——schema 的 CHECK 是最后一道闸，这里是第一道。
+    """
+    if exit_kind not in {"normal", "abnormal", "stalled"}:
+        raise LedgerError("exit_kind 非法", context={"task_id": task_id, "exit_kind": exit_kind})
+    try:
+        conn.execute("UPDATE tasks SET exit_kind = ? WHERE id = ?", (exit_kind, task_id))
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("tasks 收尾失败", context={"task_id": task_id}) from exc
+
+
 def get_task(conn: sqlite3.Connection, task_id: str) -> TaskRow:
     """按 id 读 task（resume 还原目标投影用）。查无此行抛 LedgerError。"""
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -389,6 +405,7 @@ __all__ = [
     "append_ticket",
     "audit",
     "end_run",
+    "end_task",
     "get_run",
     "get_task",
     "latest_run",
