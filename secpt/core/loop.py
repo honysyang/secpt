@@ -26,20 +26,11 @@ from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
 from secpt.store import attention, ledger
 from secpt.store.ledger import RunRow, TaskRow, TicketObserver
-
-
-class ToolOutput(BaseModel):
-    """dispatcher 单次调用回执：小票四要素由工具适配器自己署名（§3.1 raw_ref 由它定锚位）。"""
-
-    tool_name: str
-    args: dict[str, str]
-    exit_code: int | None
-    summary: str
-    raw_ref: str
+from secpt.tools.registry import ToolOutput
 
 
 class Dispatcher(Protocol):
-    """工具分派口（W1-4 的 registry 将实现它；loop 只依赖协议，不 import tools 层）。"""
+    """工具分派口：tools/registry.ToolRegistry 结构性实现本协议（core→tools 单向）。"""
 
     def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
         """schema 校验 + 执行 + 回执；失败/未知工具也回 ToolOutput（exit_code≠0/null 落小票）。"""

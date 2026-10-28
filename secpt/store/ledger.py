@@ -149,7 +149,9 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> RunRow:
 def recent_tickets(conn: sqlite3.Connection, task_id: str, *, limit: int = 10) -> list[TicketRow]:
     """喂注意力包的最近小票（新→旧截断）。纯读，无副作用。"""
     rows = conn.execute(
-        "SELECT * FROM tickets WHERE task_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+        # 同秒多张小票时 created_at 平局：id 是随机 uuid 不能当序，用隐式 rowid
+        # （插入序，append-only 表保证单调）做 tie-break，保证"最近"确定。
+        "SELECT * FROM tickets WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (task_id, limit),
     ).fetchall()
     return [TicketRow.model_validate(dict(r)) for r in rows]

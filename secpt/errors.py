@@ -44,6 +44,12 @@ class LedgerError(SecptError):
     code = "E_LEDGER"
 
 
+class McpError(SecptError):
+    """工具层错误：registry 登记冲突（如重复注册）；dispatch 层失败不抛、只落回执小票。"""
+
+    code = "E_MCP"
+
+
 class LlmError(SecptError):
     """LLM 接口层错误：E_SCHEMA（输出不合 schema）/ E_TIMEOUT_LLM（超时退避耗尽）。"""
 

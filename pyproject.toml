@@ -29,6 +29,8 @@ packages = ["secpt"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# 旧参照 README 是归档文档，非本仓库维护的 Python 面，排除防止被无关重排
+extend-exclude = ["README.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
