@@ -11,7 +11,8 @@ import pytest
 
 from secpt.core import checkpointer
 from secpt.core.loop import PentestLoop, ToolOutput
-from secpt.errors import LedgerError, LlmError
+from secpt.errors import LedgerError, LlmError, SecptError
+from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
@@ -61,7 +62,9 @@ def rig() -> Callable[[list[object]], tuple[SimpleNamespace, sqlite3.Connection]
         events: list[tuple[str, Mapping[str, object]]] = []
         bus = EventBus()
         bus.subscribe(lambda name, payload: events.append((name, payload)))
-        loop = PentestLoop(conn, MainLlm(LlmClient(fake)), dispatcher, bus=bus)
+        loop = PentestLoop(
+            conn, MainLlm(LlmClient(fake)), dispatcher, bus=bus, exit_checker=ExitChecklist()
+        )
         return SimpleNamespace(
             conn=conn, fake=fake, loop=loop, dispatcher=dispatcher, events=events
         )
@@ -95,9 +98,15 @@ def test_two_step_run_writes_ledger_and_emits_events(
     steps = t.conn.execute("SELECT * FROM steps ORDER BY step_no").fetchall()
     assert [s["step_no"] for s in steps] == [1, 2]
     assert json.loads(steps[0]["llm_output"])["thought"] == "先扫 80 端口"
-    # 事件序列：step1 → 小票 → step2 → 收工
+    # 事件序列：step1 → 小票 → step2 → 出场三验过 → 收工
     names = [name for name, _ in t.events]
-    assert names == ["run_step_started", "ticket_appended", "run_step_started", "run_ended"]
+    assert names == [
+        "run_step_started",
+        "ticket_appended",
+        "run_step_started",
+        "exit_passed",
+        "run_ended",
+    ]
     ended = dict(t.events[-1][1])
     assert ended["finished"] is True and ended["steps"] == 2
     # run 收尾：status=ended
@@ -221,3 +230,79 @@ def test_resume_refuses_when_run_already_ended(
     with pytest.raises(LedgerError, match="正常收尾"):
         t.loop.resume(task.id)
     assert t.fake.call_count == 0
+
+
+# ---- W2-1 出场三验：弹回 WF2 / 连败 3 轮走异常出口 ------------------------------
+
+
+def _preset_with_claim(t: SimpleNamespace) -> str:
+    """铺"三验必不过"的账本现场：task + run + 一个 claimed 悬置 finding。"""
+    conn = t.conn
+    task = ledger.start_task(conn, "试场主机", goal="10.0.0.5")
+    ledger.start_run(
+        conn, task.id, config={"objective": "确认暴露面", "success_criteria": "小票记 banner"}
+    )
+    finding = ledger.append_finding(conn, task.id, "悬置发现", "待裁决", "raw/a.txt")
+    return finding.id
+
+
+def test_checklist_failure_bounces_back_then_passes(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """三验不过弹回 WF2：exit_failed 后继续走步；LLM 裁决 finding verified 再过验。"""
+    state: dict[str, object] = {}  # conn/finding 在 rig 建好后才存在，用 dict 中转给脚本
+
+    def _rescue_and_wrap_up() -> str:
+        ledger.set_finding_state(state["conn"], str(state["finding"]), "verified")
+        return _step_json("裁决完再收工", calls=[], done=True)
+
+    t = rig(
+        [
+            # resume 不调进场；第 1 步就收工 → 三验挡下（claimed 悬置）
+            _step_json("第一轮收工", calls=[], done=True),
+            _rescue_and_wrap_up,  # ScriptItem 含 Callable，可直接入队
+        ]
+    )
+    conn = t.conn
+    state["conn"] = conn
+    state["finding"] = _preset_with_claim(t)
+    result = t.loop.resume(conn.execute("SELECT id FROM tasks").fetchone()[0])
+    assert result.finished_naturally is True and result.exit_kind == "normal"
+    names = [name for name, _ in t.events]
+    assert names == [
+        "run_step_started",
+        "exit_failed",
+        "run_step_started",
+        "exit_passed",
+        "run_ended",
+    ]
+    assert t.events[1][1]["streak"] == 1  # 弹回而非直接失败
+    tasks = conn.execute("SELECT exit_kind FROM tasks").fetchall()
+    assert tasks[0]["exit_kind"] == "normal"
+
+
+def test_checklist_three_round_failure_raises_wall(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """连败 3 轮：E_WALL 原样上抛，但按错误矩阵先落账（stalled + audit + run_ended）。"""
+    t = rig(
+        [
+            _step_json("收工1", calls=[], done=True),
+            _step_json("收工2", calls=[], done=True),
+            _step_json("收工3", calls=[], done=True),
+        ]
+    )
+    conn = t.conn
+    _preset_with_claim(t)
+    task_id = conn.execute("SELECT id FROM tasks").fetchone()[0]
+    with pytest.raises(SecptError) as exc_info:
+        t.loop.resume(task_id)
+    assert exc_info.value.code == "E_WALL"
+    tasks = conn.execute("SELECT exit_kind FROM tasks").fetchall()
+    assert tasks[0]["exit_kind"] == "stalled"  # E_WALL ∈ 失速集
+    runs = conn.execute("SELECT status FROM runs").fetchall()
+    assert runs[0]["status"] == "ended"
+    names = [name for name, _ in t.events]
+    assert names.count("exit_failed") == 3 and names[-1] == "run_ended"
+    audits = conn.execute("SELECT what FROM audit_log WHERE task_id = ?", (task_id,)).fetchall()
+    assert any("E_WALL" in row["what"] for row in audits)

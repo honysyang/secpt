@@ -20,6 +20,7 @@ import pytest
 from secpt.core import checkpointer
 from secpt.core.loop import PentestLoop, ToolOutput
 from secpt.errors import LedgerError
+from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
@@ -221,7 +222,9 @@ def _child_run_and_die(db_path: str) -> None:
             _kill_on_step4,
         ]
     )
-    loop = PentestLoop(conn, MainLlm(LlmClient(fake)), FakeDispatcher())
+    loop = PentestLoop(
+        conn, MainLlm(LlmClient(fake)), FakeDispatcher(), exit_checker=ExitChecklist()
+    )
     loop.run("kill 注入主机")  # 永不返回：complete() 内 os._exit(9)
 
 
@@ -248,7 +251,9 @@ def test_kill9_then_resume_reuses_run(tmp_path: Path) -> None:
 
     # 续跑：脚本从 step4 开始（resume 不再走进场三问，三问从账本还原）
     fake = FakeLLM([_step_json("收工", calls=[], done=True)])
-    loop = PentestLoop(conn, MainLlm(LlmClient(fake)), FakeDispatcher())
+    loop = PentestLoop(
+        conn, MainLlm(LlmClient(fake)), FakeDispatcher(), exit_checker=ExitChecklist()
+    )
     result = loop.resume(task_id)
     assert result.finished_naturally is True
     assert result.run_id == killed["id"]  # 复用原 run：run id 跨 kill 连续

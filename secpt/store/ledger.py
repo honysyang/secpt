@@ -122,6 +122,26 @@ class TicketRow(BaseModel):
     created_at: int
 
 
+class FindingRow(BaseModel):
+    """findings 行强类型视图：状态机 claimed→verified/rejected（verify 管真伪的骨架）。"""
+
+    id: str
+    task_id: str
+    title: str
+    detail: str
+    verify_state: str
+    method: str | None
+    evidence_ref: str
+    confidence: float | None
+    judged_at: int | None
+    created_at: int
+
+
+_VERIFY_STATES = frozenset({"claimed", "verified", "rejected"})
+_VERIFY_METHODS = frozenset({"rerun", "dual-path", "negative", "oracle", "manual"})
+_TERMINAL_STATES = frozenset({"verified", "rejected"})
+
+
 def start_task(conn: sqlite3.Connection, input_text: str, goal: str) -> TaskRow:
     """WF1 落账第一行：tasks。有 goal 即 pentest 模式（对话模式不走本函数）。"""
     task = TaskRow(
@@ -262,6 +282,16 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> TaskRow:
     return TaskRow.model_validate(dict(row))
 
 
+def latest_task(conn: sqlite3.Connection) -> TaskRow:
+    """最近一个 task（main.py 半场报告兜底取材用）：created_at 降序、同秒用 rowid。"""
+    row = conn.execute(
+        "SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        raise LedgerError("tasks 查无此行（库为空）", context={})
+    return TaskRow.model_validate(dict(row))
+
+
 def ticket_event_payload(ticket: TicketRow) -> dict[str, object]:
     """ticket_appended 事件载荷的唯一构造点（append_ticket 与 loop 批后补发共用）。"""
     return {
@@ -397,24 +427,147 @@ def audit(conn: sqlite3.Connection, task_id: str, actor: str, what: str) -> None
         ) from exc
 
 
+def append_finding(
+    conn: sqlite3.Connection,
+    task_id: str,
+    title: str,
+    detail: str,
+    evidence_ref: str,
+    *,
+    verify_state: str = "claimed",
+    method: str | None = None,
+    confidence: float | None = None,
+) -> FindingRow:
+    """findings 唯一写入口（新增侧）：M1 供测试/预置与 M2 裁判接线用。
+
+    verify_state/method 先在应用层校验（本校验消息可读），schema CHECK 兜底——
+    越过官门直写的人只会从触发器/CHECK 拿到裸 IntegrityError。
+    """
+    if verify_state not in _VERIFY_STATES:
+        raise LedgerError(
+            "非法 verify_state", context={"task_id": task_id, "verify_state": verify_state}
+        )
+    if method is not None and method not in _VERIFY_METHODS:
+        raise LedgerError("非法 method", context={"task_id": task_id, "method": method})
+    finding = FindingRow(
+        id=uuid.uuid4().hex,
+        task_id=task_id,
+        title=title,
+        detail=detail,
+        verify_state=verify_state,
+        method=method,
+        evidence_ref=evidence_ref,
+        confidence=confidence,
+        judged_at=_now() if verify_state != "claimed" else None,
+        created_at=_now(),
+    )
+    try:
+        conn.execute(
+            "INSERT INTO findings (id, task_id, title, detail, verify_state, method,"
+            " evidence_ref, confidence, judged_at, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                finding.id,
+                finding.task_id,
+                finding.title,
+                finding.detail,
+                finding.verify_state,
+                finding.method,
+                finding.evidence_ref,
+                finding.confidence,
+                finding.judged_at,
+                finding.created_at,
+            ),
+        )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("findings 写入失败", context={"task_id": task_id}) from exc
+    return finding
+
+
+def task_findings(
+    conn: sqlite3.Connection, task_id: str, *, verify_state: str | None = None
+) -> list[FindingRow]:
+    """按 task 读 findings（可按状态过滤，reporter 的 verified-only 从这里取）。纯读。"""
+    if verify_state is not None and verify_state not in _VERIFY_STATES:
+        raise LedgerError(
+            "非法 verify_state", context={"task_id": task_id, "verify_state": verify_state}
+        )
+    sql = "SELECT * FROM findings WHERE task_id = ?"
+    params: list[object] = [task_id]
+    if verify_state is not None:
+        sql += " AND verify_state = ?"
+        params.append(verify_state)
+    sql += " ORDER BY created_at, rowid"
+    rows = conn.execute(sql, params).fetchall()
+    return [FindingRow.model_validate(dict(r)) for r in rows]
+
+
+def set_finding_state(
+    conn: sqlite3.Connection, finding_id: str, new_state: str, *, method: str | None = None
+) -> FindingRow:
+    """findings 状态机唯一推进口：verified/rejected 是终态，向后一律拒绝。
+
+    为什么锁终态：verify 管真伪的骨架允许"补证"但禁止"翻案"——M1 不实现裁判，
+    审计上任何改判都应该是一次新 finding，而不是悄悄改老行。
+    """
+    row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+    if row is None:
+        raise LedgerError("findings 查无此行", context={"finding_id": finding_id})
+    current = FindingRow.model_validate(dict(row))
+    if current.verify_state in _TERMINAL_STATES:
+        raise LedgerError(
+            "finding 已是终态，禁止改判",
+            context={"finding_id": finding_id, "current": current.verify_state},
+        )
+    if new_state not in {"verified", "rejected"}:
+        raise LedgerError("非法状态迁移", context={"finding_id": finding_id, "target": new_state})
+    if method is not None and method not in _VERIFY_METHODS:
+        raise LedgerError("非法 method", context={"finding_id": finding_id, "method": method})
+    try:
+        conn.execute(
+            "UPDATE findings SET verify_state = ?, method = COALESCE(?, method),"
+            " judged_at = ? WHERE id = ?",
+            (new_state, method, _now(), finding_id),
+        )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError("findings 推进失败", context={"finding_id": finding_id}) from exc
+    return get_finding(conn, finding_id)
+
+
+def get_finding(conn: sqlite3.Connection, finding_id: str) -> FindingRow:
+    """按 id 读 finding。查无此行抛 LedgerError。"""
+    row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+    if row is None:
+        raise LedgerError("findings 查无此行", context={"finding_id": finding_id})
+    return FindingRow.model_validate(dict(row))
+
+
 __all__ = [
+    "FindingRow",
     "RunRow",
     "StepRow",
     "TaskRow",
     "TicketRow",
+    "append_finding",
     "append_ticket",
     "audit",
     "end_run",
     "end_task",
+    "get_finding",
     "get_run",
     "get_task",
     "latest_run",
+    "latest_task",
     "mark_step",
     "recent_tickets",
     "record_step",
     "reopen_run",
+    "set_finding_state",
     "start_run",
     "start_task",
+    "task_findings",
     "ticket_event_payload",
     "write_batch",
 ]

@@ -24,7 +24,7 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.errors import LlmError, SecptError
@@ -39,6 +39,26 @@ from secpt.tools.registry import ToolOutput
 # 其余（E_SCHEMA/E_TIMEOUT_LLM/E_LEDGER…）算 abnormal（事故类），都落 tasks.exit_kind
 # 后收束，绝不让循环吞错悬死。
 _STALLED_CODES: frozenset[str] = frozenset({"E_BUDGET_EXHAUSTED", "E_STALL", "E_WALL"})
+
+# 出场三验连败上限（WF6）：每次 done 都先过验，不过弹回继续走步，3 轮仍不过直接
+# 走异常出口——否则会陷入"LLM 反复说 done、反复被挡"的纠缠循环。
+_EXIT_CHECK_MAX_STREAK = 3
+
+
+class ExitVerdict(BaseModel):
+    """出场三验的裁决形状：core 只约定形状，具体核对规则由 finalize.exit_checklist 提供。"""
+
+    passed: bool
+    failures: list[str] = Field(default_factory=list)
+
+
+class ExitChecker(Protocol):
+    """出场三验口（依赖倒置）：core 不 import finalize（分层红线单向），
+    装配方把 ExitChecklist 实例从最外层塞进来。"""
+
+    def check(self, conn: sqlite3.Connection, task_id: str) -> ExitVerdict:
+        """按 WF6 三条核对账本：账本交齐 / 无 claimed 悬置 / 进场三问齐全。"""
+        ...
 
 
 class Dispatcher(Protocol):
@@ -82,11 +102,14 @@ class PentestLoop:
         main_llm: MainLlm,
         dispatcher: Dispatcher,
         bus: EventBus | None = None,
+        *,
+        exit_checker: ExitChecker,
     ) -> None:
         self._conn = conn
         self._llm = main_llm
         self._dispatcher = dispatcher
         self._bus = bus
+        self._exit_checker = exit_checker
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -133,6 +156,7 @@ class PentestLoop:
         machine.go(fsm.FSMState.WORK)
         counter = stall.StallCounter()
         outcomes: list[StepOutcome] = []
+        exit_streak = 0  # 出场三验连败计（W2-1）：每次 done 过验，不过弹回
         exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
         crashed: SecptError | None = None
         try:
@@ -141,9 +165,34 @@ class PentestLoop:
                     break  # 撞步线：停执行（§39：非降级收尾，走异常出口落账）
                 outcome, done = self._one_step(task, run, step_no, counter)
                 outcomes.append(outcome)
-                if done:
+                # WF6 出场三验：done 先过验再放行——passed 正常收束；not passed
+                # 弹回继续走步（emit exit_failed），连败 3 轮按 E_WALL 走异常出口。
+                if not done:
+                    continue
+                verdict = self._exit_checker.check(self._conn, task.id)
+                if verdict.passed:
                     exit_kind = "normal"
+                    if self._bus is not None:
+                        self._bus.emit("exit_passed", task_id=task.id, run_id=run.id, failing=0)
                     break
+                exit_streak += 1
+                if self._bus is not None:
+                    self._bus.emit(
+                        "exit_failed",
+                        task_id=task.id,
+                        run_id=run.id,
+                        streak=exit_streak,
+                        failures=verdict.failures,
+                    )
+                self._audit(
+                    task.id, f"出场三验第 {exit_streak} 轮不过：{'；'.join(verdict.failures)}"
+                )
+                if exit_streak >= _EXIT_CHECK_MAX_STREAK:
+                    raise SecptError(
+                        "出场三验连败 3 轮，走异常出口",
+                        code="E_WALL",
+                        context={"task_id": task.id, "failures": verdict.failures},
+                    )
         except SecptError as exc:
             exit_kind = "stalled" if exc.code in _STALLED_CODES else "abnormal"
             crashed = exc

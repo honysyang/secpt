@@ -157,3 +157,88 @@ def test_append_only_blocks_audit_and_findings_delete(
     with pytest.raises(sqlite3.IntegrityError, match="E_APPEND_ONLY"):
         c.execute("DELETE FROM audit_log")
         c.commit()
+
+
+# ---- W2-1 findings 状态机骨架（claimed → verified/rejected）--------------------
+
+
+def _seed(c: sqlite3.Connection) -> str:
+    return ledger.start_task(c, "in", "goal").id
+
+
+def test_append_finding_defaults_claimed(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    c = conn()
+    task_id = _seed(c)
+    finding = ledger.append_finding(c, task_id, "端口 22 开放", "ssh banner 已取", "runs/a.txt")
+    assert finding.verify_state == "claimed"
+    assert finding.method is None and finding.judged_at is None
+    fetched = ledger.task_findings(c, task_id)
+    assert [f.id for f in fetched] == [finding.id]
+
+
+def test_append_finding_rejects_illegal_state_and_method(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    c = conn()
+    task_id = _seed(c)
+    with pytest.raises(LedgerError, match="verify_state"):
+        ledger.append_finding(c, task_id, "t", "d", "r", verify_state="foo")
+    with pytest.raises(LedgerError, match="method"):
+        ledger.append_finding(c, task_id, "t", "d", "r", method="拍脑袋")
+
+
+def test_set_finding_state_claimed_transitions(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    """两条合法迁移：claimed→verified（method 记档）/ claimed→rejected。"""
+    c = conn()
+    task_id = _seed(c)
+    a = ledger.append_finding(c, task_id, "甲", "d", "r")
+    verified = ledger.set_finding_state(c, a.id, "verified", method="manual")
+    assert verified.verify_state == "verified"
+    assert verified.method == "manual"
+    assert verified.judged_at is not None
+    b = ledger.append_finding(c, task_id, "乙", "d", "r")
+    rejected = ledger.set_finding_state(c, b.id, "rejected")
+    assert rejected.verify_state == "rejected"
+
+
+def test_set_finding_state_terminal_is_locked(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    c = conn()
+    task_id = _seed(c)
+    finding = ledger.append_finding(c, task_id, "甲", "d", "r", verify_state="verified")
+    with pytest.raises(LedgerError, match="终态"):
+        ledger.set_finding_state(c, finding.id, "rejected")
+
+
+def test_set_finding_state_rejects_illegal_target_state(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    c = conn()
+    task_id = _seed(c)
+    finding = ledger.append_finding(c, task_id, "甲", "d", "r")
+    with pytest.raises(LedgerError, match="非法"):
+        ledger.set_finding_state(c, finding.id, "claimed")
+
+
+def test_set_finding_state_missing_row_raises(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    c = conn()
+    with pytest.raises(LedgerError, match="查无此行"):
+        ledger.set_finding_state(c, "no-such", "verified")
+
+
+def test_append_only_blocks_findings_update_to_illegal_state(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    """失败注入：绕过官门直写 findings 也被 schema CHECK 当场拒绝。"""
+    c = conn()
+    task_id = _seed(c)
+    ledger.append_finding(c, task_id, "甲", "d", "r")
+    with pytest.raises(sqlite3.IntegrityError, match="verify_state IN"):
+        c.execute("UPDATE findings SET verify_state = 'foo'")

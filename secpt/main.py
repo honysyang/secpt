@@ -15,16 +15,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.errors import SecptError
+from secpt.finalize.exit_checklist import ExitChecklist
+from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOutput, ToolCall
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
+from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, NmapTool
 from secpt.tools.registry import ToolRegistry
@@ -43,10 +47,12 @@ def _require_mock() -> None:
 
 
 def _demo_provider(goal_text: str) -> FakeLLM:
-    """M1 出厂演示脚本：进场三问 → 一步 nmap 摸扫 → 一步收工（done）。
+    """M1 出厂演示脚本：进场三问 → 一步 nmap 摸扫 → 一步收工（done）→ 报告摘要。
 
     脚本内容与 goal 文本无关——FakeLLM 不真理解输入，target 取输入截断只是
     让账本可读；nmap 由 env 指向占位二进制必落 E_TOOL_FAIL 回执，整程零网络。
+    尾项是 LLMA 报告的 summary 脚本（run 正常收束后由 _emit_report 消费）；
+    resume 不跑进场（无 goal 项），直接收工 + 摘要。
     """
     _require_mock()
     goal_json = json.dumps(
@@ -62,7 +68,13 @@ def _demo_provider(goal_text: str) -> FakeLLM:
         tool_calls=[ToolCall(name="nmap", args={"target": _NULL_TARGET, "ports": "22,80"})],
     )
     wrap_up = StepOutput(thought="演示收工", tool_calls=[], done=True)
-    return FakeLLM([goal_json, sweep, wrap_up])
+    summary = json.dumps(
+        {"summary": "M1 mock 演示：nmap 摸扫一轮（工具回执已落账），出口三验通过。"},
+        ensure_ascii=False,
+    )
+    if goal_text:
+        return FakeLLM([goal_json, sweep, wrap_up, summary])
+    return FakeLLM([wrap_up, summary])
 
 
 def _chat_provider() -> FakeLLM:
@@ -88,27 +100,74 @@ def _registry() -> ToolRegistry:
     return ToolRegistry([NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool()])
 
 
-def _assemble(conn, llm: MainLlm) -> PentestLoop:
-    """主循环装配：事件总线挂上 CliView（对话面板），dispatcher 走 registry。"""
+def _assemble(conn: sqlite3.Connection, llm: MainLlm) -> PentestLoop:
+    """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
+    出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）。"""
     bus = EventBus()
     bus.subscribe(CliView())
-    return PentestLoop(conn, llm, _registry(), bus)
+    return PentestLoop(conn, llm, _registry(), bus=bus, exit_checker=ExitChecklist())
+
+
+def _emit_report(conn: sqlite3.Connection, fake: FakeLLM, task_id: str, *, half: bool) -> None:
+    """LLMA 报告落 stdout（JSON + Markdown）；报告侧失败只 stderr 降级。
+
+    为什么吞在这里而不上抛：报告是呈现层，失败绝不能掩盖 run 的成败结论
+    （正常路径）或原异常（半场路径）——兜底边界，仅此一处允许宽捕获。
+    """
+    try:
+        rep = Reporter(LlmClient(fake)).generate(conn, task_id, half_court=half)
+        print(json.dumps(rep.model_dump(), ensure_ascii=False))
+        print(render_markdown(rep))
+    except Exception as exc:  # noqa: BLE001  呈现层兜底：报告失败降级为告警
+        print(
+            json.dumps({"event": "report_degraded", "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
+
+
+def _half_report(conn: sqlite3.Connection, task_id: str | None) -> None:
+    """半场报告兜底（WF7 硬性动作）：SecptError 出口后必走；报告失败只告警降级。
+
+    task_id 为空（异常早于 task 创建）时取最近 task 取材——半场报告是异常出口的
+    机构定局动作，宁可空转也要落到 audit 存在过这步，不静默跳过。
+    """
+    try:
+        if task_id is None:
+            task_id = ledger.latest_task(conn).id
+        fake = FakeLLM(
+            [
+                json.dumps(
+                    {"summary": "（M1 mock 半场转述）异常出口收束：已落账部分如实报告。"},
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        _emit_report(conn, fake, task_id, half=True)
+    except Exception as exc:  # noqa: BLE001  兜底层同理：不覆盖将被 re-raise 的原异常
+        print(
+            json.dumps({"event": "half_report_degraded", "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """``secpt run --goal ...``：WF1 有 goal → 进场三问 → 主循环。"""
+    """``secpt run --goal ...``：WF1 有 goal → 进场三问 → 主循环 → 终场报告。"""
     goal = str(args.goal).strip()
     if not goal:
         # WF1 失败路径：无 goal → 对话模式兜底，不开闭环（不悬死）。
         print("goal 为空 → 对话模式兜底（WF1）：不进闭环；需要对话请用 secpt chat。")
         return 0
-    llm = MainLlm(LlmClient(_demo_provider(goal)))  # provider 校验在进场前
+    fake = _demo_provider(goal)  # provider 校验在进场前
     conn = _open_db()
     try:
-        result = _assemble(conn, llm).run(goal)
+        result = _assemble(conn, MainLlm(LlmClient(fake))).run(goal)
+        _print_result(result)
+        _emit_report(conn, fake, result.task_id, half=False)
+    except SecptError:
+        _half_report(conn, None)
+        raise
     finally:
         conn.close()
-    _print_result(result)
     return 0
 
 
@@ -116,11 +175,15 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     """``secpt resume <task_id>``：WF8 只复建不回放，从水位线+1 续走。"""
     conn = _open_db()
     try:
-        llm = MainLlm(LlmClient(_demo_provider("")))
-        result = _assemble(conn, llm).resume(str(args.task_id))
+        fake = _demo_provider("")
+        result = _assemble(conn, MainLlm(LlmClient(fake))).resume(str(args.task_id))
+        _print_result(result)
+        _emit_report(conn, fake, result.task_id, half=False)
+    except SecptError:
+        _half_report(conn, str(args.task_id))
+        raise
     finally:
         conn.close()
-    _print_result(result)
     return 0
 
 
