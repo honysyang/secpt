@@ -7,7 +7,8 @@
   脚本，离线可全流程演示）；其余值装配期显式拒绝——真实 provider 是 M2 接线
   件，M1 不装也不假装。
 - 环境变量：``SECPT_DB``（默认 ./secpt.db）、``SECPT_RAW_DIR``（默认 ./raw）、
-  ``SECPT_NMAP_BIN``（默认 /usr/bin/nmap；演示环境可指向占位路径强制回执）。
+  ``SECPT_NMAP_BIN``（默认 /usr/bin/nmap；演示环境可指向占位路径强制回执）、
+  ``SECPT_PROFILE``（默认 ./configs/profile.toml；文件缺失按拍板③降关闭 + audit 落痕）。
 """
 
 from __future__ import annotations
@@ -18,12 +19,14 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from functools import partial
 
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
 from secpt.finalize.reporter import Reporter, render_markdown
+from secpt.judge import load_profile, note_for, sweep
 from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOutput, ToolCall
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
@@ -31,7 +34,7 @@ from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
 from secpt.store import ledger
 from secpt.store.migrate import connect
-from secpt.tools.adapters import AgentRunTool, NmapTool
+from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
 from secpt.tools.registry import ToolRegistry
 
 _NULL_TARGET = "(demo)"
@@ -95,10 +98,12 @@ def _open_db():
 
 
 def _registry() -> ToolRegistry:
-    """M1 工具货架：nmap（外部适配器）+ agent_run（内嵌登记占位）。"""
+    """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
-    return ToolRegistry([NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool()])
+    return ToolRegistry(
+        [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()]
+    )
 
 
 def _experience_env() -> str:
@@ -111,12 +116,20 @@ def _experience_env() -> str:
     return env or "lab"
 
 
+def _profile_path() -> str:
+    """裁判 profile 装配路径（拍板③）：SECPT_PROFILE 指路，默认 configs/profile.toml。"""
+    return os.environ.get("SECPT_PROFILE", "configs/profile.toml")
+
+
 def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
     出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
-    W3-1 起收尾挂经验蒸馏器（与 MainLlm 共用同一条 chat 协议 client）。"""
+    W3-1 起收尾挂经验蒸馏器，W3-2 起裁判 sweep 以 partial 注入 JudgeSweep 口
+    （core 只见 callable；profile 缺文件由 load_profile 降关闭 + note 携带降级口径），
+    全部与 MainLlm 共用同一条 chat 协议 client。"""
     bus = EventBus()
     bus.subscribe(CliView())
+    prof = load_profile(_profile_path())
     return PentestLoop(
         conn,
         MainLlm(client),
@@ -125,6 +138,8 @@ def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
         exit_checker=ExitChecklist(),
         distiller=ExperienceDistiller(client),
         experience_env=_experience_env(),
+        judge_sweep=partial(sweep, profile=prof),
+        judge_note=note_for(prof),
     )
 
 

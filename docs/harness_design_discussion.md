@@ -1428,3 +1428,57 @@ knowledge 库建议不单独建库——读方向=文件资产+MCP resource 天�
 **验证**：pytest 163 例退出码 0；ruff format（44 files）+ check 全绿；CLI 冒烟（SECPT_NMAP_BIN=占位、LLM_PROVIDER=mock）：失败小票不进候选 → audit llmb「经验蒸馏收束：无蒸馏候选，0 条落账」，报告正常、不烧 LLM。**冒烟注意**：若把 SECPT_NMAP_BIN 指向真会成功的命令（如 /bin/true），成功小票进候选 → Distiller 会烧 LLM 吃掉出厂脚本尾项 → schema 耗尽降级（有痕）。演示/冒烟一律用**不存在的占位路径**。
 
 **教训**：①`SELECT RAISE(...)`——RAISE 不是语句是表达式，migrate 读回 SQL 片段实测；②"最新优先"排序写测试前最好把 SQL 里的 ORDER BY 再读一遍，两处曾写反；③先测后码在唯一写口处最值钱——直接写表的失败注入（audit 断言越权尝试被留痕）要在写口定型前来一发。
+
+## 64. W3-2 施工结论：裁判 R0/R4 上线——判零流接入主循环 + profile 装配（§63 起新决策续记）
+
+**开工前拍板四点**（用户全选推荐项）：
+1. **claim 入口**=内嵌工具 `declare_finding`（params: title/detail/evidence_ref 全必填，
+   kind=in-process），判零入口紧随 dispatch 尾部：**声完即判不悬置**——每步事务提交后
+   立刻 sweep，claim 最多活到本步结尾就被裁决或悬空（R0 不过 → rejected，R0 过但 R4
+   未命中 → 保持 claimed 悬置，留给出场三验如实上数）。
+2. **R0 判据**=锚点文件存在且非空：`Path(ref).is_file() and stat().st_size > 0`
+   ——空白/缺失/零字节 → rejected。两级拦截分工：**空白锚在工具口拦**（declare_finding
+   回执 exit_code=None + E_TOOL_FAIL，不落 finding），R0 sweep 层兜"文件后来没了/是
+   零字节"（已落账的 finding 才轮到它）——互补不重叠。
+3. **profile 装配**=`SECPT_PROFILE` 环境变量指路（默认 `configs/profile.toml`，
+   tomllib 解析）；文件缺失/non路径 → judge.enabled 视 false **降关闭 + note 携带
+   口径**，不拒跑；tomllib 解析失败才升 SecptError(code="E_PROFILE")。
+4. **R4 匹配**=pattern 不分大小写子串匹配 haystack=(title+"\n"+detail)，多命中取
+   首条；confidence 留 NULL；命中 verified(method=oracle) **保留原 evidence_ref**。
+
+**未新增 ledger API（复用拍板）**：原计划加 `ledger.advance_finding`，审读发现
+`set_finding_state` 已含全部语义（claimed→verified/rejected 单向、终态重判 raise、
+UPDATE + judged_at），audit 缺口由 sweep 组合层补（每裁决落一行 audit actor=judge）。
+幂等双保险：sweep 只取 `task_findings(..., verify_state="claimed")`，终态行永远
+不进第二轮 + 终态禁止改判在写口拒绝。
+
+**判零流（蓝本 WF4）刻点接线**：`_one_step` 序 = dispatch → step_transaction 内
+受理小票原子转 finding（`ledger.append_finding` 官门直写）→ mark_step → commit →
+ticket_appended 补发 → **`_judge_pass(task.id)`** → 失速计。判在提交后：账落了才
+配判；刻点幂等：sweep 只摸 claimed。汇总一行 audit(actor=main) "裁判收口 N 条"
++ 每条裁决明细 audit(actor=judge) 双层留痕。
+
+**分层红线照旧**：core 不 import judge 包——`JudgeSweep` 类型别名
+（`Callable[[sqlite3.Connection, str], list[FindingRow]]`）放 `core/loop.py`
+`__all__`，装配方 `functools.partial(sweep, profile=prof)` 注入；进场时烙
+audit(actor=main) "裁判装配：{note}"——裁判在不在岗是 run 级事实，随时可从账本复算。
+
+**变更清单**：
+- secpt/judge/（新包）：profile.py（JudgeProfile/GroundTruth pydantic + load_profile
+  降关闭三态 + note_for）、r0_self.py（r0 纯函数）、r4_oracle.py（r4 返回 Match|None）、
+  sweep.py（裁决编排）、__init__.py re-export。
+- secpt/tools/adapters.py：DeclareFindingTool（内嵌，manifest 五件套齐）。
+- secpt/core/loop.py：JudgeSweep 别名 + judge_sweep/judge_note 注入 + enter() 装配
+  注记 + _one_step 受理落账（for 循环，先提交后判）+ _judge_pass 刻点。
+- secpt/main.py：_profile_path + _assemble 装配 sweep/note + registry 登记
+  DeclareFindingTool + docstring 环境变量清单补 SECPT_PROFILE。
+- configs/profile.toml（新）：§3.7 契约形状（target + [judge] enabled + [[ground_truth]]）。
+- 测试：test_judge.py 21 例（profile 三态/R0 边界/R4 匹配/账本态边界/sweep 幂等/
+  declare 工具两级拦）；test_e2e_fake_llm.py 方向五 test_judge_full_pass
+  （FakeLLM 两张申报单一真一假 → verified(oracle)/rejected，报告只收 verified）。
+
+**教训**：①e2e 断言要知道 fake.call_count 的消费边界——报告在测试侧用独立 FakeLLM，
+run 内 fake 就只消耗进场+两步；游标数错了先数协议层手，不是改实现。②字符串 cast
+`cast("JudgeSweep", ...)` 会吃 F821——公开契约放进真实 import，`__all__` 同步。
+③列表推导造账不如 for 循环直白：推导是"要结果"，落账循环是"要副作用"，推导把
+未使用变量留给 ruff 提醒——落账场景 first-class 副作用。

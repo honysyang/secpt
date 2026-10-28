@@ -1,0 +1,12 @@
+# 裁判 profile（蓝本 §3.7）：M2 示例靶场配置。
+# target 只是记账口径（进场三问的 target 仍以 goal 文本为准）；
+# [judge].enabled=false 或整段缺省 = 裁判关闭；[[ground_truth]] 是 R4 正典，
+# pattern 不分大小写子串匹配 findings 的 title+detail，多命中取首条。
+target = '10.0.0.5'
+
+[judge]
+enabled = true
+
+[[ground_truth]]
+id = "GT-22-open"
+pattern = "22/tcp open"

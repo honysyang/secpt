@@ -134,4 +134,42 @@ class AgentRunTool:
         )
 
 
-__all__ = ["AgentRunTool", "NmapTool"]
+class DeclareFindingTool:
+    """内嵌工具 declare_finding（W3-2 拍板①）：claim 的正门入口。
+
+    为什么 run 不写账（G 方案纪律）：findings 唯一写口在 store/ledger，本工具
+    只署回执——主循环在 step_transaction 里看到"受理"小票才原子落账，保证
+    finding 与小票同生死（回执在、账在；小票丢了账也不会独活）。
+    空白锚在工具口就拒收（不受理不落 finding）：空白声明的失败小票本身就是
+    痕，R0 再兜"文件不存在/零字节"在 sweep 层——两级拦 Different failure。
+    """
+
+    manifest = ToolManifest(
+        name="declare_finding",
+        kind="in-process",
+        description="申报 finding（evidence_ref 必须是已在档的非空证据文件）",
+        params={"title": "str", "detail": "str", "evidence_ref": "str"},
+        required=("title", "detail", "evidence_ref"),
+    )
+
+    def run(self, args: Mapping[str, str]) -> ToolOutput:
+        ref = (args.get("evidence_ref") or "").strip()
+        if not ref:
+            return ToolOutput(
+                tool_name=self.manifest.name,
+                args=dict(args),
+                exit_code=None,
+                summary="E_TOOL_FAIL: evidence_ref 为空，申报不受理（无凭裁不立项）",
+                raw_ref="",
+            )
+        title = (args.get("title") or "").strip()
+        return ToolOutput(
+            tool_name=self.manifest.name,
+            args=dict(args),
+            exit_code=0,
+            summary=f"finding 受理：{title or '(无题)'}（落账与裁决由主循环收口）",
+            raw_ref=ref,
+        )
+
+
+__all__ = ["AgentRunTool", "DeclareFindingTool", "NmapTool"]

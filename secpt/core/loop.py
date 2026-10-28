@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 import structlog
@@ -37,7 +37,7 @@ from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
 from secpt.store import attention, experience, graph, ledger
 from secpt.store.experience import ExperienceRow
-from secpt.store.ledger import RunRow, TaskRow
+from secpt.store.ledger import FindingRow, RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
 
 _log = structlog.get_logger(__name__)
@@ -87,6 +87,15 @@ class Distiller(Protocol):
         ...
 
 
+JudgeSweep = Callable[[sqlite3.Connection, str], list[FindingRow]]
+"""裁判收口口（依赖倒置，core 不 import judge 包，分层红线单向）。
+
+装配方 bind `functools.partial(judge.sweep, profile=prof)`——core 只见
+(conn, task_id) → 被裁决行 的 callable；judged 审计在 sweep 内部落
+（actor=judge）。None = 裁判不在装配（M1 兼容）。
+"""
+
+
 class StepOutcome(BaseModel):
     """一步的落账快照：喂 W1-7 的 CLI 摘要行与 W2-3 的 e2e 断言。"""
 
@@ -124,6 +133,8 @@ class PentestLoop:
         exit_checker: ExitChecker,
         distiller: Distiller | None = None,
         experience_env: str = "lab",
+        judge_sweep: JudgeSweep | None = None,
+        judge_note: str | None = None,
     ) -> None:
         self._conn = conn
         self._llm = main_llm
@@ -132,6 +143,8 @@ class PentestLoop:
         self._exit_checker = exit_checker
         self._distiller = distiller
         self._experience_env = experience_env
+        self._judge_sweep = judge_sweep
+        self._judge_note = judge_note
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -149,6 +162,10 @@ class PentestLoop:
             },
         )
         self._audit(task.id, "进场三问完成")
+        if self._judge_note:
+            # W3-2：裁判装配状态在进场时烙 audit（开启/关闭/降级三态一句话）——
+            # 裁判是否在岗是 run 级事实，随时可从账本复算。
+            self._audit(task.id, f"裁判装配：{self._judge_note}")
         return task, run
 
     def run(self, user_input: str, *, max_steps: int = 200) -> LoopResult:
@@ -307,10 +324,29 @@ class PentestLoop:
                 )
                 for r in receipts
             ]
+            # W3-2 声明落账（拍板①）：declare_finding 的受理小票在该事务内原子
+            # 转 finding——回执在账也在，小票丢了账不会独活；写走 ledger 官门，
+            # 本循环保持"黑板写入口只经 store/*"的纪律。真伪裁决不在本事务：
+            # 先提交，再交 sweep 刻点逐条裁决（先账后判）。
+            for receipt in receipts:
+                if (
+                    receipt.tool_name == "declare_finding"
+                    and receipt.exit_code == 0
+                    and receipt.raw_ref
+                ):
+                    ledger.append_finding(
+                        self._conn,
+                        task.id,
+                        receipt.args.get("title", ""),
+                        receipt.args.get("detail", ""),
+                        receipt.raw_ref,
+                    )
             checkpointer.mark_step(self._conn, run.id, step_no)
         for ticket in tickets:
             if self._bus is not None:
                 self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
+        # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。
+        self._judge_pass(task.id)
         # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 拉铃）。
         for receipt in receipts:
             if counter.observe(ok=receipt.exit_code == 0):
@@ -324,6 +360,23 @@ class PentestLoop:
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
         )
         return outcome, output.done
+
+    def _judge_pass(self, task_id: str) -> None:
+        """W3-2 判零刻点（WF4）：每步收尾提交后立即裁决本轮新 claim。
+
+        分层红线：core 不 import judge——sweep 由装配方以 partial 注入（JudgeSweep
+        类型别名），core 只见 callable。刻点幂等：sweep 只取 verify_state="claimed"
+        行，终态行永不重复进裁决；关闭（judge_sweep=None）时无事发生。
+        汇总一行 audit(actor=main) 佐证"裁判收口"，每条裁决明细由 sweep 内部
+        落 audit(actor=judge)。LedgerError（终态重判等）不在此拦——那是契约
+        破坏，原样上抛走异常出口。
+        """
+        if self._judge_sweep is None:
+            return
+        verdicts = self._judge_sweep(self._conn, task_id)
+        if verdicts:
+            self._audit(task_id, f"裁判收口 {len(verdicts)} 条 claim")
+            _log.info("judge_swept", task_id=task_id, verdicts=len(verdicts))
 
     def _distill(self, task_id: str) -> None:
         """收尾经验蒸馏 hook（WF10）：任何出口（normal/stalled/abnormal）都收尾进。
@@ -363,4 +416,4 @@ class PentestLoop:
         ledger.audit(self._conn, task_id, "main", what)
 
 
-__all__ = ["Dispatcher", "LoopResult", "PentestLoop", "StepOutcome", "ToolOutput"]
+__all__ = ["Dispatcher", "JudgeSweep", "LoopResult", "PentestLoop", "StepOutcome", "ToolOutput"]

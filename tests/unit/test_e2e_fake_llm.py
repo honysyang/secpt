@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from secpt.core.loop import PentestLoop
+from secpt.core.loop import JudgeSweep, PentestLoop
 from secpt.errors import LlmError, SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.finalize.experience import Distiller
@@ -313,3 +313,90 @@ def test_things_learned_then_replayed_across_runs(tmp_path: Path) -> None:
     assert "## 可用经验" in pack_text
     assert "[claimed|仅当线索] 22 端口扫描可达" in pack_text
     assert "nmap -p 22" not in pack_text
+
+
+# ---------- 方向五：裁判 R0/R4 上线（W3-2，验收①） ------------------------------------
+
+
+def test_judge_full_pass(tmp_path: Path) -> None:
+    """declare 受理 → 声明落账 → sweep 即时裁决：bad claim 被 R0 判 rejected，
+    命中 ground_truth 的 claim 变 verified(oracle)，报告只收 verified。"""
+    from functools import partial
+    from typing import cast
+
+    from secpt.judge import GroundTruth, JudgeProfile, note_for, sweep
+    from secpt.tools.adapters import DeclareFindingTool
+
+    gold = tmp_path / "gold.txt"
+    gold.write_text("22/tcp open ssh  OpenSSH 9.2", encoding="utf-8")
+    registry = ToolRegistry([DeclareFindingTool()])  # 裁判演示不需要 nmap
+    from secpt.finalize.exit_checklist import ExitChecklist
+    from secpt.finalize.reporter import Reporter
+    from secpt.llms.main_llm import MainLlm
+
+    conn = _make_db()
+    fake = FakeLLM(
+        [
+            _goal_json("10.0.0.5"),
+            _step_json(
+                "两张申报单：一真一假",
+                calls=[
+                    {
+                        "name": "declare_finding",
+                        "args": {
+                            "title": "22/tcp open on target",
+                            "detail": "OpenSSH 9.2 开放 22",
+                            "evidence_ref": str(gold),
+                        },
+                    },
+                    {
+                        "name": "declare_finding",
+                        "args": {
+                            "title": "灵魂漏洞",
+                            "detail": "凭空想出来的 RCE",
+                            "evidence_ref": str(tmp_path / "phantom.txt"),
+                        },
+                    },
+                ],
+                done=False,
+            ),
+            _step_json("收工", calls=[], done=True),
+        ]
+    )
+    # profile 装配已有单测（TestProfile），e2e 手铺启用的 JudgeProfile（oracle 一条）。
+    prof = JudgeProfile(
+        enabled=True,
+        ground_truth=(GroundTruth(id="GT-22", pattern="22/tcp open"),),
+        source="e2e",
+    )
+    sweep_fn = partial(sweep, profile=prof)
+    bus, events = _recorder()
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        registry,
+        bus=bus,
+        exit_checker=ExitChecklist(),
+        judge_sweep=cast(JudgeSweep, sweep_fn),
+        judge_note=note_for(prof),
+    )
+    result = loop.run("裁判演示 10.0.0.5")
+    assert result.exit_kind == "normal"
+    assert fake.call_count == 3  # 进场 + 两步（报告在测试侧用独立 FakeLLM）
+
+    # 账本事实：good 被认 / bad 被零 / 无悬置；audit 双痕（装配注记 + 裁决各行）。
+    rows = conn.execute("SELECT * FROM findings ORDER BY rowid").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["verify_state"] == "verified" and rows[0]["method"] == "oracle"
+    assert "22/tcp open" in rows[0]["title"]
+    assert rows[1]["verify_state"] == "rejected" and rows[1]["method"] is None
+    audits_main = conn.execute("SELECT what FROM audit_log WHERE actor = 'main'").fetchall()
+    assert any("裁判装配" in str(r["what"]) for r in audits_main)
+    assert any("裁判收口 2 条" in str(r["what"]) for r in audits_main)
+    judge_lines = conn.execute("SELECT what FROM audit_log WHERE actor = 'judge'").fetchall()
+    assert len(judge_lines) == 2
+
+    # 报告只收 verified：bad claim 不在终场清单里。
+    rep = Reporter(LlmClient(FakeLLM([_summary_json("终场摘要。")]))).generate(conn, result.task_id)
+    assert [f.title for f in rep.findings] == ["22/tcp open on target"]
+    assert [name for name, _ in events][-1] == "run_ended"
