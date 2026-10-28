@@ -38,7 +38,8 @@ def _seed_task(c: sqlite3.Connection) -> str:
 
 def test_experience_schema_v3(conn: Callable[[], sqlite3.Connection]) -> None:
     c = conn()
-    assert migrate.schema_version(c) == 3
+    # 0003 建经验表在库版本 3 就位；库随 M3-3 推进到 4（0004 观测流）不回退。
+    assert migrate.schema_version(c) >= 3
     cols = {r["name"] for r in c.execute("PRAGMA table_info(experience)").fetchall()}
     assert cols == {
         "id",

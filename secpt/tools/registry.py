@@ -18,12 +18,14 @@ import hashlib
 import inspect
 import threading
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
 from secpt.errors import McpError
 from secpt.tools.guard import E_GUARD_DENY, Approver, GuardConfig
+from secpt.tools.probe import CaptureBackend, CaptureEvent, wrap_execution
 
 
 class ToolManifest(BaseModel):
@@ -48,6 +50,9 @@ class ToolOutput(BaseModel):
     执行"，主循环据此落 audit（registry 不带 task_id，账归 loop 收口）。
     ``hitl_approved``/``hitl_note``（M3-2 附加字段）：HIGH 级过审批的准旗与其
     来源（auto=非交互自动通过 / 人工=真点过人），audit 文案永远说真话。
+    ``probe_events``（M3-3 附加字段）：本次执行观测窗交割的客观事件——空元组
+    = 探针没开或没抓到；落账转基元参数是 loop 的活，本层只负责把事实挂在
+    回执上。
     """
 
     tool_name: str
@@ -58,6 +63,7 @@ class ToolOutput(BaseModel):
     denied: bool = False
     hitl_approved: bool = False
     hitl_note: str = ""
+    probe_events: tuple[CaptureEvent, ...] = ()
 
 
 class ToolAdapter(Protocol):
@@ -119,10 +125,12 @@ class ToolRegistry:
         *,
         guard: GuardConfig | None = None,
         approver: Approver | None = None,
+        probe: CaptureBackend | None = None,
     ) -> None:
         self._adapters: dict[str, ToolAdapter] = {}
         self._guard = guard  # None = 闸常开（拍板③ no-op），上班后拦截点在执行器调用前
         self._approver = approver  # M3-2：HIGH 级审批人；Guard 上班但缺人 = fail-closed
+        self._probe = probe  # M3-3：探针后端；None = 不开窗（R6 关档零开销）
         self._lock = threading.Lock()
         self.schema_failures: dict[str, int] = {}
         for adapter in adapters:
@@ -185,17 +193,31 @@ class ToolRegistry:
                 hitl_approved = True
                 # note 展示层用中文可读文案；kind 只区分 auto/人工两族。
                 hitl_note = "auto" if self._approver.kind == "auto" else "人工"
+        # M3-3 执行窗（R6 关档零开销）：probe=None 直接走原路径，不碰 start/stop；
+        # 开档则窗只包执行器调用本身——guard 拒绝/递归拒绝在上面已 return，零抓取。
+        probe_events: tuple[CaptureEvent, ...] = ()
         if tool.manifest.kind == "in-process":
             if _in_process_depth() > 0:
                 # §3.6 规则 2：栈上已有 in-process 帧又点名派单 = 套娃，拒绝
                 return reject("E_SCHEMA_TOOL: in-process 工具禁递归", name, args)
-            output = _execute_in_process(self, tool, args)
-        else:
+            if self._probe is None:
+                output = _execute_in_process(self, tool, args)
+            else:
+                output, probe_events = wrap_execution(
+                    self._probe, partial(_execute_in_process, self, tool, args)
+                )
+        elif self._probe is None:
             output = tool.run(args)
+        else:
+            output, probe_events = wrap_execution(self._probe, partial(tool.run, args))
+        # 尾部统一签署：执行器自身不知道审批/探针，回执由本层署真（§3.2 分层）。
+        updates: dict[str, object] = {}
         if hitl_approved:
-            # 准旗由本层署在执行结果上——执行器自身不知道审批这件事。
-            return output.model_copy(update={"hitl_approved": True, "hitl_note": hitl_note})
-        return output
+            updates["hitl_approved"] = True
+            updates["hitl_note"] = hitl_note
+        if probe_events:
+            updates["probe_events"] = probe_events
+        return output.model_copy(update=updates) if updates else output
 
     def _validate(self, manifest: ToolManifest, args: Mapping[str, str]) -> str | None:
         """manifest 输入 schema 校验：未知/缺失/类型，以及控制字符注入（§7 安全表）。"""

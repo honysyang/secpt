@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "findings",
     "audit_log",
     "experience",
+    "observations",
 }
 
 
@@ -41,7 +42,7 @@ class TestMigration:
         assert EXPECTED_TABLES <= tables
 
         fresh = connect(":memory:")
-        assert schema_version(fresh) == 3  # 1 baseline + 1 双图 + 1（W3-1 经验库）
+        assert schema_version(fresh) == 4  # 1 baseline + 1 双图 + 1 经验库 + 1 观测流
         fresh.close()
 
     def test_migration_idempotent(self, db: sqlite3.Connection) -> None:

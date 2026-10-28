@@ -16,6 +16,9 @@ M1 边界（诚实声明，不做假实现）：
   蒸馏失败只告警降级，绝不改变收束结论与已落账的 exit_kind。
 - 事件：run_step_started / ticket_appended（事务提交后补发，绝不 pre-commit 发
   未落账的账）/ run_ended 由本循环/store 触发；exit_passed|failed 属 W2-1。
+- M3-3 探针（§5 流量真相）：观测窗（tools/probe wrapper）交割的客观事件在收尾
+  事务内随 steps+小票+水位线同一笔提交入 observations；探针开/关状态进场时烙
+  audit（probe_note 一句话，与裁判装配同手式）。
 - 三问投影从账本还原（target=tasks.goal、objective/success_criteria=runs.config_json）：
   fresh 与 resume 走同一条还原路径，不依赖内存状态。
 """
@@ -36,7 +39,7 @@ from secpt.llms.client import Goal, StepOutput
 from secpt.llms.coach import Coach
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import attention, experience, graph, ledger
+from secpt.store import attention, experience, graph, ledger, observations
 from secpt.store.experience import ExperienceRow
 from secpt.store.ledger import FindingRow, RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
@@ -140,6 +143,7 @@ class PentestLoop:
         judge_sweep: JudgeSweep | None = None,
         judge_note: str | None = None,
         coach: Coach | None = None,
+        probe_note: str | None = None,
     ) -> None:
         self._conn = conn
         self._llm = main_llm
@@ -151,6 +155,7 @@ class PentestLoop:
         self._judge_sweep = judge_sweep
         self._judge_note = judge_note
         self._coach = coach
+        self._probe_note = probe_note
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -172,6 +177,9 @@ class PentestLoop:
             # W3-2：裁判装配状态在进场时烙 audit（开启/关闭/降级三态一句话）——
             # 裁判是否在岗是 run 级事实，随时可从账本复算。
             self._audit(task.id, f"裁判装配：{self._judge_note}")
+        if self._probe_note:
+            # M3-3：探针装配状态同手式烙 audit——探针开/关+零开销口径随时可证。
+            self._audit(task.id, f"探针装配：{self._probe_note}")
         return task, run
 
     def run(self, user_input: str, *, max_steps: int = 200) -> LoopResult:
@@ -380,6 +388,15 @@ class PentestLoop:
                         receipt.args.get("title", ""),
                         receipt.args.get("detail", ""),
                         receipt.raw_ref,
+                    )
+            # M3-3 流量真相落账（黑板写入口只经 store/*）：观测窗交割的事件在
+            # 此入 observations——LLM 小票之外的客观事件流，task/run 锚点由
+            # loop 补齐（registry ledger-free，不带 task_id）。窗口只在执行器
+            # 外面开，denied/递归拒绝的回执 probe_events 恒空，天然零行。
+            for receipt in receipts:
+                for event in receipt.probe_events:
+                    observations.append(
+                        self._conn, task.id, run.id, event.channel, event.meta, event.snapshot_ref
                     )
             checkpointer.mark_step(self._conn, run.id, step_no)
         for ticket in tickets:

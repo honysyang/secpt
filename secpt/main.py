@@ -38,6 +38,14 @@ from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
 from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
+from secpt.tools.probe import (
+    CaptureBackend,
+    build_backend,
+    load_probe_config,
+)
+from secpt.tools.probe import (
+    note_for as probe_note_for,
+)
 from secpt.tools.registry import ToolRegistry
 
 _NULL_TARGET = "(demo)"
@@ -105,17 +113,35 @@ def _registry() -> ToolRegistry:
     M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
     （闸常开，与 M1/M2 行为逐字节一致），坏 tier 值才 E_PROFILE 拒跑。
     M3-2 起 HITL：prompt 档=CliApprover（stdin 阻塞提问，蓝本 v0.1 形态），
-    其余档（含缺省 auto）装配非交互审批人；off 档审批人闲置（闸内已拦死）。"""
+    其余档（含缺省 auto）装配非交互审批人；off 档审批人闲置（闸内已拦死）。
+    M3-3 起探针：probe=None = 不开窗（R6 关档零开销）；开档按
+    SECPT_PROBE_BACKEND 装配事件源（默认 mock 伪事件源）。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
     guard = load_guard_config(_profile_path())
     approver: Approver | None = None
     if guard is not None:
         approver = CliApprover() if guard.hitl_mode == "prompt" else AutoApprover()
+    probe = _probe_backend()
     return ToolRegistry(
         [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()],
         guard=guard,
         approver=approver,
+        probe=probe,
+    )
+
+
+def _probe_backend() -> CaptureBackend | None:
+    """M3-3 探针后端装配：开档选型（默认 mock），关档 None = 零开销。
+
+    load_probe_config 对同一份 profile.toml 幂等（纯读、无状态），装配注记
+    （probe_note，_assemble 里另行取）与后端虽各读一次，口径恒一致不串账。
+    """
+    cfg = load_probe_config(_profile_path())
+    if not cfg.enabled:
+        return None
+    return build_backend(
+        os.environ.get("SECPT_PROBE_BACKEND", "mock"), os.environ.get("SECPT_RAW_DIR", "raw")
     )
 
 
@@ -143,6 +169,7 @@ def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
     bus = EventBus()
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
+    probe_cfg = load_probe_config(_profile_path())
     return PentestLoop(
         conn,
         MainLlm(client),
@@ -154,6 +181,7 @@ def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
         judge_sweep=partial(sweep, profile=prof),
         judge_note=note_for(prof),
         coach=Coach(client),
+        probe_note=probe_note_for(probe_cfg),
     )
 
 

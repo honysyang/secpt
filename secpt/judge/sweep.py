@@ -35,7 +35,7 @@ def sweep(conn: sqlite3.Connection, task_id: str, profile: JudgeProfile) -> list
     verdicts: list[FindingRow] = []
     for finding in claimed:
         hit: Match | None = None
-        if r0(finding):
+        if r0(conn, finding):
             hit = r4(finding, profile)
             if hit is None:
                 continue  # R0 过 R4 不中：悬置 M3（R1-R3 接手），

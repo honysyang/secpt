@@ -104,19 +104,20 @@ class TestR0:
     def test_good_anchor_passes(self, tmp_path: Path) -> None:
         good = tmp_path / "good.txt"
         good.write_text(GOOD_TXT, encoding="utf-8")
-        assert r0(_row(evidence_ref=str(good))) is True
+        assert r0(_make_db(), _row(evidence_ref=str(good))) is True
 
     def test_blank_ref_fails(self) -> None:
-        assert r0(_row(evidence_ref="")) is False
-        assert r0(_row(evidence_ref="   ")) is False
+        conn = _make_db()
+        assert r0(conn, _row(evidence_ref="")) is False
+        assert r0(conn, _row(evidence_ref="   ")) is False
 
     def test_missing_file_fails(self, tmp_path: Path) -> None:
-        assert r0(_row(evidence_ref=str(tmp_path / "no-such-file.txt"))) is False
+        assert r0(_make_db(), _row(evidence_ref=str(tmp_path / "no-such-file.txt"))) is False
 
     def test_empty_file_fails(self, tmp_path: Path) -> None:
         zero = tmp_path / "zero.txt"
         zero.write_text("", encoding="utf-8")
-        assert r0(_row(evidence_ref=str(zero))) is False
+        assert r0(_make_db(), _row(evidence_ref=str(zero))) is False
 
 
 # ---------- R4 oracle：title/detail 不分大小写子串（拍板④） ---------------------------
