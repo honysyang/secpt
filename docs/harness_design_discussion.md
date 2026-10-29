@@ -2011,3 +2011,49 @@ tools/call 最小子集，`__crash__` 魔法文本 = 半途死亡失败注入口
 （manifest 形状/hash 自洽、raw 真文件、int 转换）；掉线与二进制缺失只告警不注册；
 配置三档（缺段零行为/坏 toml E_PROFILE/command 非法 E_PROFILE）；Guard 白名单
 拒绝 denied 回执（同权过闸可证）；secpt tools 清单可见 echo kind=mcp+hash。
+
+## 74. M4-3 施工结论：mitmproxy 抓包后端——进程边界、两层 fail-closed、真流量如实标注
+
+**拍板①：mitmdump 子进程 + addon 落 JSONL，mitmproxy 依赖不进主进程。**
+为什么不是库内嵌 mitmproxy API：进程边界即故障边界——证书生成/事件循环/
+信号处理全留在子进程，起不来最多窗内降级，绝不拖垮 loop；且与 McpStdioClient/
+NmapTool 一发一会话同手式（start 起进程、stop 收尸，无跨窗生命周期泄漏）。
+addon（`_mitm_addon.py`）由 mitmdump 以独立解释器加载，secpt 主进程永不
+import 它；输出路径经 `SECPT_MITMDUMP_FLOW_OUT` 注入，addon 逐条
+open/append/close——SIGTERM 时已写行不丢，stop 按行解析即交割，不依赖
+mitmproxy 序列化格式的版本兼容。
+
+**拍板②：fail-closed 两层分工（与 M3 契约各管各的窗口）。**
+- 装配期（`build_backend("mitmproxy")` → `preflight_mitmdump`）：`--version`
+  探活，未装/不可执行/非零退出 → E_PROBE 拒跑——操作方点名要真抓包，
+  装配期就该发现少零件，绝不带病进场换 mock 演戏（任务书口径）；
+- 运行窗内（start 失败/端口永不就绪）：维持 M3 可降级器官契约——
+  wrap_execution 告警降级照常执行，抓不到流量不该挡住渗透动作。
+二进制定位 `SECPT_MITMDUMP_BIN`（默认 PATH 找 mitmdump）；start 选临时端口
+（bind 0）+ TCP connect 就绪轮询 + 进程提前退出即断；confdir 走临时目录，
+证书自留地不落用户 HOME，窗毕即清。
+
+**拍板③：meta 无 mock 键 = 真流量如实标注，R0 零改动。**
+CaptureEvent.meta 只带 method/url/status（与 ScriptedCapture 缺省脚本同构、
+仅少 mock 键），snapshot 是 JSONL 记录物化的真文件（body 截断 64KiB，
+保真与体积折中）；loop 侧 observations.append 原样消费，obs 锚与判票口径
+零改动、零适配层。窗内无 HTTP 流量（如 nmap 直连不走代理）→ 诚实空交割，
+不造假事件。
+
+**拍板④：note_for 增 backend 显式入参（默认 mock 老口径逐字节不变）。**
+真抓包与伪事件源在账面必须可分辨："后端 mitmproxy=MitmCapture 真抓包"。
+main.py `_probe_backend_name()` 统一选型键，probe_note 与实际后端同源同值
+（纯读 env）不串账——账面说 mitmproxy 就真是 mitmproxy。
+
+**测试面（8 例，桩/真两路）**：失败注入用桩二进制（`--version` 秒过骗过
+pre-flight、其余场景睡死不监听）——缺失 E_PROBE、端口永不就绪 start 超时
+且 stop 幂等不炸、wrap_execution 降级契约（执行零干扰回执完好）；真流量
+回路 skipif 未装真 mitmdump——本地 ThreadingHTTPServer + urllib ProxyHandler
+显式走 PROXY 端口（全程 127.0.0.1 零外联），断言 meta 无 mock 键、快照真
+文件含真 body、双请求双事件；另有翻转 test_probe.py 两处既有断言
+（mitmproxy 档从"必抛 E_PROBE"改为真装配契约）。
+
+**CLI 冒烟**：mock 档全流程不回退（report_degraded 为既有行为，HEAD 基线
+同款）；mitmproxy 档装配注记落账 + 真后端起停无降级告警。遗留：演示真
+抓包需把 HTTP 流量指进 proxy_port（`MitmCapture.proxy_port` 已暴露），
+M4 收尾演示时用本地 http server 走代理取景。
