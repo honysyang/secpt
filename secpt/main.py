@@ -3,9 +3,9 @@
 装配与兜底纪律：
 - main() 是库层异常的第一兜底（§9：库层不吞错、统一上抛）——SecptError 落一行
   结构化 JSON 进 stderr 后非零退出，绝不带 traceback、绝不让循环悬死。
-- provider 装配（诚实边界）：M1 只接 ``LLM_PROVIDER=mock``（FakeLLM 出厂演示
-  脚本，离线可全流程演示）；其余值装配期显式拒绝——真实 provider 是 M2 接线
-  件，M1 不装也不假装。
+- provider 装配（诚实边界）：``LLM_PROVIDER=mock`` 出厂脚本离线全流程演示；
+  ``openai`` 档（M4-1 起）从 SECPT_LLM_* 环境变量装配真 provider，缺项显式
+  E_CONFIG 拒跑，绝不静默降 mock——假聪明比真失败更危险。
 - 环境变量：``SECPT_DB``（默认 ./secpt.db）、``SECPT_RAW_DIR``（默认 ./raw）、
   ``SECPT_NMAP_BIN``（默认 /usr/bin/nmap；演示环境可指向占位路径强制回执）、
   ``SECPT_PROFILE``（默认 ./configs/profile.toml；文件缺失按拍板③降关闭 + audit 落痕）。
@@ -28,10 +28,18 @@ from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
 from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.judge import load_profile, note_for, sweep
-from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOutput, ToolCall
+from secpt.llms.client import (
+    TEMPERATURE_FREESTYLE,
+    LlmClient,
+    LlmProvider,
+    Message,
+    StepOutput,
+    ToolCall,
+)
 from secpt.llms.coach import Coach
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
+from secpt.llms.providers import OpenAICompatProvider
 from secpt.llms.worker import Worker
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
@@ -56,17 +64,71 @@ _DEFAULT_WORKERS = 3
 _DEFAULT_WORKER_TIMEOUT_S = 300.0
 
 
-def _require_mock() -> None:
-    """provider 装配校验：M1 只有 mock 一条腿，其余值显式拒绝（诚实边界）。"""
-    name = os.environ.get("LLM_PROVIDER", "mock")
+def _provider_name() -> str:
+    """LLM provider 档位名（M4-1：mock | openai；未知值装配期 E_CONFIG）。"""
+    return os.environ.get("LLM_PROVIDER", "mock").strip() or "mock"
+
+
+def _openai_provider() -> OpenAICompatProvider:
+    """从环境变量装配 openai 兼容 provider；缺项显式 E_CONFIG（不静默降 mock）。
+
+    密钥只在内存中流转：不落配置文件、不进日志、不进 audit（异常 context 的
+    响应体片段在 provider 层已脱敏）。base_url 是服务根（可带 /v1），
+    请求打 {base_url}/chat/completions。
+    """
+    base_url = os.environ.get("SECPT_LLM_BASE_URL", "").strip()
+    api_key = os.environ.get("SECPT_LLM_API_KEY", "").strip()
+    model = os.environ.get("SECPT_LLM_MODEL", "").strip()
+    missing = [
+        key
+        for key, value in (
+            ("SECPT_LLM_BASE_URL", base_url),
+            ("SECPT_LLM_API_KEY", api_key),
+            ("SECPT_LLM_MODEL", model),
+        )
+        if not value
+    ]
+    if missing:
+        raise SecptError(
+            "LLM_PROVIDER=openai 缺少必需环境变量（不静默降 mock）",
+            code="E_CONFIG",
+            context={"missing": missing},
+        )
+    return OpenAICompatProvider(base_url=base_url, api_key=api_key, model=model)
+
+
+def _provider_for(mock_factory: Callable[[], LlmProvider]) -> LlmProvider:
+    """provider 装配分发（M4-1 诚实边界）：mock 出厂脚本 / openai 真档显式二选一。
+
+    openai 档缺 env → E_CONFIG 拒跑；未知档名 → E_CONFIG——绝不静默降 mock。
+    分发收敛在此一处，三处调用点（主循环/对话/worker）不再各抄一份分支。
+    """
+    name = _provider_name()
+    if name == "openai":
+        return _openai_provider()
     if name != "mock":
         raise SecptError(
-            "M1 仅支持 LLM_PROVIDER=mock（真实 provider 是 M2 的接线件）",
-            context={"provider": name},
+            "未知 LLM_PROVIDER（可选 mock/openai）", code="E_CONFIG", context={"provider": name}
         )
+    return mock_factory()
 
 
-def _demo_provider(goal_text: str) -> FakeLLM:
+def _main_provider(goal_text: str) -> LlmProvider:
+    """主循环 provider：mock=出厂演示脚本；openai=env 装配的真 provider。"""
+    return _provider_for(lambda: _mock_run_script(goal_text))
+
+
+def _chat_provider() -> LlmProvider:
+    """对话模式 provider：mock=出厂直答脚本；openai=真模型单轮直答（不进闭环）。"""
+    return _provider_for(_chat_mock_script)
+
+
+def _worker_provider(index: int) -> LlmProvider:
+    """worker provider：mock=单步收工脚本；openai=每线程独立真 provider 实例。"""
+    return _provider_for(lambda: _worker_mock_script(index))
+
+
+def _mock_run_script(goal_text: str) -> FakeLLM:
     """M1 出厂演示脚本：进场三问 → 一步 nmap 摸扫 → 一步收工（done）→ 报告摘要。
 
     脚本内容与 goal 文本无关——FakeLLM 不真理解输入，target 取输入截断只是
@@ -74,7 +136,6 @@ def _demo_provider(goal_text: str) -> FakeLLM:
     尾项是 LLMA 报告的 summary 脚本（run 正常收束后由 _emit_report 消费）；
     resume 不跑进场（无 goal 项），直接收工 + 摘要。
     """
-    _require_mock()
     goal_json = json.dumps(
         {
             "target": (goal_text[:60] or _NULL_TARGET),
@@ -124,9 +185,8 @@ def _demo_agent_run_enabled() -> bool:
     return os.environ.get("SECPT_DEMO_AGENT_RUN", "").strip().lower() in ("1", "true", "yes")
 
 
-def _chat_provider() -> FakeLLM:
+def _chat_mock_script() -> FakeLLM:
     """对话模式出厂脚本：单轮直答，不进闭环、不落账（WF1）。"""
-    _require_mock()
     return FakeLLM(
         [
             "（M1 mock）对话模式不进闭环：本回复由 FakeLLM 出厂脚本生成；"
@@ -135,14 +195,13 @@ def _chat_provider() -> FakeLLM:
     )
 
 
-def _worker_provider(index: int) -> FakeLLM:
+def _worker_mock_script(index: int) -> FakeLLM:
     """worker 出厂脚本（M3-5 mock 路径）：单步收工，收拢摘要带工号。
 
     为什么不在演示 worker 里仿造 nmap/declare_finding：mock 无网络，伪造证据
     会破"raw_ref 必指真文件"的诚实锚；worker 的能力链路由 e2e 测试用预置
     证据文件覆盖，CLI 演示只需证明"领单—收单—小票回主账"这条线是活的。
     """
-    _require_mock()
     step = StepOutput(
         thought=f"worker-{index} 领单完成（mock 演示：无网络动作，不伪造证据）",
         tool_calls=[],
@@ -161,7 +220,8 @@ def _worker_builder() -> Callable[[int], Worker]:
     Guard 同权（§3.6）但 approver=None：后台线程没有人工通道，HIGH 级动作
     fail-closed——worker 不得替人点头，这与主循环 CliApprover 的口径一致。
     """
-    _require_mock()  # 装配期校验：别让 provider 错误在 worker 线程里炸成哑弹
+    _worker_provider(0)  # 装配期试装：openai 档缺 env 的 E_CONFIG 必须在主线程炸，
+    # 不能等 worker 线程上岗才成哑弹（builder 是装配期职责，§66 记档口径）。
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
     db_path = os.environ.get("SECPT_DB", "secpt.db")
@@ -335,14 +395,16 @@ def _assemble(
     )
 
 
-def _emit_report(conn: sqlite3.Connection, fake: FakeLLM, task_id: str, *, half: bool) -> None:
+def _emit_report(
+    conn: sqlite3.Connection, provider: LlmProvider, task_id: str, *, half: bool
+) -> None:
     """LLMA 报告落 stdout（JSON + Markdown）；报告侧失败只 stderr 降级。
 
     为什么吞在这里而不上抛：报告是呈现层，失败绝不能掩盖 run 的成败结论
     （正常路径）或原异常（半场路径）——兜底边界，仅此一处允许宽捕获。
     """
     try:
-        rep = Reporter(LlmClient(fake)).generate(conn, task_id, half_court=half)
+        rep = Reporter(LlmClient(provider)).generate(conn, task_id, half_court=half)
         print(json.dumps(rep.model_dump(), ensure_ascii=False))
         print(render_markdown(rep))
     except Exception as exc:  # noqa: BLE001  呈现层兜底：报告失败降级为告警
@@ -352,24 +414,28 @@ def _emit_report(conn: sqlite3.Connection, fake: FakeLLM, task_id: str, *, half:
         )
 
 
-def _half_report(conn: sqlite3.Connection, task_id: str | None) -> None:
+def _half_report(
+    conn: sqlite3.Connection, task_id: str | None, provider: LlmProvider | None
+) -> None:
     """半场报告兜底（WF7 硬性动作）：SecptError 出口后必走；报告失败只告警降级。
 
     task_id 为空（异常早于 task 创建）时取最近 task 取材——半场报告是异常出口的
-    机构定局动作，宁可空转也要落到 audit 存在过这步，不静默跳过。
+    机构定局动作，宁可空转也要落到 audit 存在过这步，不静默跳过。provider 为
+    None（装配本身失败）时退回出厂脚本：此时没有可用的真模型，如实标注 mock。
     """
     try:
         if task_id is None:
             task_id = ledger.latest_task(conn).id
-        fake = FakeLLM(
-            [
-                json.dumps(
-                    {"summary": "（M1 mock 半场转述）异常出口收束：已落账部分如实报告。"},
-                    ensure_ascii=False,
-                )
-            ]
-        )
-        _emit_report(conn, fake, task_id, half=True)
+        if provider is None:
+            provider = FakeLLM(
+                [
+                    json.dumps(
+                        {"summary": "（mock 半场转述）异常出口收束：已落账部分如实报告。"},
+                        ensure_ascii=False,
+                    )
+                ]
+            )
+        _emit_report(conn, provider, task_id, half=True)
     except Exception as exc:  # noqa: BLE001  兜底层同理：不覆盖将被 re-raise 的原异常
         print(
             json.dumps({"event": "half_report_degraded", "error": str(exc)}, ensure_ascii=False),
@@ -384,17 +450,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # WF1 失败路径：无 goal → 对话模式兜底，不开闭环（不悬死）。
         print("goal 为空 → 对话模式兜底（WF1）：不进闭环；需要对话请用 secpt chat。")
         return 0
-    fake = _demo_provider(goal)  # provider 校验在进场前
-    client = LlmClient(fake)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
     conn = _open_db()
     board: MissionBoard | None = None
+    provider: LlmProvider | None = None
     try:
+        provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
+        client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
         board = _board(conn)
         result = _assemble(conn, client, board=board, runner=_runner()).run(goal)
         _print_result(result)
-        _emit_report(conn, fake, result.task_id, half=False)
+        _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:
-        _half_report(conn, None)
+        _half_report(conn, None, provider)
         raise
     finally:
         if board is not None:
@@ -407,16 +474,17 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     """``secpt resume <task_id>``：WF8 只复建不回放，从水位线+1 续走。"""
     conn = _open_db()
     board: MissionBoard | None = None
+    provider: LlmProvider | None = None
     try:
-        fake = _demo_provider("")
+        provider = _main_provider("")
         board = _board(conn)
-        result = _assemble(conn, client=LlmClient(fake), board=board, runner=_runner()).resume(
+        result = _assemble(conn, client=LlmClient(provider), board=board, runner=_runner()).resume(
             str(args.task_id)
         )
         _print_result(result)
-        _emit_report(conn, fake, result.task_id, half=False)
+        _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:
-        _half_report(conn, str(args.task_id))
+        _half_report(conn, str(args.task_id), provider)
         raise
     finally:
         if board is not None:

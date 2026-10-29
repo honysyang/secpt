@@ -14,6 +14,7 @@ from secpt.llms.client import (
     ToolCall,
 )
 from secpt.llms.fake import FakeLLM
+from secpt.llms.providers import OpenAICompatProvider
 
 __all__ = [
     "TEMPERATURE_FREESTYLE",
@@ -23,6 +24,7 @@ __all__ = [
     "LlmClient",
     "LlmProvider",
     "Message",
+    "OpenAICompatProvider",
     "StepOutput",
     "ToolCall",
 ]

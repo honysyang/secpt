@@ -90,7 +90,7 @@ def test_run_abnormal_error_lands_ledger_then_nonzero_exit(
             [goal, LlmError("LLM 输出反复不合 schema", code="E_SCHEMA", context={"attempts": 3})]
         )
 
-    monkeypatch.setattr(main_mod, "_demo_provider", boom)
+    monkeypatch.setattr(main_mod, "_mock_run_script", boom)
     rc, task = _run(["run", "--goal", "x"], cli_env)
     assert rc == 1
     assert task is not None and task["exit_kind"] == "abnormal"
@@ -100,13 +100,29 @@ def test_run_abnormal_error_lands_ledger_then_nonzero_exit(
     assert "Traceback" not in captured.err  # 兜底不带 traceback，绝不悬死
 
 
+def test_openai_provider_missing_env_rejected_assembly_time(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4-1 契约：openai 档缺任一 env → 装配期 E_CONFIG 拒跑，绝不静默降 mock。"""
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    for name in ("SECPT_LLM_BASE_URL", "SECPT_LLM_API_KEY", "SECPT_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    rc = main_mod.main(["run", "--goal", "x"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "E_CONFIG" in err
+    assert "SECPT_LLM_BASE_URL" in err
+    assert "SECPT_LLM_API_KEY" in err
+    assert "SECPT_LLM_MODEL" in err
+
+
 def test_unknown_provider_rejected_assembly_time(
     cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
     rc = main_mod.main(["run", "--goal", "x"])
     assert rc == 1
-    assert "M1 仅支持 LLM_PROVIDER=mock" in capsys.readouterr().err
+    assert "deepseek" in capsys.readouterr().err
 
 
 # ---- secpt resume：水位线续跑 =================================================
@@ -130,7 +146,9 @@ def test_resume_reuses_run_and_walks_on(
 ) -> None:
     task_id = _interrupted_task(cli_env)
     monkeypatch.setattr(
-        main_mod, "_demo_provider", lambda _g: FakeLLM([StepOutput(thought="续跑即收", done=True)])
+        main_mod,
+        "_mock_run_script",
+        lambda _g: FakeLLM([StepOutput(thought="续跑即收", done=True)]),
     )
     rc = main_mod.main(["resume", task_id])
     assert rc == 0
