@@ -139,6 +139,10 @@ def test_two_step_run_writes_ledger_and_emits_events(
     ]
     ended = dict(t.events[-1][1])
     assert ended["finished"] is True and ended["steps"] == 2
+    # M5-29：收尾一行带耗时与发现数；小票事件带单票耗时
+    assert isinstance(ended["duration_ms"], int) and ended["findings"] == 0
+    ticket_event = next(payload for name, payload in t.events if name == "ticket_appended")
+    assert isinstance(ticket_event["duration_ms"], int)
     # run 收尾：status=ended
     run = t.conn.execute("SELECT * FROM runs WHERE id = ?", (result.run_id,)).fetchone()
     assert run["status"] == "ended"
@@ -311,6 +315,10 @@ def test_checklist_failure_bounces_back_then_passes(
     assert t.events[2][1]["streak"] == 1  # 弹回而非直接失败（[2]=exit_failed，[1]=graph_changed）
     tasks = conn.execute("SELECT exit_kind FROM tasks").fetchall()
     assert tasks[0]["exit_kind"] == "normal"
+    # M5-28：失败明细随下一步注意力包下发（不只在事件/audit 里）
+    second_prompt = t.fake.calls[1][1].content
+    assert "【出场未过·逐条修】" in second_prompt
+    assert "claimed" in second_prompt
 
 
 def test_checklist_three_round_failure_raises_wall(
@@ -481,3 +489,227 @@ def test_step_audit_row_carries_graph_writes(
     whats = [str(r["what"]) for r in rows]
     assert "graph=+1n+0e" in whats[0]  # 首步：step-1 节点
     assert "graph=+1n+1e" in whats[1]  # 次步：step-2 节点 + 步进边
+
+
+# ---------- M5-27 感知面闭环：工具签名进包 + 未完工计无进展 ---------------------
+
+
+class CatalogDispatcher(FakeDispatcher):
+    """带签名的假 dispatcher：验证 loop 把 registry 目录塞进注意力包。"""
+
+    def tool_catalog(self) -> list[str]:
+        return ["nmap(target*:str, ports:str) — 端口扫描"]
+
+
+class NoProgressDispatcher:
+    """exit=0 但不推进：模拟 agent_run 预算用尽（M5-27 的无进展回执）。"""
+
+    def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
+        return ToolOutput(
+            tool_name=name,
+            args=dict(args),
+            exit_code=0,
+            summary="agent_run 收拢：预算用尽（未完工）",
+            raw_ref="",
+            made_progress=False,
+        )
+
+
+def test_tool_catalog_enters_attention_pack() -> None:
+    """签名每步进包：模型不必再靠"未知参数"回执反推参数名。"""
+    conn = migrate.connect(":memory:")
+    fake = FakeLLM([GOAL_JSON, _step_json("收工", calls=[], done=True)])
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        CatalogDispatcher(),
+        exit_checker=ExitChecklist(),
+    )
+    loop.run("测试主机 10.0.0.5")
+    user_msg = fake.calls[1][1].content  # calls[0] 是进场三问，calls[1] 才是首步注意力包
+    assert "## 可用工具" in user_msg
+    assert "- nmap(target*:str, ports:str) — 端口扫描" in user_msg
+    conn.close()
+
+
+def test_plan_updates_stop_when_backlog_exceeds_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """M5-30：active 规划超上限后本步新增不落账（audit 点名，提示先收口）。"""
+    from secpt.core import loop as loop_mod
+
+    monkeypatch.setattr(loop_mod, "_PLAN_OPEN_LIMIT", 1)
+
+    def step(thought: str, updates: list[str], *, done: bool = False) -> str:
+        return json.dumps(
+            {
+                "thought": thought,
+                "plan_updates": updates,
+                "plan_done": ["A：扫端口", "B：查证书"] if done else [],
+                "tool_calls": [],
+                "done": done,
+            },
+            ensure_ascii=False,
+        )
+
+    t = rig(
+        [
+            GOAL_JSON,
+            step("先提两条", ["A：扫端口", "B：查证书"]),
+            step("积压后再提一条", ["C：看 robots"]),
+            step("收工", [], done=True),
+        ]
+    )
+    result = t.loop.run("测试主机 10.0.0.5")
+
+    assert result.exit_kind == "normal"
+    rows = [
+        row["content"]
+        for row in t.conn.execute("SELECT content FROM plans ORDER BY rowid").fetchall()
+    ]
+    assert rows == ["A：扫端口", "B：查证书"]  # C 未落账
+    audits = [str(row["what"]) for row in t.conn.execute("SELECT what FROM audit_log").fetchall()]
+    assert any("规划积压" in what for what in audits)
+
+
+def test_unfinished_receipt_counts_toward_stall() -> None:
+    """未完工回执按"无进展"收数：连败数满即拉铃 E_STALL，不再被 exit=0 清零。"""
+    conn = migrate.connect(":memory:")
+    script: list[object] = [GOAL_JSON]
+    script.extend(
+        _step_json(
+            f"空转{k}",
+            calls=[{"name": "agent_run", "args": {"mission": "摸一圈"}}],
+            done=False,
+        )
+        for k in range(4)
+    )
+    fake = FakeLLM(script)
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        NoProgressDispatcher(),
+        exit_checker=ExitChecklist(),
+        stall_failures=3,
+    )
+    with pytest.raises(SecptError) as info:
+        loop.run("空转演示 10.0.0.5")
+    assert info.value.code == "E_STALL"
+    conn.close()
+
+
+# ---- M5-31 重复申报拦截 / 重复调用拉铃 / 时长分解 ---------------------------------
+
+
+def test_duplicate_declaration_is_intercepted(tmp_path) -> None:
+    """同名 claimed 已在账：第二次申报不再新增行，audit 点名指回补证据。"""
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("22/tcp open ssh\n", encoding="utf-8")
+    declare = {
+        "name": "declare_finding",
+        "args": {"title": "22 开放", "detail": "banner", "evidence_ref": str(evidence)},
+    }
+    fake = FakeLLM(
+        [
+            GOAL_JSON,
+            _step_json("申报一次", calls=[declare], done=False),
+            _step_json("按出场提示又申报一次", calls=[dict(declare)], done=False),
+            _step_json("收工", calls=[], done=True),
+        ]
+    )
+    from functools import partial
+    from typing import cast
+
+    from secpt.core.loop import JudgeSweep
+    from secpt.judge import GroundTruth, JudgeProfile, sweep
+
+    class DeclareDispatcher:
+        """declare_finding 的 raw_ref 指向真实证据文件（与生产 DeclareFindingTool
+        署名一致）——伪造路径会被 R0 判零成 rejected，走不到"verified 同锚重复"分支。"""
+
+        def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
+            raw = str(args.get("evidence_ref", "")) if name == "declare_finding" else "x"
+            return ToolOutput(
+                tool_name=name, args=dict(args), exit_code=0, summary="受理", raw_ref=raw
+            )
+
+    conn = migrate.connect(":memory:")
+    prof = JudgeProfile(
+        enabled=True,
+        ground_truth=(GroundTruth(id="GT-22", pattern="22 开放"),),
+        source="dedupe-test",
+    )
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        DeclareDispatcher(),
+        exit_checker=ExitChecklist(),
+        judge_sweep=cast(JudgeSweep, partial(sweep, profile=prof)),
+    )
+    loop.run("去重演示 10.0.0.5")
+    rows = conn.execute("SELECT title FROM findings").fetchall()
+    assert len(rows) == 1  # 第二次同名申报未落行
+    states = [str(r["verify_state"]) for r in conn.execute("SELECT verify_state FROM findings")]
+    assert states == ["verified"]  # 唯一一条走裁判收口（oracle），出场方能过
+    audits = [str(r["what"]) for r in conn.execute("SELECT what FROM audit_log").fetchall()]
+    assert any("重复申报拦截" in what for what in audits)
+    conn.close()
+
+
+def test_repeat_calls_ring_fires_before_failure_streak() -> None:
+    """同 (工具, 参数) 重复 4 次拉铃（repeat_calls=4 < failures=5）：空转在调用层
+    被抓住，不必等失败计——真实 run 的"同 URL 反复抓/同文件反复读"正是此形态。"""
+
+    class OkDispatcher:
+        """永远成功的固定回执：失败计恒清零，只有重复计能响。"""
+
+        def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
+            return ToolOutput(
+                tool_name=name, args=dict(args), exit_code=0, summary="ok", raw_ref="x"
+            )
+
+    conn = migrate.connect(":memory:")
+    script = [GOAL_JSON]
+    script.extend(
+        _step_json(
+            f"重读{k}",
+            calls=[{"name": "read_file", "args": {"path": "raw/a.txt"}}],
+            done=False,
+        )
+        for k in range(1, 5)
+    )
+    fake = FakeLLM(script)
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        OkDispatcher(),
+        exit_checker=ExitChecklist(),
+        stall_failures=5,
+        stall_repeat_calls=4,
+    )
+    with pytest.raises(SecptError) as info:
+        loop.run("重复调用演示 10.0.0.5")
+    assert info.value.code == "E_STALL"
+    assert fake.call_count == 5  # 进场 + 4 步（第 4 步撞线即出口）
+    conn.close()
+
+
+def test_run_ended_carries_duration_split() -> None:
+    """run_ended 带 llm_ms/tools_ms：慢在决策还是慢在工具，收尾一行可辨。"""
+    bus = EventBus()
+    events: list[tuple[str, Mapping[str, object]]] = []
+    bus.subscribe(lambda name, payload: events.append((name, payload)))
+    conn = migrate.connect(":memory:")
+    fake = FakeLLM([GOAL_JSON, _step_json("收工", calls=[], done=True)])
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        FakeDispatcher(),
+        bus=bus,
+        exit_checker=ExitChecklist(),
+    )
+    loop.run("计时演示 10.0.0.5")
+    ended = dict(events[-1][1])
+    assert "llm_ms" in ended and "tools_ms" in ended
+    conn.close()

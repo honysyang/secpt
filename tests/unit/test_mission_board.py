@@ -264,6 +264,38 @@ def test_agent_run_without_board_keeps_m1_placeholder_reply() -> None:
     assert receipt.raw_ref == ""
 
 
+class _IdleWorker:
+    """预算吃满也没收工：ok=True/finished=False（"没炸"≠"有进展"）。"""
+
+    def run(self, mission: Mission) -> MissionResult:
+        return MissionResult(
+            mission_id=mission.mission_id,
+            ok=True,
+            finished=False,
+            steps_taken=3,
+            findings_count=0,
+            summary="预算用尽：3 步内未收工，申报 0 条",
+        )
+
+
+def test_agent_run_unfinished_marks_no_progress() -> None:
+    """M5-27：未完工回执显式声明 made_progress=False，摘要写明未完工。
+
+    为什么不改 exit_code：ok/finished 两轴是 M3-5 的诚实语义（未完成不是失败）；
+    失速计要的是"有没有进展"，由回执独立声明，两个语义各归各的字段。
+    """
+    board = _make_board(lambda _i: _IdleWorker(), size=1, task_resolver=lambda _c: "t-any")
+    tool = AgentRunTool(board=board)
+    try:
+        receipt = tool.run({"mission": "空转", "persona": "recon", "step_budget": "3"})
+    finally:
+        board.shutdown()
+    assert receipt.exit_code == 0
+    assert receipt.made_progress is False
+    assert receipt.summary.startswith("agent_run 收拢：")
+    assert "（未完工）" in receipt.summary
+
+
 class _RealWorkerAssembly:
     """e2e worker 装配：每线程独立 FakeLLM（非线程安全，不破 fake.py 契约）。"""
 

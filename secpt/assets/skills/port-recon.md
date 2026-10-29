@@ -2,6 +2,8 @@
 id: port-recon
 name: 端口摸底
 description: 对目标做端口与服务识别，产出可申报的暴露面证据
+tools:
+  - nmap
 prompts:
   - skills.evidence
 ---

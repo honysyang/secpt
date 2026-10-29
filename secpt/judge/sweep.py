@@ -35,6 +35,12 @@ from secpt.store.ledger import FindingRow
 
 _OBS_PREFIX = "obs:"
 
+# M5-31 悬置上限：一条 claim 最多被 sweep 处理 N 轮。真实 run 实测一条无法判真的
+# claim 被每步重扫、连挂 27 轮悬置（每轮重放/查账纯烧，且没有任何新信息）——
+# 到顶后 sweep 跳过它，出场清单②据此给出"裁判已无法自动判真"的升级提示，
+# 把死循环暴露给人而不是让模型用重复申报去撞。终态行不计（sweep 永远摸不到）。
+_SWEEP_MAX_PASSES = 6
+
 
 def sweep(
     conn: sqlite3.Connection,
@@ -47,17 +53,25 @@ def sweep(
     """对 task 的全部 claimed findings 收口一轮裁决，返回本轮被裁决的行。
 
     - profile 关闭：no-op 返回 []（judge.enabled=false 时 judge 不上班）；
+    - 悬置到顶（sweep_count ≥ 上限）的 claim 本轮跳过——重复裁决无新信息，
+      出场清单会据此点名"裁判无法自动判真"，留给人工/换证据路径；
     - R0 不过 → rejected（method=None，无依据不编）；
     - R4 命中 → verified(oracle)，票盒不记票（R4 是更硬的背书）；
     - R1 注入且票面锚 → 重放（一致 verified(rerun)、不一致降票悬置）；
     - R2 双路径 / R3 反证：给 R1 之后的悬案出口；
-    - 都没命中 → 保持 claimed（悬置不审，各道已留痕）。
+    - 都没命中 → 保持 claimed（悬置不审，各道已留痕，sweep_count +1）。
     """
     if not profile.enabled:
         return []
-    claimed = ledger.task_findings(conn, task_id, verify_state="claimed")
+    claimed = [
+        row
+        for row in ledger.task_findings(conn, task_id, verify_state="claimed")
+        if row.sweep_count < _SWEEP_MAX_PASSES
+    ]
     verdicts: list[FindingRow] = []
+    processed: list[str] = []
     for finding in claimed:
+        processed.append(finding.id)
         if not r0(conn, finding):
             verdicts.append(ledger.set_finding_state(conn, finding.id, "rejected", method=None))
             ledger.audit(
@@ -83,6 +97,9 @@ def sweep(
             verdict = r3(conn, finding)
         if verdict is not None:
             verdicts.append(verdict)
+    # M5-31：本轮摸过的 claim 计数 +1（含被裁决成终态的——计数对终态行无意义，
+    # 统一推进省一次分支；悬置行靠它到顶退场）。一条不落，悬置上限才可复算。
+    ledger.bump_sweep_counts(conn, processed)
     return verdicts
 
 

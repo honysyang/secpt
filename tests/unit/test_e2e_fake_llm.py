@@ -226,26 +226,27 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
                     calls=[{"name": "nmap", "args": {"target": "10.0.0.5"}}],
                     done=False,
                 )
-                for n in range(1, 6)
+                for n in range(1, 5)
             ],
         ]
     )
     conn = _make_db()
     loop, events = _make_loop(conn, fake, registry)
 
-    # 连败 5 步 = 失速计 N=5 拉铃：E_STALL（SecptError 家族）原样上抛给 main 兜底。
+    # 同参数重复 4 次 = 失速计 repeat_calls=4 拉铃（M5-31 第三口径比连败 N=5 先响）：
+    # E_STALL（SecptError 家族）原样上抛给 main 兜底。
     with pytest.raises(SecptError, match="失速计拉铃") as info:
         loop.run("失速演示 10.0.0.5")
     assert info.value.code == "E_STALL"
-    assert fake.call_count == 6  # 进场 1 次 + 五步各 1 次，无 schema 重试
+    assert fake.call_count == 5  # 进场 1 次 + 四步各 1 次，无 schema 重试
     assert fake.remaining == 0
 
-    # 五步账都在：小票失败回执（exit_code=NULL、raw_ref 空）+ stalled 出口。
+    # 四步账都在：小票失败回执（exit_code=NULL、raw_ref 空）+ stalled 出口。
     tickets = conn.execute("SELECT exit_code, raw_ref FROM tickets").fetchall()
-    assert len(tickets) == 5
+    assert len(tickets) == 4
     assert all(row["exit_code"] is None and row["raw_ref"] == "" for row in tickets)
     run = conn.execute("SELECT status, step_count FROM runs").fetchone()
-    assert run["status"] == "ended" and run["step_count"] == 5
+    assert run["status"] == "ended" and run["step_count"] == 4
     task = ledger.latest_task(conn)
     assert task.exit_kind == "stalled"
     names = [name for name, _ in events]
@@ -253,7 +254,7 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
     # stall_alarm（事件线只管报告，本方向无 coach，铃后仍按 M1 语义 E_STALL）；
     # 每步事务提交后另有 graph_changed（双图写入只报告，R3 红线不破）。
     assert names == (
-        ["run_step_started", "ticket_appended", "graph_changed"] * 5 + ["stall_alarm", "run_ended"]
+        ["run_step_started", "ticket_appended", "graph_changed"] * 4 + ["stall_alarm", "run_ended"]
     )
 
 

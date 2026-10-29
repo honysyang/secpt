@@ -18,7 +18,7 @@ import json
 import os
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 
 from secpt.assets import list_knowledge, list_prompts, list_roles, list_skills, prompt_text
@@ -65,7 +65,9 @@ from secpt.tools.probe import (
 from secpt.tools.probe import (
     note_for as probe_note_for,
 )
+from secpt.tools.readonly import HttpGetTool, ListDirTool, ReadFileTool
 from secpt.tools.registry import ToolAdapter, ToolRegistry
+from secpt.tools.workspace import DownloadTool, RunCommandTool, WriteFileTool
 
 _NULL_TARGET = "(demo)"
 _DEFAULT_WORKER_TIMEOUT_S = 300.0
@@ -225,7 +227,43 @@ def _worker_mock_script(index: int) -> FakeLLM:
     return FakeLLM([step])
 
 
-def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Worker]:
+def _passive_tools(raw_dir: str) -> list[ToolAdapter]:
+    """只读情报三件套（M5-28）：http_get / read_file / list_dir。
+
+    为什么两套 registry 都装：主 LLM 可直接采被动源，worker 领单后也能——没有
+    它们的被动侦察任务是死局（只有 nmap，而工单禁止主动扫描）。三件套不提供
+    任何写/删原语，read_file/list_dir 被 roots 限制在 raw 与 evidence 目录内，
+    模型读不到 .env 这类账外文件；证据只能由真实观测（GET 响应/nmap 产物）产生。
+    """
+    evidence_dir = os.environ.get("SECPT_EVIDENCE_DIR", "evidence")
+    return [
+        HttpGetTool(raw_dir=raw_dir),
+        ReadFileTool(roots=(raw_dir, evidence_dir)),
+        ListDirTool(roots=(raw_dir, evidence_dir)),
+    ]
+
+
+def _workspace_tools(raw_dir: str, runner: ArgvRunner | None = None) -> list[ToolAdapter]:
+    """智能体工作区三件套（M5-29）：write_file / run_command / download。
+
+    为什么要给智能体这些：写脚本、下载工具是"把一次性动作变成可复用资产"的
+    基本能力，缺了它模型只能反复点名不存在的 bash/shell。三条安全边界写在
+    workspace.py：write_file 只写 work/（绝不碰 raw/evidence 证据目录）、
+    run_command 只吃 argv（禁 shell 元字符）、download 只认 http/https 且限 32MB。
+    run_command 复用与 nmap 同一个 ArgvRunner——隔离档（docker）对两者同权。
+    """
+    work_dir = os.environ.get("SECPT_WORK_DIR", "work")
+    return [
+        WriteFileTool(root=work_dir),
+        RunCommandTool(raw_dir=raw_dir, runner=runner),
+        DownloadTool(root=work_dir),
+    ]
+
+
+def _worker_builder(
+    broker: ApprovalBroker | None = None,
+    observer: Callable[[str, Mapping[str, object]], None] | None = None,
+) -> Callable[[int], Worker]:
     """worker 装配工厂：每线程一次构建（独立 conn + 独立 registry + 独立 LLM）。
 
     两条硬约束落在这里：
@@ -258,6 +296,8 @@ def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Wor
                 [
                     NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
                     DeclareFindingTool(),
+                    *_passive_tools(raw_dir),
+                    *_workspace_tools(raw_dir, runner),
                     *mcp,
                 ],
                 guard=guard,
@@ -266,6 +306,11 @@ def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Wor
             ),
             conn=connect(db_path),
             coach=Coach(client),
+            # M5-29：worker 过程事件与主循环共用一条总线（CLI 面板实时可见）。
+            observer=observer,
+            # M5-31：worker 内部批派单开关——探针后端是进程级全局态（并发开窗串账），
+            # 在场就串行；缺省关档（None）时开启，worker 的多 http_get/nmap 并发提效。
+            parallel_dispatch=probe is None,
         )
 
     return build
@@ -328,6 +373,7 @@ def _board(
     *,
     broker: ApprovalBroker | None = None,
     limits: LimitsConfig | None = None,
+    observer: Callable[[str, Mapping[str, object]], None] | None = None,
 ) -> MissionBoard:
     """领单任务板装配：worker 数取 ``[budget].workers``（默认 3），锚点走最近 task。
 
@@ -356,11 +402,25 @@ def _board(
         ) from exc
     if size <= 0:
         raise SecptError("SECPT_WORKERS 必须为正整数", code="E_CONFIG", context={"got": size})
+
+    def _resolve_task_id(_ignored: sqlite3.Connection) -> str:
+        """锚点解析自建连接（M5-30）：submit 可能发生在并发派单的线程池里。
+
+        为什么不能复用 board 的 conn：sqlite 连接有线程亲和性，跨线程使用直接
+        抛 ProgrammingError——实测一轮里唯一一张 agent_run 票就是这样废掉的，
+        之后整轮再没派过单。每次解析开短连接（毫秒级）换线程安全，值。
+        """
+        local = connect(db_path)
+        try:
+            return ledger.latest_task(local).id
+        finally:
+            local.close()
+
     return MissionBoard(
         conn,
-        _worker_builder(broker),
+        _worker_builder(broker, observer),
         size=size,
-        task_resolver=lambda c: ledger.latest_task(c).id,
+        task_resolver=_resolve_task_id,
     )
 
 
@@ -396,6 +456,8 @@ def _registry(
             NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
             AgentRunTool(board=board, broker=broker),
             DeclareFindingTool(),
+            *_passive_tools(raw_dir),
+            *_workspace_tools(raw_dir, runner),
             *_mcp_adapters(),
         ],
         guard=guard,
@@ -472,14 +534,17 @@ def _assemble(
     runner: ArgvRunner | None = None,
     broker: ApprovalBroker | None = None,
     limits: LimitsConfig | None = None,
+    bus: EventBus | None = None,
 ) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
     出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
     W3-1 起收尾挂经验蒸馏器，W3-2 起裁判 sweep 以 partial 注入 JudgeSweep 口
     （core 只见 callable；profile 缺文件由 load_profile 降关闭 + note 携带降级口径），
     全部与 MainLlm 共用同一条 chat 协议 client。
-    M3-5：board/runner 由调用方持有并负责收板（装配层不管生命周期）。"""
-    bus = EventBus()
+    M3-5：board/runner 由调用方持有并负责收板（装配层不管生命周期）。
+    M5-29：``bus`` 可由调用方先建好传给 ``_board``（worker 事件共用同一条总线，
+    面板才能把主 LLM 与 worker 的动作按发生顺序放在一起看）。"""
+    bus = bus or EventBus()
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
     probe_cfg = load_probe_config(_profile_path())
@@ -522,6 +587,7 @@ def _assemble(
         plan_review_limit=plan_cfg.review_limit,
         stall_failures=limits.stall_failures,
         stall_repeat_plans=limits.stall_repeat_plans,
+        stall_repeat_calls=limits.stall_repeat_calls,
         parallel_dispatch=_parallel_allowed(guard_cfg, probe_cfg.enabled),
     )
 
@@ -621,7 +687,9 @@ def _posture_note() -> str:
     guard = load_guard_config(_profile_path())
     parts = [
         f"裁判={'开' if prof.enabled else '关'}",
-        f"验收={len(prof.acceptance)} 条" if prof.acceptance else "验收=未配置",
+        f"验收={len(prof.acceptance)} 条"
+        if prof.acceptance
+        else "验收=未配置（0 findings 也可收工）",
         f"探针={'开' if probe_cfg.enabled else '关'}",
         f"隔离={iso.isolation}",
         f"Guard={'开' if guard is not None else '关（闸常开）'}",
@@ -632,6 +700,32 @@ def _posture_note() -> str:
     return note
 
 
+def _bus_observer(bus: EventBus) -> Callable[[str, Mapping[str, object]], None]:
+    """Worker 观测口 → EventBus 适配（M5-29）。
+
+    Worker 只认 ``(事件名, 载荷字典)``（可独立单测），EventBus 要 kwargs——
+    薄适配放在装配层，两个契约各自简单，不互相迁就。
+    """
+
+    def _observe(name: str, payload: Mapping[str, object]) -> None:
+        bus.emit(name, **payload)
+
+    return _observe
+
+
+def _warn_unfinished(conn: sqlite3.Connection) -> None:
+    """启动提示（M5-28）：账上留着 running 的 run 时，告诉人可以 resume。
+
+    只提示不自动续跑：新 goal 是新任务，旧 run 的命运归用户——静默接管会把两条
+    任务线搅在一起（还把旧目标塞进新 run 的注意力包）。
+    """
+    pending = ledger.unfinished_task(conn)
+    if pending is not None:
+        print(
+            f"【提示】检测到未收尾 run（task_id={pending.id}），可用 secpt resume {pending.id} 续跑"
+        )
+
+
 def _run_pentest(goal: str) -> int:
     """渗透闭环主体：进场三问 → 主循环 → 终场报告（原 _cmd_run 逻辑）。"""
     conn = _open_db()
@@ -639,14 +733,22 @@ def _run_pentest(goal: str) -> int:
     provider: LlmProvider | None = None
     print(f"【任务】{goal}")  # 本轮在干什么：CLI 第一行固定可见
     print(f"【安全态势】{_posture_note()}")  # M5-25：默认关的开关摊开给人看
+    _warn_unfinished(conn)  # M5-28：上次没收尾的 run 只提示，不自动接管
     try:
         provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
         limits = load_limits_config(_profile_path())  # 步数线/失速阈值（[budget]/[stall]）
         broker = _approval_broker()
-        board = _board(conn, broker=broker, limits=limits)
+        bus = EventBus()  # M5-29：主循环与 worker 共用同一条事件总线
+        board = _board(conn, broker=broker, limits=limits, observer=_bus_observer(bus))
         result = _assemble(
-            conn, client, board=board, runner=_runner(), broker=broker, limits=limits
+            conn,
+            client,
+            board=board,
+            runner=_runner(),
+            broker=broker,
+            limits=limits,
+            bus=bus,
         ).run(goal, max_steps=limits.max_steps)
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)
@@ -669,7 +771,8 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         provider = _main_provider("")
         limits = load_limits_config(_profile_path())
         broker = _approval_broker()
-        board = _board(conn, broker=broker, limits=limits)
+        bus = EventBus()  # M5-29：resume 同样让 worker 事件上屏
+        board = _board(conn, broker=broker, limits=limits, observer=_bus_observer(bus))
         result = _assemble(
             conn,
             client=LlmClient(provider),
@@ -677,6 +780,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             runner=_runner(),
             broker=broker,
             limits=limits,
+            bus=bus,
         ).resume(str(args.task_id), max_steps=limits.max_steps)
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)

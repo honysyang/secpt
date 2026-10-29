@@ -113,3 +113,16 @@ def test_build_experiences_rejected_blocked_double_gate() -> None:
 def test_render_experience_section_absent_when_no_experiences() -> None:
     text = attention.build(GOAL, 1, "暂无", []).render()
     assert "## 可用经验" not in text
+
+
+def test_render_tools_catalog_section() -> None:
+    """M5-27：工具签名必须每步可读——模型猜参数名的病根在感知面不在能力。"""
+    pack = attention.build(GOAL, 1, "暂无", [], tools=["nmap(target*:str, ports:str) — 端口扫描"])
+    text = pack.render()
+    assert "## 可用工具（调用必须用下列参数名，勿自造）" in text
+    assert "- nmap(target*:str, ports:str) — 端口扫描" in text
+
+
+def test_render_tools_section_absent_when_not_injected() -> None:
+    """老装配（测试替身 dispatcher）没有目录时整节省略，不留空标题。"""
+    assert "## 可用工具" not in attention.build(GOAL, 1, "暂无", []).render()

@@ -145,8 +145,8 @@ def test_rescue_absorbed_run_recovers_to_normal(tmp_path: Path) -> None:
     fake = FakeLLM(
         [
             _goal_json("10.0.0.5"),
-            *[_phantom_step(n) for n in range(1, 6)],  # 连败 5 步 → 拉铃
-            Proposal(idea="换打 443", reason="连续 5 步未知工具无进展"),
+            *[_phantom_step(n) for n in range(1, 5)],  # 同参数重复 4 次 → 拉铃（M5-31 比连败先响）
+            Proposal(idea="换打 443", reason="连续 4 步未知工具无进展"),
             _step_json(
                 "听教练的，换打 443",
                 calls=[{"name": "nmap", "args": {"target": "10.0.0.5", "ports": "443"}}],
@@ -168,17 +168,17 @@ def test_rescue_absorbed_run_recovers_to_normal(tmp_path: Path) -> None:
     )
     loop.run("救场演示 10.0.0.5")
 
-    assert fake.call_count == 9  # 进场 + 必败 5 + 教练 1 + 换路 1 + 收工 1
+    assert fake.call_count == 8  # 进场 + 必败 4 + 教练 1 + 换路 1 + 收工 1
 
     # 吸收断言：救场后第一个主 step 的注意力包 user 消息携带提案文本（一次即用掉）。
-    absorb = fake.calls[7][1].content
+    absorb = fake.calls[6][1].content
     assert "教练提案待吸收（WF5 救场，只提案不裁决）" in absorb
     assert "换打 443" in absorb
 
-    # 事件序：五连败（含小票）→ stall_alarm → 换路步 → 收工步 → exit_passed → run_ended。
+    # 事件序：四连败（含小票）→ stall_alarm → 换路步 → 收工步 → exit_passed → run_ended。
     names = [name for name, _ in events]
     assert names == (
-        ["run_step_started", "ticket_appended", "graph_changed"] * 5
+        ["run_step_started", "ticket_appended", "graph_changed"] * 4
         + [
             "stall_alarm",
             "run_step_started",
@@ -208,9 +208,9 @@ def test_second_ring_after_rescue_spent_raises_and_stalls(tmp_path: Path) -> Non
     fake = FakeLLM(
         [
             _goal_json("10.0.0.5"),
-            *[_phantom_step(n) for n in range(1, 6)],  # 第一波连败 5 → 拉铃，教练救场
+            *[_phantom_step(n) for n in range(1, 5)],  # 第一波同参数重复 4 → 拉铃，教练救场
             Proposal(idea="换打 443", reason="第一次救场"),
-            *[_phantom_step(n) for n in range(6, 11)],  # 换打法后仍败 5 → 二次拉铃
+            *[_phantom_step(n) for n in range(5, 9)],  # 换打法后仍重复 4 → 二次拉铃
         ]
     )
     conn = _make_db()
@@ -228,12 +228,12 @@ def test_second_ring_after_rescue_spent_raises_and_stalls(tmp_path: Path) -> Non
         loop.run("名额演示 10.0.0.5")
     assert info.value.code == "E_STALL"
 
-    assert fake.call_count == 12  # 进场 + 10 败 + 教练 1（第二次拉铃不再烧教练）
+    assert fake.call_count == 10  # 进场 + 8 败 + 教练 1（第二次拉铃不再烧教练）
     assert fake.remaining == 0
     assert [name for name, _ in events] == (
-        ["run_step_started", "ticket_appended", "graph_changed"] * 5
+        ["run_step_started", "ticket_appended", "graph_changed"] * 4
         + ["stall_alarm"]  # 第一次拉铃：铃照落，救场提案随后被吸收
-        + ["run_step_started", "ticket_appended", "graph_changed"] * 5
+        + ["run_step_started", "ticket_appended", "graph_changed"] * 4
         + ["stall_alarm", "run_ended"]  # 第二次拉铃：名额已用，raise E_STALL
     )
     assert len(_audit_what(conn, "llmc")) == 1  # 教练只发言过一次
@@ -247,7 +247,7 @@ def test_second_ring_after_rescue_spent_raises_and_stalls(tmp_path: Path) -> Non
 def test_coach_absent_keeps_m1_semantics(tmp_path: Path) -> None:
     """coach=None（M1 老装配）：铃照落（事件线只管报告），出口语义与 M1 完全一致。"""
     registry = ToolRegistry([])
-    fake = FakeLLM([_goal_json("10.0.0.5"), *[_phantom_step(n) for n in range(1, 6)]])
+    fake = FakeLLM([_goal_json("10.0.0.5"), *[_phantom_step(n) for n in range(1, 5)]])
     conn = _make_db()
     bus, events = _recorder()
     loop = PentestLoop(
@@ -261,7 +261,7 @@ def test_coach_absent_keeps_m1_semantics(tmp_path: Path) -> None:
         loop.run("无教练演示 10.0.0.5")
     assert info.value.code == "E_STALL"
     assert [name for name, _ in events] == (
-        ["run_step_started", "ticket_appended", "graph_changed"] * 5 + ["stall_alarm", "run_ended"]
+        ["run_step_started", "ticket_appended", "graph_changed"] * 4 + ["stall_alarm", "run_ended"]
     )
     assert _audit_what(conn, "llmc") == []
     assert ledger.latest_task(conn).exit_kind == "stalled"

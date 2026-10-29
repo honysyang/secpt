@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from typing import TextIO
 
@@ -23,6 +24,24 @@ from secpt.errors import LedgerError
 
 # 审计尾行展示量：检查窗是"够解决问题的最小回放"，不是全库 dump。
 _AUDIT_TAIL = 10
+
+
+def _fmt_ms(raw: object) -> str:
+    """耗时人类化（M5-29）：毫秒 → ``0.8s`` / ``12.3s`` / ``1m05s``。
+
+    为什么在 CLI 层格式化而不是事件里带字符串：事件载荷保持纯数字（面板/日志
+    都能再加工），显示口径只有这一处，改样式不必动事件契约。
+    """
+    try:
+        ms = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if ms < 0:
+        return ""
+    if ms < 60_000:
+        return f"{ms / 1000:.1f}s"
+    seconds = ms // 1000
+    return f"{seconds // 60}m{seconds % 60:02d}s"
 
 
 class _StderrFactory:
@@ -66,9 +85,13 @@ class CliView:
         """
         self._out = out
         self._pending_tickets: list[str] = []
+        # M5-29：worker 线程也往同一个面板写（agent_run 收拢窗内并发派单），
+        # 行级锁保证不撕裂；print 本身是单次 write，锁只是把"整行"钉死。
+        self._lock = threading.Lock()
 
     def _print(self, line: str) -> None:
-        print(line, file=self._out or sys.stdout)
+        with self._lock:
+            print(line, file=self._out or sys.stdout)
 
     def _flush_tickets(self) -> None:
         for line in self._pending_tickets:
@@ -89,16 +112,26 @@ class CliView:
 
     def _on_ticket(self, payload: Mapping[str, object]) -> None:
         """工具回执行（§8"一行 summary"）：标明是哪个智能体调了哪个工具。"""
+        cost = _fmt_ms(payload.get("duration_ms"))
+        tail = f"（{cost}）" if cost else ""
         self._pending_tickets.append(
             f"【主LLM → {payload.get('tool_name', '?')}】exit={payload.get('exit_code')}"
-            f" | {payload.get('summary', '')}"
+            f"{tail} | {payload.get('summary', '')}"
         )
 
     def _on_run_ended(self, payload: Mapping[str, object]) -> None:
         self._flush_tickets()
+        cost = _fmt_ms(payload.get("duration_ms"))
+        tail = f" 用时={cost}" if cost else ""
+        # M5-31 时长分解（有则带出）：慢在决策还是慢在工具，收尾一行可辨。
+        split = _fmt_ms(payload.get("llm_ms")), _fmt_ms(payload.get("tools_ms"))
+        if any(split):
+            tail += f"（决策 {split[0] or '-'} · 工具 {split[1] or '-'}）"
+        findings = payload.get("findings")
+        found = f" findings={findings}" if findings is not None else ""
         self._print(
             f"【出口】exit_kind={payload.get('exit_kind', '?')} steps={payload.get('steps', '?')}"
-            f" task_id={payload.get('task_id', '?')}"
+            f"{found}{tail} task_id={payload.get('task_id', '?')}"
         )
 
     def _on_graph_changed(self, payload: Mapping[str, object]) -> None:
@@ -106,14 +139,69 @@ class CliView:
 
         事件名是 graph_changed（写图后广播），但载荷里带 thought/tools——CLI 借它
         把决策过程上屏；EventBus 只报告不接管，多带字段不改变任何执行语义。
+        M5-31：决策与工具拆开计时（decision_ms/tools_ms）——"决策 5s · 工具 2m00s"
+        一眼看清慢在模型还是慢在扫描；旧装配没带拆分字段时回落整步耗时。
         """
         tools = str(payload.get("tools") or "")
         tail = f"（工具：{tools}）" if tools else "（无工具）"
+        decision = _fmt_ms(payload.get("decision_ms"))
+        dispatch = _fmt_ms(payload.get("tools_ms"))
+        if decision or dispatch:
+            parts = [
+                part
+                for part in (
+                    f"决策 {decision}" if decision else "",
+                    f"工具 {dispatch}" if dispatch else "",
+                )
+                if part
+            ]
+            spent = f" · {' · '.join(parts)}"
+        else:
+            cost = _fmt_ms(payload.get("duration_ms"))
+            spent = f" · {cost}" if cost else ""
         self._print(
-            f"【主LLM】第 {payload.get('step_no', '?')} 步决策：{payload.get('thought', '')}{tail}"
+            f"【主LLM】第 {payload.get('step_no', '?')} 步决策{spent}："
+            f"{payload.get('thought', '')}{tail}"
         )
         self._flush_tickets()  # 决策在前、回执在后：人读日志的自然顺序
         self._print(f"【双图】+{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e")
+
+    # ---- M5-29 worker 过程可见（多 worker 并发时也能分清是谁在干什么）------------
+
+    def _on_worker_step_started(self, payload: Mapping[str, object]) -> None:
+        actor = payload.get("actor", "worker")
+        self._print(
+            f"【{actor}】第 {payload.get('step_no', '?')}/{payload.get('step_budget', '?')} 步"
+            " · 开始"
+        )
+
+    def _on_worker_step_ended(self, payload: Mapping[str, object]) -> None:
+        actor = payload.get("actor", "worker")
+        cost = _fmt_ms(payload.get("duration_ms"))
+        spent = f"（{cost}）" if cost else ""
+        self._print(
+            f"【{actor}】第 {payload.get('step_no', '?')} 步完成{spent}："
+            f"{payload.get('thought', '')}"
+        )
+
+    def _on_worker_ticket(self, payload: Mapping[str, object]) -> None:
+        actor = payload.get("actor", "worker")
+        cost = _fmt_ms(payload.get("duration_ms"))
+        spent = f"（{cost}）" if cost else ""
+        self._print(
+            f"【{actor} → {payload.get('tool_name', '?')}】exit={payload.get('exit_code')}"
+            f"{spent} | {payload.get('summary', '')}"
+        )
+
+    def _on_worker_mission_ended(self, payload: Mapping[str, object]) -> None:
+        actor = payload.get("actor", "worker")
+        state = "完工" if payload.get("finished") else "未完工"
+        cost = _fmt_ms(payload.get("duration_ms"))
+        spent = f" 用时={cost}" if cost else ""
+        self._print(
+            f"【{actor}·收单】{state} steps={payload.get('steps', '?')}"
+            f" findings={payload.get('findings', '?')}{spent}"
+        )
 
     def _on_exit_failed(self, payload: Mapping[str, object]) -> None:
         """出场未过（M5-26）：把失败明细讲清楚，别让人只看到一个计数。"""
@@ -139,6 +227,10 @@ _HANDLERS: dict[str, Callable[[CliView, Mapping[str, object]], None]] = {
     "plan_reviewed": CliView._on_plan_reviewed,
     "exit_failed": CliView._on_exit_failed,
     "run_ended": CliView._on_run_ended,
+    "worker_step_started": CliView._on_worker_step_started,
+    "worker_step_ended": CliView._on_worker_step_ended,
+    "worker_ticket": CliView._on_worker_ticket,
+    "worker_mission_ended": CliView._on_worker_mission_ended,
 }
 
 

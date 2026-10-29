@@ -196,10 +196,14 @@ def test_worker_injects_skill_body_and_discipline() -> None:
     system = fake.calls[0][0].content
     assert "挂载技能：端口摸底" in system
     assert "证据纪律" in system  # 引用的 prompt 片段确实进来了
-    entry = conn.execute(
-        "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid LIMIT 1"
-    ).fetchone()["what"]
-    assert "skills=port-recon" in entry  # 领单行可复算挂了哪些技能
+    entries = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid"
+        ).fetchall()
+    ]
+    # 领单行可复算挂了哪些技能（技能依赖缺失的提示行可能排在它前面，故查全量）
+    assert any("skills=port-recon" in entry for entry in entries)
 
 
 def test_worker_missing_skill_degrades_with_audit() -> None:
@@ -219,6 +223,24 @@ def test_worker_missing_skill_degrades_with_audit() -> None:
     assert any("技能库缺件：ghost-skill" in what for what in whats)
 
 
+def test_worker_skill_missing_tool_warns_in_prompt_and_audit() -> None:
+    """M5-28：技能声明的工具没登记 → 话术明说别试 + audit 留痕（不阻断领单）。"""
+    worker, mission, fake, conn = _worker_env([_step("收工", done=True)])
+    mounted = mission.model_copy(update={"skills": ("port-recon",)})
+    result = worker.run(mounted)
+
+    assert result.ok and result.finished
+    system = fake.calls[0][0].content
+    assert "需要的工具未登记：nmap" in system
+    whats = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid"
+        ).fetchall()
+    ]
+    assert any("技能 port-recon 需要的工具未登记" in what for what in whats)
+
+
 def test_mission_skills_default_empty_keeps_old_semantics() -> None:
     assert Mission(goal="g").skills == ()
 
@@ -235,10 +257,13 @@ def test_worker_mounts_role_by_persona() -> None:
     assert "优先只读侦察" in system  # instruction 在场
     assert "挂载技能：端口摸底" in system  # 角色 skills 自动挂
     assert "挂载技能：web 面初筛" in system
-    entry = conn.execute(
-        "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid LIMIT 1"
-    ).fetchone()["what"]
-    assert "role=侦察员" in entry
+    entries = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid"
+        ).fetchall()
+    ]
+    assert any("role=侦察员" in entry for entry in entries)
 
 
 def test_worker_unknown_persona_keeps_free_text() -> None:

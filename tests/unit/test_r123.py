@@ -280,17 +280,36 @@ class TestR1:
     def test_write_op_ticket_suspends_with_paper_slot(
         self, evidence: Path, replay_raw: Path
     ) -> None:
-        """写操作票：replay 返回 None → R2/R3 图纸位悬置（拍板②，M5 接线）。"""
+        """锚上只有 declare_finding 受理票：R1 取票排除受理票（M5-31）——受理票的
+        raw_ref 恒等于 evidence_ref，旧逻辑"按 raw_ref 取最近一张"永远取到它，
+        R1 永远看到"非只读"而真重放一次都没跑过（实测一条 claim 连挂 27 轮）。
+        现口径：受理票不算"证据怎么来的"那张票，无从重放 → 悬置且零执行。"""
         conn = _make_db()
         task_id = ledger.start_task(conn, "t", "g").id
         fid = _claim(conn, str(evidence), task_id)
         _ticket_on(conn, task_id, str(evidence), tool="declare_finding")
         spy = SpyReplay(None)
         assert r1(conn, ledger.get_finding(conn, fid), spy.readonly_replay, "lab") is None
-        assert spy.calls == [("declare_finding", {"target": "10.0.0.5", "ports": "22"})]
+        assert spy.calls == []  # 受理票被排除，执行器一次都不该被拉出来
         assert ledger.get_finding(conn, fid).verify_state == "claimed"
         what = conn.execute("SELECT what FROM audit_log WHERE actor = 'judge'").fetchone()["what"]
-        assert "R2/R3" in what or "图纸位" in what
+        assert "原始工具小票" in what
+
+    def test_original_tool_ticket_wins_over_acceptance_ticket(
+        self, evidence: Path, replay_raw: Path
+    ) -> None:
+        """锚上同时有原始只读票与受理票（申报的同一步必然如此）：R1 取原始票重放，
+        不再被受理票遮蔽——M5-31 修复的主断言。"""
+        conn = _make_db()
+        task_id = ledger.start_task(conn, "t", "g").id
+        fid = _claim(conn, str(evidence), task_id)
+        _ticket_on(conn, task_id, str(evidence), tool="declare_finding")  # 受理票（更晚）
+        _ticket_on(conn, task_id, str(evidence), tool="nmap")  # 原始票（更早也在场）
+        replay_raw.write_text(GOOD_TXT, encoding="utf-8")
+        spy = SpyReplay(_out(raw_ref=str(replay_raw), summary="一致"))
+        row = r1(conn, ledger.get_finding(conn, fid), spy.readonly_replay, "lab")
+        assert row is not None and row.verify_state == "verified" and row.method == "rerun"
+        assert spy.calls == [("nmap", {"target": "10.0.0.5", "ports": "22"})]
 
     def test_replay_failure_suspends(self, evidence: Path, replay_raw: Path) -> None:
         conn = _make_db()

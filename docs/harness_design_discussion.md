@@ -2808,3 +2808,259 @@ findings 概览）；test_main 2（态势行存在 / 裁判关闭时告警）。
 **测试面（+2 例，翻新 4 处，全库 547 例）**：test_cli_view 新增"决策行 + 双图 +
 出场未过"一例，翻新两处标签断言；test_main 翻新 `第 1/M 步` 断言并新增"mock 运行
 可看到决策行"。ruff 全绿。
+
+## §98 M5-27 感知面闭环：工具签名进包 / 参数被拒可自纠 / 空转不拉铃
+
+实测日志（`logs/run.log`，12 步）暴露的不是模型能力问题，而是三处接缝：
+
+**① 工具签名不在感知面（P0）**：17 张小票里 12 张 `E_SCHEMA_TOOL`，全是猜参数
+（nmap 试 `args`/`scripts`/`service_detection`；declare_finding 试 `severity`/`target`/
+`level`；agent_run 缺 `mission`/`step_budget`）。根因是注意力包只有 goal/规划/图/
+小票/经验/知识/角色/证据摘录，**没有"可用工具 + 参数"**，系统提示词也只说"工具名/
+参数:值"的 JSON 形状。修复：`registry.tool_catalog()` 现场渲染签名（`name(必填*:类型)`
++ 一句用途 + 本 run 参数失败次数），`attention.build(tools=...)` 新增
+`## 可用工具（调用必须用下列参数名，勿自造）`一节。签名与 manifest 同源，不另写
+提示词副本；store 不 import tools，租界不破。
+
+**② 失败回执不带修正信息**：`E_SCHEMA_TOOL` 以前只说"未知参数 x"，模型只能再猜一轮。
+现在回执自带 `合法签名 ...`（`tool_signature(manifest)`）——一次失败即可改对，
+90 秒的试错链被压成一次往返。
+
+**③ 空转被当成成功**：agent_run 预算用尽（`ok=True, finished=False`）此前回执
+`exit_code=0`，失速计清零连败 → 铃永远不响。修复：`ToolOutput.made_progress`
+（默认 True，向后兼容），AgentRunTool 在未完工时置 False，摘要追加"（未完工）"；
+主循环失速计改吃 `exit_code == 0 and made_progress`。ok/finished 两轴语义不变
+（未完成仍不是失败），"有没有进展"另立字段。
+
+**④ 收工步零进展不许出场**：出场条 6 只看 `steps.status <> 'ok'`，而 status 语义是
+"这步跑完了"，工具全失败也记 ok。新增判据：**最近一步（收工步）有非 denied 回执
+且无一 exit=0 → 出场不过**。为什么只判最近一步：出场问的是"凭什么叫完成"，不是
+"一路没摔过"——历史失败步是试错的正常代价，追罚会把一次 typo 永久变成封印。
+denied 步不算零进展（与失速计同口径：工具压根没执行）。
+
+**⑤ worker 收拢带小票事实**：worker 的 `summary` 以前就是自己的 thought（"已把
+响应写入 res/raw"），主循环无法核实。现在追加最近 3 张小票摘要（`name exit=N:
+summary`），"嘴上说完工"与"真跑成了"在账上可分辨。
+
+**测试面（+13 例，全库 560 例）**：test_tools_registry 3（签名渲染/失败回执带签名/
+目录含失败计数）；test_attention 2（工具节渲染/未注入不渲染）；test_loop 2（签名进包/
+未完工回执计失速）；test_mission_board 1（未完工→made_progress=False + 摘要标记）；
+test_finalize 4（收工步零进展/历史失败不追罚/denied 不算/一步内有成功即通过）；
+test_worker 1（摘要带小票）。ruff 全绿。
+
+**遗留**：worker 仍未消费签名目录（worker 的 schema 失败只能靠自己重试）；
+`steps.status` 未新增 degraded（SQLite CHECK 需整表重建，收益不抵风险，改用
+tickets 聚合直查）。
+
+## §99 M5-28 能力面补口：只读情报工具 + worker 签名 + 出场明细进包
+
+第二次真模型跑（`logs/run.log`，13:57–14:06，4 步后被打断）验证了 §98 的修复，
+也把断点推到了下一层：**54 张小票里 49 张是 worker 点名不存在的工具**
+（bash 26 / shell 11 / run_command 5 / list_files 2 / bash_exec 2 / read_file /
+list_dir / http_get），而 worker 只有 `nmap + declare_finding`；任务是"纯被动
+侦察"，工单又禁止主动连接——能力面与任务类型不匹配，注定空转。
+
+**① 只读情报三件套（`secpt/tools/readonly.py`）**：`http_get`（GET → raw 证据，
+只认 http/https、512KB 上限）、`read_file` / `list_dir`（只读根 = raw + evidence，
+拒绝绝对路径与 `../` 逃逸）。为什么不是通用 shell：不执行外部命令、不提供写/删
+原语，模型读不到 .env；证据只能来自真实观测（GET 响应 / nmap 产物），
+"自己写份报告当证据"的路被堵死。三者 `read_only=True`——R1 可重放核验，
+`http_get` 响应落盘后 `declare_finding(evidence_ref=raw_ref)` → R1 重放 →
+verified(rerun) 整链已由单测钉住。两套 registry（主链 + worker）都装。
+
+**② worker 签名进话术**：`Worker._system_prompt` 先拼 `## 可用工具`（与主链同一
+份 registry 渲染），worker 不再靠猜；`worker.system.md` 同步写明"只能用登记过的
+工具、evidence_ref 必须是真实产物"。
+
+**③ 技能工具面一致性**：`Skill.tools` 新字段（YAML `tools:`），角色挂载后若该
+工具未登记，话术里明说"不要尝试（会被拒）"并 audit 留痕——技能教 shell、工具面
+没有 shell 的错位不再变成 49 张废票。`port-recon → nmap`、`web-surface → http_get`。
+
+**④ 出场失败明细进包**：`exit_failed` 弹回后把 `verdict.failures` 写进下一步的
+`plan_note`（`【出场未过·逐条修】…`），吸收一次即用掉。此前模型只知道"我说收工
+但被弹回"，于是继续加规划（上一 run 攒到 10 条 active）。
+
+**⑤ 提示词降 schema 摩擦**：`main.system.md` / `worker.system.md` 给出完整 JSON
+示例与类型硬约束（plan_updates 必须是字符串数组、args 值一律字符串）。上一 run
+每步都要重试一次（step1 一次 7 条对象），往返成本直接减半。
+
+**⑥ 未收尾 run 可见**：`ledger.unfinished_task` + `secpt run` 启动提示
+`【提示】检测到未收尾 run（task_id=…），可用 secpt resume … 续跑`——只提示不
+自动接管（新 goal 是新任务，静默接管会把两条任务线搅在一起）。
+
+**测试面（+10 例，全库 570 例）**：test_readonly_tools 6（证据落盘/协议拒绝/网络
+失败回执/根边界×2/只读声明 + http_get→R1 verified 端到端）；test_worker 1（签名进
+话术）；test_assets 1（技能缺工具提示+audit，两处旧断言从"取首行"改为"查全量"）；
+test_loop 1（出场明细进下一步包）；test_main 1（未收尾提示）。ruff 全绿。
+
+**遗留**：worker 仍无独立 steps 行（只能从 step_id 前缀看）；`http_get` 不做
+robots/速率治理，被动源的礼貌性靠工单约束；`SECPT_EVIDENCE_DIR` 只用于只读根，
+证据落盘仍统一进 raw。
+
+## §100 M5-29 可见性与执行力：worker 过程上屏 / 工作区三件套 / 计时与并发
+
+反馈两条：①"完善输出和日志，增强可读性"；②"补充工具，支持智能体自己写脚本、
+下载工具，提高运行效率，支持多并发"。
+
+**① worker 过程从"只有收拢摘要"变成实时上屏**：Worker 新增可选 ``observer``
+（``(事件名, 载荷)`` 契约，装配层用 :func:`main._bus_observer` 适配到 EventBus）。
+四个事件：``worker_step_started`` / ``worker_step_ended`` / ``worker_ticket`` /
+``worker_mission_ended``。CLI 渲染：
+
+```
+【主LLM】第 2/200 步 · 开始决策
+【workerA】第 1/2 步 · 开始
+【workerA】第 1 步完成（0.3s）：…
+【workerA·收单】完工 steps=1 findings=0 用时=0.5s
+【主LLM】第 2 步决策 · 1.2s：派一单给 worker（工具：agent_run）
+```
+
+为什么事件走总线而不是直接 print：worker 在 agent_run 的收拢窗内跑，事件与主链
+混排正是真实时序；``CliView`` 加行级锁保证多线程写同一面板不撕裂。观测失败一律
+吞掉（旁观者炸不能停工人），单测用 (name, payload) 签名钉住契约。
+
+**② 计时贯穿三层**：``ToolOutput.duration_ms``（registry 回执字段，loop/worker
+在 dispatch 外层计时填入）、``graph_changed.duration_ms``（整步耗时）、
+``run_ended.duration_ms/findings``（整轮耗时与发现数）。CLI 统一用 ``_fmt_ms``
+渲染（0.8s / 12.3s / 2m05s）——事件载荷保持纯数字，显示口径只有一处。
+
+**③ 工作区三件套（``secpt/tools/workspace.py``）**：
+- ``write_file``：写 ``work/``（默认 ``SECPT_WORK_DIR``），多行正文豁免控制字符
+  检查（``ToolManifest.free_text``）——否则脚本根本写不出来；只写工作区，
+  **绝不碰 raw/evidence**，返回 raw_ref=""（自撰文件不是证据锚）。
+- ``run_command``：``program`` + ``args`` 经 shlex 解析成 argv，**拒绝 shell
+  元字符**（``;|&$><` `` 与控制字符），走注入的 ``ArgvRunner``（docker 隔离档
+  同权），超时 1..600s、输出 200KB 上限，stdout/stderr 落 raw → 可作证据锚。
+- ``download``：只认 http/https、32MB 上限、落 ``work/bin/``，可选 chmod +x。
+
+**④ 并发**：三个新工具全部 ``parallel_safe=True``（写不同文件/独立进程），
+主链与 worker 两套 registry 都装上；worker 线程数仍由 ``[budget].workers``
+（``SECPT_WORKERS`` 可覆盖）决定，多单派发天然并行。
+
+**⑤ 顺手补的安全口**：``ToolManifest.free_text`` 只对 write_file.content 开
+——执行类参数（program/args）继续按控制字符一刀切拒绝。
+
+**测试面（+14 例，全库 584 例）**：test_workspace_tools 10（写入/越界/超限/多行
+豁免、argv 无 shell、元字符拒绝、非零退出、缺二进制、下载落盘+可执行位、协议与
+越界拒绝、并行声明）；test_worker 1（过程事件）；test_cli_view 1（worker 行 +
+耗时）；test_loop 1（事件载荷带耗时/findings）；test_main 1（决策行新格式断言）。
+ruff 全绿；mock 全流程与真实 ``write_file → run_command`` 冒烟通过。
+
+**遗留**：① docker 隔离档下 ``run_command``/``write_file`` 的 ``work/`` 尚未挂进
+容器（容器内看不到宿主工作区），当前默认 shell 档不受影响；② ``run_command``
+默认 tier=low，建议在 profile ``[guard].tiers`` 里显式设 ``run_command = "high"``
+（工作区工具拥有真实执行力，是否要人点头由靶场档案决定）；③ ``download`` 不做
+签名/哈希校验——下载物是否需要可信来源校验，留给具体任务的工单约束。
+
+## §101 M5-30 修通证据回读链：并发锚点 / 路径口径 / 内容进包 / 规划收口
+
+第二次真模型跑（49 步、8m08s、`stalled`、0 findings）的账本复盘把断点钉死在三处：
+162 张票里有 46 张"只读根内找不到文件"、98 张 read_file 只覆盖 26 个文件、
+唯一一张 agent_run 票死于 sqlite 跨线程。逐条修复：
+
+**① 并发派单下的锚点解析（P0）**：`MissionBoard.submit` 由线程池线程执行，却用主
+线程的连接调 resolver → `ProgrammingError`。`_board` 的 resolver 改为每次开短
+连接（`connect(db_path)` → `latest_task` → 关）；新增测试在线程池里 submit 复现。
+
+**② 只读路径口径自洽（P0）**：`http_get` 回执给 `raw/http_x.txt`（cwd 相对），
+而 `read_file` 的根已是 raw——模型照抄必然失败（实测 46 张废票，第 49 步才自己
+悟出去前缀）。`_RootedTool._resolve` 现在同时接受"裸名"与"raw/xxx"两种写法
+（都必须在白名单根内），错误文案直接给出两种合法样例。
+
+**③ 读到的内容要能进下一步（P0）**：`read_file` 以前 `raw_ref=""`，注意力包的
+"证据摘录"只认有 raw_ref 的票——于是"读到了什么"永远回不到模型视野，只能反复
+重读（98 张票 / 26 文件）。现在 `read_file` 返回 `raw_ref=被读文件`（只读工具，
+R1 重放天然安全），摘录窗口 3→4 张票、600→800 字、压成 320 字。
+
+**④ nmap 摘要是启动 banner（P0）**：`_single_line(stdout)` 取到
+`Starting Nmap 7.95 … at …`，端口结论被埋进 raw。新增 `_port_digest`：优先
+提取 `^\d+/(tcp|udp)` 行（最多 3 条），无端口才回落首行。真实冒烟：
+`22/tcp open   ssh     OpenSSH 10.0p2 Debian 8；80/tcp closed http`。
+
+**⑤ 规划收口压力（P1）**：一轮攒到 61 条 active，出场条 5 必挂，而运行期零压力。
+新增 `_PLAN_OPEN_LIMIT=20`：超限时包内明说「先 plan_done/plan_cancel 收口」，
+且本步 `plan_updates` 不落账（提交后 audit 点名，绝不静默）；教练提示改为
+「优先收口、给可执行动作，不要重建规划」。
+
+**⑥ 默认值说清后果**：启动态势行改为
+`验收=未配置（0 findings 也可收工）`——默认关的开关必须让人看见代价。
+
+**测试面（+5 例，全库 589 例）**：test_main 1（线程池 submit）、test_readonly_tools
+2（raw/ 前缀两种写法）、test_tools_registry 1（nmap 端口摘要）、test_loop 1
+（规划积压不再落账 + audit）。ruff 全绿；mock 全流程与真实 nmap/http_get 冒烟通过。
+
+**遗留**：`http_get` 不做去重（同一 URL 两次抓到两份相同证据，属模型行为）；
+`agent_run` 失败后是否重试仍由主 LLM 判断（可在下一轮把"worker 通道可用性"写进包）。
+
+## §102 M5-31 运行复盘修复（logs/run.log 三大根因）：裁判取票 / 证据带宽 / 空转拉铃
+
+对真实联网 run（task a1c2a633，aimohu.com 资产测绘，17m29s / 43 步 / E_WALL / 0
+verified）的复盘钉出三个根因，本卡逐个补焊。全部修复以"复刻原故障形态"的冒烟
+验证收口（受理票遮蔽场景 → verified(rerun)+normal；重复申报 → 拦截 1 行；
+同文件重读 → 第 4 步 E_STALL）。
+
+**根因①：R1 取票被 declare_finding 受理票遮蔽（本轮 run 失败的直接原因）。**
+受理票的 raw_ref 恰好等于 evidence_ref（受理工具署名即锚点），R1"按 raw_ref 取
+最近一张票"永远取到受理票 → "非只读，永不 rerun" → 一条 claim 被连续悬置 27 轮，
+R1 一次都没跑过；claimed 永悬置 → 出场第 2 验死锁 → 模型为过关重复申报 → E_WALL。
+修：R1 取票排除 declare_finding（`tool_name != 'declare_finding'`）——原始工具票
+（http_get/nmap）才是"证据怎么来的"那张票；锚上只有受理票 = 证据不是本 run 任何
+工具产的，如实悬置交 R2/R3。
+
+**根因②（配套）：悬置无上限。** sweep 每步全量重扫 claimed，无法判真的 claim
+每轮重放/查账纯烧且无新信息。**迁移 0006**：findings 增 `sweep_count`（默认 0）；
+sweep 单轮上限 `_SWEEP_MAX_PASSES=6`，到顶跳过、每轮摸过的 claim 计数 +1；
+出场条 2 据此点名"裁判已多轮无法判真（重复申报同名 finding 无益……）"，把死循环
+暴露给人。
+
+**根因③：重复申报无拦截。** 出场被弹回后模型原样重发 declare_finding（悬置 1 条
+攒成 2 条）。修：`ledger.pending_duplicate(title, evidence_ref)` 两口径——claimed
+同名（任意锚）拦；verified 同名**同锚**拦；verified 同名**不同锚**放行（那是 R2
+双路径的燃料，不能一刀切）；rejected 永不拦（带新证据重申报合法）。主循环与
+worker 两个申报点同装，拦截有 audit 痕。
+
+**根因④：证据带宽不足造成 20+ 步重读空转。** read_file 摘要只给前 3 行/200 字符、
+evidence_digest 窗口 4 张且不去重，模型"读 60 行只能看见 200 字符"，crt.sh 正文
+在任何通道都到不了眼前。修三处：read_file 增 `offset` 参数（续读）+ 摘要带
+"共 N 行/本读区间/剩 M 行：offset=… 续读"+ 摘要截取本读区间头部 300 字符；
+http_get 摘要带关键响应头（Server/Content-Type/Content-Length/ETag/Location，
+保留原始头名大小写）+ 同 URL 重复抓取计数进摘要（"本 run 第 N 次，首见 raw/…"；
+**不做缓存**——R1 重放必须真复跑，缓存命中=自己跟自己比对，等于架空核验）；
+evidence_digest 窗口 4→8 张、按 raw_ref 去重（原始票与受理票同 raw_ref 只摘一次）。
+
+**根因⑤：失速计对"空转"全盲。** 同一 crt.sh URL 抓 8 次、同一对文件读 10+ 步，
+失败计（回执 exit=0 清零）与重复规划计（规划每步换个说法）都不响。修：失速计第
+三口径 `observe_calls`——同一 (工具, 参数) 调用**累计**满 `[stall].repeat_calls`
+（默认 4）拉铃，中间插别的调用不洗白；reset（救场）三口径一起清。配置进
+limits.py（坏值 E_PROFILE）与 profile.toml。
+
+**根因⑥：并发语义两处漏洞。** write_file/run_command/download 原声明
+parallel_safe=True，但"先写脚本再执行"的顺序依赖不被并发保证（实测 write_file 与
+run_command 同步并发，python 打开了尚未写完的脚本路径）——三者一律改保守串行，
+run_command 的 raw 封面带 `$ cwd(...)`（相对路径"在哪找"可复算）。worker 内部
+dispatch 原是串行 for 循环：抽出 `core/dispatch.py`（M5-12 保守批口径唯一实现点），
+主循环与 worker 共用；worker 开关由装配层给（探针不在场时开启），多张慢票真并发
+（Barrier 铁证）。
+
+**根因⑦：worker 失忆。** worker 每步 user 消息只有工单目标/步数/申报数，自己
+上一步的回执完全看不见（实测 10 步里 6 步在重复昨天的动作）。修：最近 8 张回执
+随消息进包（"重复同一动作前先看这里"）。
+
+**可观测性**：loop 记录 llm_ms/tools_ms 分解——graph_changed 带
+decision_ms/tools_ms（CLI 决策行改"决策 Xs · 工具 Ys"，不再把 nmap 超时算进
+"决策 2m05s"），run_ended 带 llm_ms/tools_ms（出口行带"（决策 X · 工具 Y）"）。
+
+**测试面（+24 例，全库 605 例）**：test_budget_fsm_stall 4（重复计拉铃/累计口径/
+reset 三清/坏值）；test_judge 3（sweep 计数推进/到顶跳过/出场升级提示）；
+test_r123 +1 翻新 1（受理票排除后零执行 / 原始票胜出 verified(rerun)）；
+test_loop 3（同名拦截 / 重复调用第 4 步拉铃 / run_ended 时长分解）；
+test_readonly_tools 3（offset 续读 / 头摘要 / 重复抓取提示）；test_worker 2
+（回执记忆 / 内部并发 Barrier）；test_workspace_tools 翻新 1（三件套改串行）；
+test_limits 2 处翻新（repeat_calls 默认/读取）；test_store_migrate 翻新（v6）；
+test_coach 3 例与 test_e2e 1 例按"重复第 4 次比连败第 5 次先响"的新语义翻新。
+ruff 全绿；三场景冒烟（§102 开头）全过。
+
+**遗留**：① 悬置上限 6 是硬编码常量，未进 profile；② run_command 的 program
+仍无白名单（Guard 关档时可执行任意 argv——安全默认值另卡处理）；③ http_get
+重复计数是进程内状态，resume 后从零起算；④ plan_review 仍按每 5 步节拍触发，
+"仅当双图零增长才重估"的条件触发未做。

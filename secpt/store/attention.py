@@ -45,6 +45,7 @@ class AttentionPack(BaseModel):
     experience_snapshot: list[str] = Field(default_factory=list)  # M2：三态规则接线位
     knowledge_snapshot: list[str] = Field(default_factory=list)  # M5：知识库只读参考
     role_catalog: list[str] = Field(default_factory=list)  # M5-16：可派角色清单
+    tools_catalog: list[str] = Field(default_factory=list)  # M5-27：工具签名目录
     evidence_digest: list[str] = Field(default_factory=list)  # M5-25：raw 证据摘录
     findings_digest: list[str] = Field(default_factory=list)  # M5-25：已申报 findings
 
@@ -67,6 +68,13 @@ class AttentionPack(BaseModel):
             or "- （本任务还没有任何小票）"
         )
         lines.append(f"## 最近小票\n{tickets}")
+        if self.tools_catalog:
+            # M5-27：工具签名必须每次都在场——模型看不到参数名就只能猜，
+            # 实测一轮 12/17 张失败小票全是猜错参数（不是不会打，是不知道签名）。
+            lines.append(
+                "## 可用工具（调用必须用下列参数名，勿自造）\n"
+                + "\n".join(f"- {item}" for item in self.tools_catalog)
+            )
         if self.experience_snapshot:
             lines.append("## 可用经验\n" + "\n".join(f"- {e}" for e in self.experience_snapshot))
         if self.knowledge_snapshot:
@@ -127,11 +135,14 @@ def build(
     roles: Sequence[str] = (),
     evidence_digest: Sequence[str] = (),
     findings_digest: Sequence[str] = (),
+    tools: Sequence[str] = (),
 ) -> AttentionPack:
     """从账本事实装配注意力包（纯函数现打包即弃；经验经三态投影进包）。
 
     ``knowledge`` 是已渲染好的知识参考行（选择与截断在 assets 层做），本层
     只负责章节渲染——store 不 import 文件资产库，分层保持单向。
+    ``tools`` 同理：签名行由 tools/registry 渲染（唯一握 manifest 的层），
+    本层只排队进包；空元组 = 装配方没给目录（老调用方零改动）。
     """
     return AttentionPack(
         goal=goal,
@@ -145,6 +156,7 @@ def build(
         experience_snapshot=_project_experience(experiences),
         knowledge_snapshot=list(knowledge),
         role_catalog=list(roles),
+        tools_catalog=list(tools),
         evidence_digest=list(evidence_digest),
         findings_digest=list(findings_digest),
     )

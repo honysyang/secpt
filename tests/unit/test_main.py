@@ -10,10 +10,12 @@ import io
 import json
 import pathlib
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from secpt import main as main_mod
+from secpt.core.mission_board import Mission
 from secpt.errors import LlmError
 from secpt.llms.client import StepOutput
 from secpt.llms.fake import FakeLLM
@@ -62,6 +64,41 @@ def test_run_mock_flow_bubbles_and_normal_exit(
     assert "【主LLM → nmap】" in out  # 工具失败也落回执 → 小票摘要行
     assert "【出口】exit_kind=normal" in out
     assert "task_id=" in out and "run_id=" in out
+
+
+def test_run_warns_unfinished_run(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M5-28：账上留着 running 的 run → 启动时提示可 resume（不自动接管）。"""
+    conn = connect(cli_env)
+    stale = ledger.start_task(conn, input_text="上次被打断", goal="10.0.0.9")
+    ledger.start_run(conn, stale.id, config={"objective": "o", "success_criteria": "s"})
+    conn.close()
+
+    rc, _task = _run(["run", "--goal", "对内网 10.0.0.1 做端口摸底"], cli_env)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"未收尾 run（task_id={stale.id}）" in out
+    assert f"secpt resume {stale.id}" in out
+
+
+def test_board_resolver_is_thread_safe(cli_env: pathlib.Path) -> None:
+    """M5-30：并发派单时 submit 发生在别的线程，锚点解析不能借主线程连接。"""
+    conn = connect(cli_env)
+    task = ledger.start_task(conn, input_text="锚点线程安全", goal="10.0.0.1")
+    conn.close()
+
+    board = main_mod._board(connect(cli_env))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outer = pool.submit(
+                board.submit, Mission(persona="p", goal="线程里派单", step_budget=1)
+            )
+            result = outer.result(timeout=30).result(timeout=30)
+    finally:
+        board.shutdown()
+    assert task.id  # 账本里确有可解析的 task
+    assert result.ok is True
 
 
 def test_run_empty_goal_falls_to_chat_mode(
@@ -465,7 +502,10 @@ def test_posture_warns_when_judge_off(
 def test_mock_run_prints_step_decision(
     cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """M5-26：CLI 要展示每步的思考与所用工具，而不是只报"开始"。"""
+    """M5-26/29：CLI 展示每步思考与工具，并带该步耗时。"""
     main_mod.main(["run", "--goal", "对内网 10.0.0.1 做端口摸底"])
     out = capsys.readouterr().out
-    assert "步决策：摸扫一圈端口（演示步）（工具：nmap）" in out
+    assert "第 1 步决策" in out
+    assert "摸扫一圈端口（演示步）（工具：nmap）" in out
+    assert "【主LLM → nmap】" in out
+    assert "【出口】exit_kind=normal" in out

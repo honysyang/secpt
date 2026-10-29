@@ -47,6 +47,10 @@ class ToolManifest(BaseModel):
     # 默认 False（未知即不可并发）——只对"无共享可变状态"的工具开（nmap 子进程/
     # agent_run 任务板）；写账本类（declare_finding）永远串行。
     parallel_safe: bool = False
+    # free_text（M5-29）：允许含换行/制表等控制字符的参数名清单。
+    # 为什么需要：write_file 的 content 天生多行，若按"控制字符注入"一刀切拒绝，
+    # 智能体就写不出脚本；执行类参数（run_command 的 program/args）永远不放行。
+    free_text: tuple[str, ...] = ()
     hash: str | None = None
 
 
@@ -60,6 +64,9 @@ class ToolOutput(BaseModel):
     ``probe_events``（M3-3 附加字段）：本次执行观测窗交割的客观事件——空元组
     = 探针没开或没抓到；落账转基元参数是 loop 的活，本层只负责把事实挂在
     回执上。
+    ``made_progress``（M5-27 附加字段）：exit_code==0 只代表"没炸"，不代表
+    "有进展"——agent_run 预算用尽未收工时显式声明 False，失速计据此收数，
+    避免空转被当成一次成功。默认 True 保持既有工具语义不变。
     """
 
     tool_name: str
@@ -71,6 +78,10 @@ class ToolOutput(BaseModel):
     hitl_approved: bool = False
     hitl_note: str = ""
     probe_events: tuple[CaptureEvent, ...] = ()
+    made_progress: bool = True
+    # duration_ms（M5-29 附加字段）：本次执行耗时，纯观测元数据——由主循环/worker
+    # 在 dispatch 外层计时填入，工具自己不必关心；只进事件与日志，不落库。
+    duration_ms: int = 0
 
 
 class ToolAdapter(Protocol):
@@ -116,6 +127,20 @@ def reject(
     )
 
 
+def tool_signature(manifest: ToolManifest) -> str:
+    """工具签名的一行式渲染：``name(必填*, 可选:类型)``。
+
+    为什么签名必须由 manifest 现场渲染：模型猜错参数名是实测最大失败源
+    （一轮 17 张小票里 12 张 E_SCHEMA_TOOL）。签名若另写一份提示词副本，
+    迟早与 manifest 漂移；同源渲染则"改登记卡即改包"，不存在两套真相。
+    """
+    parts = [
+        f"{key}{'*' if key in manifest.required else ''}:{kind}"
+        for key, kind in manifest.params.items()
+    ]
+    return f"{manifest.name}({', '.join(parts)})"
+
+
 def manifest_hash(manifest: ToolManifest) -> str:
     """manifest 内容的确定性 sha256（不含 hash 字段本身）。"""
     payload = manifest.model_dump(exclude={"hash"}, exclude_none=True)
@@ -150,6 +175,26 @@ class ToolRegistry:
     def manifests(self) -> list[ToolManifest]:
         """``secpt tools`` 的货架清单（manifest+hash 一并露出）。"""
         return [adapter.manifest for adapter in self._adapters.values()]
+
+    def tool_catalog(self) -> list[str]:
+        """注意力包用的一行式工具目录（M5-27）：签名 + 用途 + 本 run 参数失败数。
+
+        为什么要进包：模型此前只能从一句描述里猜参数名——实测 12/17 张失败小票
+        全是猜错参数/缺必填。签名是"可执行信息"，必须每步都在感知面上；渲染与
+        manifest 同源（不是提示词副本），改登记卡即改包。失败计数让"反复试错"
+        从隐性变成显性：同一工具被拒多次时，行内直接点名，模型不必再猜第二轮。
+        """
+        lines: list[str] = []
+        for manifest in self.manifests():
+            line = tool_signature(manifest)
+            if manifest.description:
+                line += f" — {manifest.description}"
+            with self._lock:
+                failures = self.schema_failures.get(manifest.name, 0)
+            if failures:
+                line += f"（本 run 已因参数不合失败 {failures} 次，务必按上述参数名）"
+            lines.append(line)
+        return lines
 
     def tier_of(self, name: str) -> str:
         """货架分级查询（CLI 展示用）：guard 不上班时空串（M1/M2 老口径）。"""
@@ -190,7 +235,11 @@ class ToolRegistry:
         if problem is not None:
             with self._lock:
                 self.schema_failures[name] = self.schema_failures.get(name, 0) + 1
-            return reject(f"E_SCHEMA_TOOL: {problem}", name, args)
+            # 回执自带合法签名（M5-27）：模型一次猜错后不必再靠试错逼近参数名，
+            # 修正信息与失败原因同一条小票送达（感知面闭环，不额外消耗一步）。
+            return reject(
+                f"E_SCHEMA_TOOL: {problem}；合法签名 {tool_signature(tool.manifest)}", name, args
+            )
         # M3-1 拦截点（§2.1 L102"调用前"）：schema 合格的调用才劳 Guard 动闸——
         # 白名单在外、分级在内两级语义；拒绝不发执行器，回执照落小票（audit 归 loop）。
         # M3-2：HIGH 级带 HITL 准旗回家；无审批人=缺通道 fail-closed；拒=走 denied 通道。
@@ -259,6 +308,8 @@ class ToolRegistry:
                     int(value) if kind == "int" else float(value)
                 except (TypeError, ValueError):
                     return f"参数 {key} 需 {kind}, 实得 {value!r}"
+            if key in manifest.free_text:
+                continue  # 文本正文：多行是常态（仍然只落盘，不参与任何解释执行）
             if any(control in value for control in CONTROL_CHARS):
                 return f"参数 {key} 含控制字符"
         return None
@@ -274,4 +325,5 @@ __all__ = [
     "ToolOutput",
     "ToolRegistry",
     "manifest_hash",
+    "tool_signature",
 ]

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from secpt.errors import SecptError
+from secpt.finalize.exit_checklist import run_checklist
 from secpt.judge.profile import GroundTruth, JudgeProfile, load_profile
 from secpt.judge.r0_self import r0
 from secpt.judge.r4_oracle import r4
@@ -331,3 +332,63 @@ class TestDeclareTool:
             "declare_finding", {"title": "t", "detail": "d", "evidence_ref": "/tmp/x"}
         )
         assert good.exit_code == 0 and good.summary != ""
+
+
+# ---------- M5-31 sweep 悬置上限：到顶跳过 + 计数推进 -------------------------------
+
+
+class TestSweepSuspensionCap:
+    def _enabled_profile(self) -> JudgeProfile:
+        return JudgeProfile(
+            enabled=True,
+            ground_truth=(GroundTruth(id="GT-NONE", pattern="never-match-xyz"),),
+            source="cap-test",
+        )
+
+    def _stuck_claim(self, conn: sqlite3.Connection, tmp_path: Path) -> str:
+        """铺一条"过 R0 但谁也判不了"的悬案：真实文件锚（R0 过）、无票面（R1 悬置）、
+        无对侧无流量锚（R2/R3 悬置）——每轮 sweep 都只能悬置的真实形态。"""
+        evidence = tmp_path / "stuck.txt"
+        evidence.write_text("真实存在的证据文件，但没有任何小票产过它", encoding="utf-8")
+        task = ledger.start_task(conn, "t", "g")
+        ledger.start_run(conn, task.id, config={})
+        return ledger.append_finding(conn, task.id, "悬案", "锚无票面", str(evidence)).id
+
+    def test_sweep_bumps_count_each_pass(self, tmp_path: Path) -> None:
+        conn = migrate_store.connect(":memory:")
+        fid = self._stuck_claim(conn, tmp_path)
+        for round_no in range(1, 4):
+            assert sweep(conn, ledger.latest_task(conn).id, self._enabled_profile()) == []
+            assert ledger.get_finding(conn, fid).sweep_count == round_no
+
+    def test_sweep_skips_claim_past_cap(self, tmp_path: Path) -> None:
+        """悬置到顶（sweep_count ≥ 6）的 claim 不再进裁决——重复裁判无新信息，
+        出场清单据 sweep_count 给"裁判无法判真"的升级提示。"""
+        conn = migrate_store.connect(":memory:")
+        fid = self._stuck_claim(conn, tmp_path)
+        task_id = ledger.latest_task(conn).id
+        for _ in range(6):
+            sweep(conn, task_id, self._enabled_profile())
+        assert ledger.get_finding(conn, fid).sweep_count == 6
+        # 第 7 轮：跳过（audit 无新增裁决行），计数冻结。
+        judge_rows = conn.execute("SELECT COUNT(*) FROM audit_log WHERE actor='judge'").fetchone()[
+            0
+        ]
+        sweep(conn, task_id, self._enabled_profile())
+        assert ledger.get_finding(conn, fid).sweep_count == 6
+        assert (
+            conn.execute("SELECT COUNT(*) FROM audit_log WHERE actor='judge'").fetchone()[0]
+            == judge_rows
+        )
+
+    def test_exit_checklist_names_stuck_claims(self, tmp_path: Path) -> None:
+        """出场条 2 的升级提示：sweep_count ≥ 6 的悬置行被点名，路径指回人工。"""
+        conn = migrate_store.connect(":memory:")
+        self._stuck_claim(conn, tmp_path)
+        task_id = ledger.latest_task(conn).id
+        conn.execute("UPDATE findings SET sweep_count = 6")
+        conn.commit()
+        verdict = run_checklist(conn, task_id)
+        assert not verdict.passed
+        assert any("裁判已多轮无法判真" in failure for failure in verdict.failures)
+        assert any("重复申报同名 finding 无益" in failure for failure in verdict.failures)

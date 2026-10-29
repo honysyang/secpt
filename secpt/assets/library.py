@@ -47,6 +47,7 @@ class Skill(BaseModel):
     id: str
     name: str
     description: str = ""
+    tools: tuple[str, ...] = ()
     prompts: tuple[str, ...] = ()
     body: str = ""
 
@@ -187,6 +188,7 @@ def _parse_skill(path: Path) -> Skill:
         id=str(meta.get("id") or path.stem),
         name=str(meta.get("name") or path.stem),
         description=str(meta.get("description") or ""),
+        tools=_str_tuple(meta.get("tools")),
         prompts=_str_tuple(meta.get("prompts")),
         body=body,
     )

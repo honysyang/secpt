@@ -11,7 +11,13 @@ import pytest
 
 from secpt.errors import McpError
 from secpt.tools.adapters import AgentRunTool, NmapTool
-from secpt.tools.registry import ToolManifest, ToolOutput, ToolRegistry, manifest_hash
+from secpt.tools.registry import (
+    ToolManifest,
+    ToolOutput,
+    ToolRegistry,
+    manifest_hash,
+    tool_signature,
+)
 
 
 class EchoLikeTool:
@@ -115,6 +121,54 @@ def test_dispatch_int_param_type_checked(tmp_path: Path) -> None:
     bad = registry.dispatch("agent_run", {"mission": "m", "persona": "p", "step_budget": "十"})
     assert "需 int" in bad.summary
     assert registry.schema_failures.get("agent_run") == 1
+
+
+# ---------- M5-30：nmap summary 给端口结论而不是启动 banner ----------
+
+
+def test_nmap_summary_prefers_port_lines(tmp_path: Path) -> None:
+    binary = _write_script(
+        tmp_path,
+        'echo "Starting Nmap 7.95 ( https://nmap.org ) at 2026-10-29 10:23 EDT"\n'
+        'echo "22/tcp  open  ssh     OpenSSH 9.2"\n'
+        'echo "80/tcp  open  http    nginx 1.24"\n'
+        'echo "Nmap done: 1 IP address (1 host up) scanned in 8.10 seconds"',
+    )
+    out = NmapTool(binary=binary, raw_dir=tmp_path / "raw").run({"target": "10.0.0.5"})
+    assert out.exit_code == 0
+    assert "22/tcp  open  ssh" in out.summary
+    assert "80/tcp  open  http" in out.summary
+    assert "Starting Nmap" not in out.summary  # banner 不再是摘要
+
+
+# ---------- M5-27：签名进包 / 失败回执带签名 ----------
+
+
+def test_tool_signature_marks_required_params() -> None:
+    manifest = ToolManifest(
+        name="nmap", params={"target": "str", "ports": "str"}, required=("target",)
+    )
+    assert tool_signature(manifest) == "nmap(target*:str, ports:str)"
+
+
+def test_schema_failure_receipt_carries_signature(tmp_path: Path) -> None:
+    """猜错参数时回执自带合法签名：一次失败就能改对，不必再靠试错逼近。"""
+    registry = ToolRegistry([NmapTool(raw_dir=tmp_path / "raw")])
+    out = registry.dispatch("nmap", {"target": "10.0.0.5", "args": "-sV"})
+    assert out.exit_code is None
+    assert "合法签名 nmap(target*:str, ports:str)" in out.summary
+
+
+def test_tool_catalog_lists_signatures_and_failure_count(tmp_path: Path) -> None:
+    """目录与 manifest 同源；同一工具反复被拒时行内点名失败次数。"""
+    registry = ToolRegistry([NmapTool(raw_dir=tmp_path / "raw")])
+    assert registry.tool_catalog() == [
+        "nmap(target*:str, ports:str) — nmap 端口与服务扫描（-sV 恒开）"
+    ]
+    registry.dispatch("nmap", {})  # 缺 target
+    registry.dispatch("nmap", {"target": "x", "scripts": "http-title"})  # 未知参数
+    line = registry.tool_catalog()[0]
+    assert "已因参数不合失败 2 次" in line
 
 
 # ---------- 禁递归按调用栈（§3.6 规则 2） ----------

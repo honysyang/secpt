@@ -67,15 +67,29 @@ def run_checklist(
     failures.extend(_graph_gaps(conn, task_id))
 
     # 条 2：claimed 悬置=0——所有 finding 必须落 verified/rejected 终态。
+    # M5-31 文案补"勿重复申报"：真实 run 实测模型为过关反复申报同名 finding
+    # （1 条攒成 2 条直到 E_WALL）——失败提示要把"这条路不通"明说，并把
+    # 可用的收口路径列出来。sweep_count ≥ 6 = 裁判多轮无法判真（M5-31 悬置上限）。
     pending = conn.execute(
         "SELECT COUNT(*) FROM findings WHERE task_id = ? AND verify_state = 'claimed'",
         (task_id,),
     ).fetchone()[0]
     if pending:
+        stuck = conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE task_id = ? AND verify_state = 'claimed'"
+            " AND sweep_count >= 6",
+            (task_id,),
+        ).fetchone()[0]
+        stuck_note = (
+            f"；其中 {stuck} 条裁判已多轮无法判真（重复申报同名 finding 无益，"
+            "请补充可重放证据 / 配置 [[ground_truth]] / 开启 [probe] / 人工 manual）"
+            if stuck
+            else ""
+        )
         failures.append(
             f"claimed 悬置 {pending} 条未收口（需 verified/rejected 终态；"
             "若无 R4/探针/只读重放，写操作 claim 无法验真——检查 profile 的 "
-            "ground_truth 或开启 [probe]）"
+            f"ground_truth 或开启 [probe]）{stuck_note}"
         )
 
     # 条 3：进场三问齐全——goal + objective/success_criteria 从账本还原。
@@ -128,6 +142,27 @@ def run_checklist(
             f"步骤未全部完成：{len(bad_steps)} 步非 ok"
             f"（如 step {bad_steps[0]['step_no']} status={bad_steps[0]['status']}）"
         )
+
+    # 条 6 补充（M5-27）：收工步零进展——最后一次 done 落在"工具全失败"的步上。
+    # 为什么只判最近一步、不判全 run：出场问的是"你凭什么叫完成"，不是"你一路
+    # 没摔过"。历史失败步是试错的正常代价（typo 改对即继续），追罚会让一次
+    # 失败永久封印出场；而"最后一步全失败还声称收工"正是实测的假完成形态。
+    # denied 步不算零进展（与失速计同口径）：护栏拒绝 = 工具压根没执行，
+    # 病因在授权不在打法，把它记成"没干成"只会误导出场结论。
+    barren = [
+        int(row["step_no"])
+        for row in conn.execute(
+            "SELECT s.step_no FROM steps s WHERE s.task_id = ? AND s.status = 'ok'"
+            " AND s.step_no = (SELECT MAX(step_no) FROM steps"
+            "                  WHERE task_id = ? AND status = 'ok')"
+            " AND EXISTS (SELECT 1 FROM tickets t WHERE t.step_id = s.id"
+            "             AND t.summary NOT LIKE 'E_GUARD_DENY%')"
+            " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.step_id = s.id AND t.exit_code = 0)",
+            (task_id, task_id),
+        ).fetchall()
+    ]
+    if barren:
+        failures.append(f"收工步零进展（step {barren[0]}）：本步工具全部失败，不许正常收工")
 
     return ExitVerdict(passed=not failures, failures=failures)
 

@@ -9,7 +9,10 @@
 - ``[budget].workers``：任务板 worker 线程数（默认 3；``SECPT_WORKERS`` 仍可覆盖，
   保留给多实例部署的临时调参）；
 - ``[stall].failures``：连续工具失败阈值（默认 5，M1 失速计语义）；
-- ``[stall].repeat_plans``：连续提出同一规划的阈值（默认 2，文档 L84 重复抑制）。
+- ``[stall].repeat_plans``：连续提出同一规划的阈值（默认 2，文档 L84 重复抑制）；
+- ``[stall].repeat_calls``：同一 (工具, 参数) 调用累计阈值（默认 4，M5-31）——
+  同 URL 反复 GET / 同文件反复读 / 同参数反复扫描的"原地打转"在调用层，
+  前两个口径都探不到。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ _DEFAULT_MAX_STEPS = 200
 _DEFAULT_WORKERS = 3
 _DEFAULT_STALL_FAILURES = 5
 _DEFAULT_STALL_REPEAT_PLANS = 2
+_DEFAULT_STALL_REPEAT_CALLS = 4
 
 
 class LimitsConfig(BaseModel):
@@ -34,6 +38,7 @@ class LimitsConfig(BaseModel):
     workers: int = _DEFAULT_WORKERS
     stall_failures: int = _DEFAULT_STALL_FAILURES
     stall_repeat_plans: int = _DEFAULT_STALL_REPEAT_PLANS
+    stall_repeat_calls: int = _DEFAULT_STALL_REPEAT_CALLS
 
 
 def load_limits_config(path: str | None) -> LimitsConfig:
@@ -63,6 +68,9 @@ def load_limits_config(path: str | None) -> LimitsConfig:
         ),
         stall_repeat_plans=_positive(
             stall_sec.get("repeat_plans"), _DEFAULT_STALL_REPEAT_PLANS, "stall.repeat_plans"
+        ),
+        stall_repeat_calls=_positive(
+            stall_sec.get("repeat_calls"), _DEFAULT_STALL_REPEAT_CALLS, "stall.repeat_calls"
         ),
     )
 

@@ -59,6 +59,14 @@ def active(conn: sqlite3.Connection, task_id: str) -> list[PlanRow]:
     return [PlanRow.model_validate(dict(r)) for r in rows]
 
 
+def active_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """当前 active 规划条数（M5-30：运行期收口压力的判据）。纯读。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM plans WHERE task_id = ? AND status = 'active'", (task_id,)
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 def latest_id(conn: sqlite3.Connection, task_id: str) -> str | None:
     """最近一条规划行 id（教练改规划时作 parent_id 指向上版）。纯读。"""
     row = conn.execute(

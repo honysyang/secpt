@@ -50,6 +50,72 @@ def test_cli_view_tolerates_missing_payload_keys(
     assert "【出口】exit_kind=?" in out
 
 
+def test_cli_view_renders_worker_events_and_durations(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M5-29：worker 每步/每票上屏，主链与 worker 的耗时都人类化。"""
+    bus = EventBus()
+    bus.subscribe(CliView())
+    bus.emit("run_step_started", step_no=1, max_steps=10)
+    bus.emit(
+        "ticket_appended",
+        tool_name="nmap",
+        exit_code=0,
+        summary="22/tcp open",
+        duration_ms=1200,
+    )
+    bus.emit(
+        "graph_changed",
+        step_no=1,
+        thought="扫一下",
+        tools="nmap",
+        nodes=1,
+        edges=0,
+        duration_ms=3400,
+    )
+    bus.emit("worker_step_started", actor="workerA", step_no=2, step_budget=8)
+    bus.emit(
+        "worker_ticket",
+        actor="workerA",
+        tool_name="http_get",
+        exit_code=0,
+        summary="HTTP 200",
+        duration_ms=900,
+    )
+    bus.emit(
+        "worker_step_ended",
+        actor="workerA",
+        step_no=2,
+        duration_ms=1500,
+        thought="拿到证书日志",
+    )
+    bus.emit(
+        "worker_mission_ended",
+        actor="workerA",
+        finished=True,
+        steps=2,
+        findings=1,
+        duration_ms=12300,
+    )
+    bus.emit(
+        "run_ended",
+        exit_kind="normal",
+        steps=1,
+        findings=1,
+        duration_ms=125000,
+        task_id="t1",
+    )
+    out = capsys.readouterr().out
+    assert "第 1/10 步 · 开始决策" in out
+    assert "【主LLM】第 1 步决策 · 3.4s：扫一下（工具：nmap）" in out
+    assert "【主LLM → nmap】exit=0（1.2s） | 22/tcp open" in out
+    assert "【workerA】第 2/8 步 · 开始" in out
+    assert "【workerA → http_get】exit=0（0.9s） | HTTP 200" in out
+    assert "【workerA】第 2 步完成（1.5s）：拿到证书日志" in out
+    assert "【workerA·收单】完工 steps=2 findings=1 用时=12.3s" in out
+    assert "【出口】exit_kind=normal steps=1 findings=1 用时=2m05s" in out
+
+
 def test_cli_view_ignores_unknown_events(capsys: pytest.CaptureFixture[str]) -> None:
     """M1 契约只有三事件；M2 的新事件名不渲染，等接线再上屏。"""
     CliView()("finding_verdict", {"id": "f1"})

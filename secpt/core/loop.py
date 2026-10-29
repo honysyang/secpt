@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Protocol
 
@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from secpt.assets import render_knowledge, role_catalog, select_knowledge
 from secpt.core import budget, checkpointer, fsm, stall
+from secpt.core.dispatch import dispatch_batch
 from secpt.core.plan_watch import PlanWatcher
 from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput, ToolCall
@@ -110,12 +111,19 @@ JudgeSweep = Callable[[sqlite3.Connection, str], list[FindingRow]]
 # 规划段每步从账本现渲染；教练提案吸收期额外挂一行提示（下一步即还原）。
 _NO_HINT = ""
 
-# M5-25 证据回读：每步最多带 3 张小票的 raw 摘录（每张读 600 字、压成 240 字），
-# 以及最近 5 条 findings 概览——让模型看见证据本身，而不是只看一行 summary。
-_DIGEST_TICKETS = 3
+# M5-25 证据回读：每步带最近小票的 raw 摘录，以及最近 5 条 findings 概览——让模型
+# 看见证据本身，而不是只看一行 summary。M5-31 扩容两处：窗口 4→8 张、按 raw_ref
+# 去重（同一文件被 read_file/declare_finding 反复署名时只摘一次），真实 run 实测
+# 4 张窗口全被同一对文件占满，模型在摘要里永远看不到第 5 个证据。
+_DIGEST_TICKETS = 8
 _DIGEST_FINDINGS = 5
-_DIGEST_READ_CHARS = 600
-_DIGEST_CHARS = 240
+_DIGEST_READ_CHARS = 800
+_DIGEST_CHARS = 360
+
+# M5-30 规划收口压力：active 规划超过此数就停止接受新增并提示先收口。
+# 实测一轮攒到 61 条 active，出场条 5 必然拦截——运行期不给压力，模型就会
+# 用"再加一条规划"代替推进。
+_PLAN_OPEN_LIMIT = 20
 
 
 class StepOutcome(BaseModel):
@@ -164,6 +172,7 @@ class PentestLoop:
         plan_review_limit: int = 3,
         stall_failures: int = 5,
         stall_repeat_plans: int = 2,
+        stall_repeat_calls: int = 4,
         parallel_dispatch: bool = True,
     ) -> None:
         if step_tool_limit <= 0:
@@ -172,10 +181,11 @@ class PentestLoop:
             )
         if plan_review_limit <= 0:
             raise ValueError(f"plan_review_limit 必须为正整数（名额上界），got {plan_review_limit}")
-        if stall_failures <= 0 or stall_repeat_plans <= 0:
+        if stall_failures <= 0 or stall_repeat_plans <= 0 or stall_repeat_calls <= 0:
             raise ValueError(
                 "失速阈值必须为正整数（构造期契约），got"
                 f" failures={stall_failures} repeat_plans={stall_repeat_plans}"
+                f" repeat_calls={stall_repeat_calls}"
             )
         self._conn = conn
         self._llm = main_llm
@@ -193,7 +203,12 @@ class PentestLoop:
         self._plan_review_limit = plan_review_limit
         self._stall_failures = stall_failures
         self._stall_repeat_plans = stall_repeat_plans
+        self._stall_repeat_calls = stall_repeat_calls
         self._parallel_dispatch = parallel_dispatch
+        # M5-31 时长分解（决策/工具）：run_ended 与每步决策行据此把"慢在哪"讲清，
+        # 不再出现"决策 2m05s"其实是 nmap 超时被算进决策时间的误标。
+        self._llm_ms = 0
+        self._tools_ms = 0
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -245,7 +260,12 @@ class PentestLoop:
         """
         machine = fsm.Fsm()
         machine.go(fsm.FSMState.WORK)
-        counter = stall.StallCounter(n=self._stall_failures, repeat_n=self._stall_repeat_plans)
+        run_started = time.monotonic()
+        counter = stall.StallCounter(
+            n=self._stall_failures,
+            repeat_n=self._stall_repeat_plans,
+            repeat_calls=self._stall_repeat_calls,
+        )
         # M5-15 双图补齐：历史账（水位线之前的步）与 worker 直写的 finding 可能缺
         # 节点——跑第一步前对齐一次，出场清单①的"小票/双图一致"才有可判的基础。
         healed = graph.ensure_step_nodes(self._conn, task.id) + graph.ensure_finding_nodes(
@@ -261,6 +281,8 @@ class PentestLoop:
         plan_note = _NO_HINT  # 教练提案吸收期的一行提示（账本规划段之外的临时物）
         exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
         crashed: SecptError | None = None
+        self._llm_ms = 0  # M5-31 时长分解按 run 起算（同一实例可连续 run）
+        self._tools_ms = 0
         try:
             for step_no in range(start, max_steps + 1):
                 if not budget.try_spend(max_steps, step_no):
@@ -320,6 +342,10 @@ class PentestLoop:
                 self._audit(
                     task.id, f"出场三验第 {exit_streak} 轮不过：{'；'.join(verdict.failures)}"
                 )
+                # M5-28 失败明细进包：弹回后模型必须知道"凭什么不让收工"，否则只会
+                # 继续加规划（实测 10 条 active）。写进 plan_note 随下一步注意力包下发，
+                # 吸收一次即用掉（同教练提案口径）。
+                plan_note = "【出场未过·逐条修】" + "；".join(verdict.failures)
                 if exit_streak >= _EXIT_CHECK_MAX_STREAK:
                     raise SecptError(
                         "出场三验连败 3 轮，走异常出口",
@@ -349,6 +375,13 @@ class PentestLoop:
                 steps=len(outcomes),
                 finished=exit_kind == "normal",
                 exit_kind=exit_kind,
+                # M5-29 收尾一行讲全：跑了多久、发现几条——不必再去翻账本。
+                duration_ms=int((time.monotonic() - run_started) * 1000),
+                # M5-31 时长分解：慢在决策（LLM 往返）还是慢在工具（扫描/超时），
+                # 一行可辨——优化方向不再靠猜。
+                llm_ms=self._llm_ms,
+                tools_ms=self._tools_ms,
+                findings=len(ledger.task_findings(self._conn, task.id)),
             )
         if crashed is not None:
             raise crashed
@@ -386,8 +419,17 @@ class PentestLoop:
                 step_no=step_no,
                 max_steps=max_steps,
             )
+        step_started = time.monotonic()
         goal = self._goal_projection(task, run)
+        # M5-30 规划收口压力：存量规划超上限时，包内明说"先收口"，并停止接受新增
+        # （见下方 plan_updates 门）——否则模型用"再加一条规划"代替推进。
+        open_plans = plan.active_count(self._conn, task.id)
         plan_summary = plan.render(self._conn, task.id)
+        if open_plans >= _PLAN_OPEN_LIMIT:
+            plan_summary += (
+                f"\n【规划收口】当前 {open_plans} 条 active（上限 {_PLAN_OPEN_LIMIT}）："
+                "先 plan_done / plan_cancel 把存量收口，本步不再接受新增规划。"
+            )
         if plan_note:
             plan_summary = f"{plan_summary}\n{plan_note}"
         # M5-10 知识参考：按目标+当前规划的关键词命中挑只读方法论（纯算术零 LLM，
@@ -397,6 +439,11 @@ class PentestLoop:
                 " ".join([goal.target, goal.objective, goal.success_criteria, plan_summary])
             )
         )
+        # M5-27 工具签名进包：模型看不到参数名只能猜（实测 12/17 张失败小票全是
+        # 猜错参数）。签名归 registry 渲染（唯一握 manifest 的层），loop 只取一次；
+        # 假 dispatcher（测试替身/老装配）没有该方法时按"无目录"降级，语义不变。
+        catalog_of = getattr(self._dispatcher, "tool_catalog", None)
+        tool_catalog = catalog_of() if callable(catalog_of) else []
         pkg = attention.build(
             goal=goal,
             step_no=step_no,
@@ -410,9 +457,14 @@ class PentestLoop:
             # M5-25 证据回读：raw 摘录 + findings 概览（感知带宽不再只有一行摘要）。
             evidence_digest=self._evidence_digest(task.id),
             findings_digest=self._findings_digest(task.id),
+            tools=tool_catalog,
         )
+        step_llm_ms = 0
         try:
+            llm_started = time.monotonic()
             output = self._llm.step(pkg)
+            step_llm_ms = int((time.monotonic() - llm_started) * 1000)
+            self._llm_ms += step_llm_ms
         except LlmError as exc:
             if exc.code == "E_SCHEMA":
                 # §9 错误矩阵：schema 反复不合 → 该步 voided 记账，原文升异常。
@@ -439,7 +491,10 @@ class PentestLoop:
                 f"工具上限截断：step {step_no} 共 {len(output.tool_calls)} 个 tool_calls，"
                 f"执行前 {self._step_tool_limit} 个，未执行 {len(dropped)} 个：{names}",
             )
+        dispatch_started = time.monotonic()
         receipts = self._dispatch_batch(kept)
+        step_tools_ms = int((time.monotonic() - dispatch_started) * 1000)
+        self._tools_ms += step_tools_ms
         # M3-1/M3-2：Guard 拒绝（denied）与 HITL 批准（hitl_approved）都由主循环
         # 落 audit actor=main——registry ledger-free，此处是唯一握有 task_id 与
         # 审批事实的地方；批/拒两路各有账（完成定义②）。
@@ -456,7 +511,13 @@ class PentestLoop:
         with checkpointer.step_transaction(self._conn):
             # M5-5 规划对象：本步 plan_updates 与小票/水位线同事务落账——规划是
             # 账本事实（不是内存变量），resume 后自然延续，steps.plan_refs 可回溯。
-            plan_rows = plan.add(self._conn, task.id, step_no, output.plan_updates)
+            # M5-30：存量超上限时本步新增不落账（提交后 audit 点名，绝不静默）。
+            plan_updates = output.plan_updates
+            dropped_plans = 0
+            if open_plans >= _PLAN_OPEN_LIMIT and plan_updates:
+                dropped_plans = len(plan_updates)
+                plan_updates = []
+            plan_rows = plan.add(self._conn, task.id, step_no, plan_updates)
             # M5-9 规划收口：plan_done/plan_cancel 与新增同事务——"这条做完了"与
             # "这步的账"同生共死。解析不到的引用不猜，提交后落审计点名。
             plan_done_rows, unresolved_done = plan.complete(
@@ -499,11 +560,24 @@ class PentestLoop:
                     and receipt.exit_code == 0
                     and receipt.raw_ref
                 ):
+                    # M5-31 重复申报拦截：同名 claimed 已在账就不再新增——出场第 2 验
+                    # 拦着悬置行，模型为过关反复申报只会让悬置越积越多（实测一轮从
+                    # 1 条攒到 2 条，直到 E_WALL）。拦截有 audit 痕，路径指回"补证据
+                    # 或换 title"，不静默吞。
+                    title = receipt.args.get("title", "")
+                    dup = ledger.pending_duplicate(self._conn, task.id, title, receipt.raw_ref)
+                    if dup is not None:
+                        self._audit(
+                            task.id,
+                            f"重复申报拦截：{title[:60]!r} 与已悬置 finding {dup.id[:8]}"
+                            " 同名，未新增（同名重复申报无益；请补充新证据或改用新 title）",
+                        )
+                        continue
                     finding_rows.append(
                         ledger.append_finding(
                             self._conn,
                             task.id,
-                            receipt.args.get("title", ""),
+                            title,
                             receipt.args.get("detail", ""),
                             receipt.raw_ref,
                             actor="main",
@@ -554,9 +628,13 @@ class PentestLoop:
                     "evidences",
                 )
                 edge_writes += 1
-        for ticket in tickets:
+        for ticket, receipt in zip(tickets, receipts, strict=True):
             if self._bus is not None:
-                self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
+                self._bus.emit(
+                    "ticket_appended",
+                    **ledger.ticket_event_payload(ticket),
+                    duration_ms=receipt.duration_ms,
+                )
         # M4-6 graph_changed（R3 红线：事件线只报告不接管）：事务提交后广播图
         # 变化——EventBus.emit 无返回值、无订阅者能改变执行流；面板 SSE 轮询
         # audit 增量（step 行带 graph=+Xn+Ye 写痕）即见图变化，零新端点。
@@ -571,19 +649,34 @@ class PentestLoop:
                 tools="、".join(ticket.tool_name for ticket in tickets),
                 nodes=1 + len(finding_rows),
                 edges=edge_writes,
+                duration_ms=int((time.monotonic() - step_started) * 1000),
+                # M5-31 决策/工具拆开计时：CLI 的"决策 Xs"不再把 nmap 超时算进去。
+                decision_ms=step_llm_ms,
+                tools_ms=step_tools_ms,
             )
         # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。
         self._judge_pass(task.id)
         # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 置铃位）。
         # denied 回执不进失速计（§67 遗留②）：拒绝 = 闸门没放行、工具压根没执行，
         # 把它记成"工具连败"会误导救场器去换打法——真实病因是授权，不是手法。
+        # M5-27：exit_code==0 但 made_progress=False（agent_run 未完工）同样按"无进展"
+        # 收数——"预算用尽、零申报"若被当成成功，连败永远清零、铃永远不响。
         ring = False
         for receipt in receipts:
             if receipt.denied:
                 continue
-            if counter.observe(ok=receipt.exit_code == 0):
+            if counter.observe(ok=receipt.exit_code == 0 and receipt.made_progress):
                 ring = True
                 break  # 同 M1 语义：铃响本轮就算，余下回执不再收数
+        # M5-31 重复调用计（第三口径）：同 (工具, 参数) 累计到顶拉铃——真实 run
+        # 实测同 URL 反复 GET、同文件反复读各 10+ 步而失败计/重复规划计全盲。
+        # denied 回执同样不进（闸门没放行，工具没执行，不是模型在打转）。
+        if counter.observe_calls(
+            f"{r.tool_name}|{json.dumps(r.args, sort_keys=True, ensure_ascii=False)}"
+            for r in receipts
+            if not r.denied
+        ):
+            ring = True
         # M5-9 规划引用未匹配（模型写了不存在的 id/原文）：不静默——账上点名，
         # 让"标了但没生效"可证（状态一条都没动）。
         unresolved = unresolved_done + unresolved_cancel
@@ -591,6 +684,12 @@ class PentestLoop:
             self._audit(
                 task.id,
                 f"规划引用未匹配：{unresolved}（既非 active 规划原文也非唯一短 id，未改状态）",
+            )
+        if dropped_plans:
+            self._audit(
+                task.id,
+                f"规划积压 {open_plans} 条 ≥ 上限 {_PLAN_OPEN_LIMIT}："
+                f"本步 {dropped_plans} 条 plan_updates 未落账（先收口再加）",
             )
         # M5 重复抑制（设计文档 L84）：连续提出同一段规划 = 原地打转的早期信号，
         # 与工具连败共用一条拉铃通道（救场 → 换规划 → reset）。空 updates 不算重复。
@@ -614,32 +713,12 @@ class PentestLoop:
     def _dispatch_batch(self, calls: Sequence[ToolCall]) -> list[ToolOutput]:
         """派单一批工具调用（M5-12）：全批 parallel_safe 且开关开启才真并发。
 
-        保守口径（为什么不是"能并的就并"）：只要批里混入一个非 parallel_safe
-        工具，就整批串行——不同工具的副作用顺序不做重排，账本语义与串行逐字节
-        一致。回执顺序恒等于调用顺序（并发结果按提交序回填），失速计收数与小票
-        落账因此保持确定性。
-
-        并发开关在装配层决定（main._parallel_allowed）：交互审批（stdin 会被
-        多线程抢）与探针后端（start/stop 是全局态）任一在场就串行。
+        判据收敛在 :func:`secpt.core.dispatch.dispatch_batch`（M5-31 起与 worker
+        共用同一条规则，防两处口径漂移）；本方法只带入装配层决定的并发开关
+        （main._parallel_allowed：交互审批的 stdin 会被多线程抢、探针后端
+        start/stop 是全局态，任一在场就串行）。
         """
-        safe_of = getattr(self._dispatcher, "parallel_safe", None)
-        concurrent = (
-            self._parallel_dispatch
-            and len(calls) >= 2
-            and safe_of is not None
-            and all(safe_of(call.name) for call in calls)
-        )
-        if not concurrent:
-            return [self._dispatch_one(call) for call in calls]
-        with ThreadPoolExecutor(
-            max_workers=len(calls), thread_name_prefix="secpt-dispatch"
-        ) as pool:
-            futures = [pool.submit(self._dispatch_one, call) for call in calls]
-            return [future.result() for future in futures]
-
-    def _dispatch_one(self, call: ToolCall) -> ToolOutput:
-        """单次派单（串行与并发共用同一条路径，避免两套语义漂移）。"""
-        return self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
+        return dispatch_batch(self._dispatcher, calls, parallel_allowed=self._parallel_dispatch)
 
     def _on_stall_ring(
         self,
@@ -776,13 +855,18 @@ class PentestLoop:
     def _evidence_digest(self, task_id: str) -> list[str]:
         """最近小票的 raw 关键行（M5-25）：模型要看到证据，而不是只看到摘要。
 
-        只读前 ``_DIGEST_READ_CHARS`` 字符并压成一行——够判断 banner/响应特征，
-        又不至于把注意力包撑爆；文件缺失/不可读就跳过（证据链本身由 R0 兜底）。
+        M5-31 口径收紧：按 raw_ref 去重（同一文件多张票——原始工具票与
+        declare_finding 受理票的 raw_ref 恒相同——只摘最近一次，窗口位不再被
+        同一段正文重复占据；原始票滑出窗口时受理票仍能携带该证据）。只读前
+        ``_DIGEST_READ_CHARS`` 字符并压成一行——够判断 banner/响应特征，又不至于
+        把注意力包撑爆；文件缺失/不可读就跳过（证据链本身由 R0 兜底）。
         """
         lines: list[str] = []
+        seen_refs: set[str] = set()
         for ticket in ledger.recent_tickets(self._conn, task_id, limit=_DIGEST_TICKETS):
-            if not ticket.raw_ref:
+            if not ticket.raw_ref or ticket.raw_ref in seen_refs:
                 continue
+            seen_refs.add(ticket.raw_ref)
             try:
                 text = Path(ticket.raw_ref).read_text(encoding="utf-8", errors="replace")[
                     :_DIGEST_READ_CHARS

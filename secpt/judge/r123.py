@@ -109,13 +109,20 @@ def r1(
     if not anchor.strip():
         _suspend(conn, finding, "证据锚点为空，R1 无处起跑")
         return None
+    # M5-31 取票排除 declare_finding 受理票：受理票的 raw_ref 恰好等于
+    # evidence_ref（受理工具署名即锚点），按 raw_ref 倒序取"最近一张"永远取到
+    # 它，于是 R1 永远看到"非只读，永不 rerun"——真实 run 实测一条 claim 被这样
+    # 连续悬置 27 轮，R1 一次都没跑过。原始工具票（http_get/nmap…）才是
+    # "证据怎么来的"那张票；锚上只有受理票 = 证据不是本 run 任何工具产的，
+    # R1 无从重放，如实悬置交 R2/R3。
     ticket = conn.execute(
-        "SELECT tool_name, args_json FROM tickets WHERE raw_ref = ? AND task_id = ?"
+        "SELECT tool_name, args_json FROM tickets"
+        " WHERE raw_ref = ? AND task_id = ? AND tool_name != 'declare_finding'"
         " ORDER BY rowid DESC LIMIT 1",
         (anchor, finding.task_id),
     ).fetchone()
     if ticket is None:
-        _suspend(conn, finding, "无票面证据源（锚未落在任何小票上），交 R2/R3 接手")
+        _suspend(conn, finding, "证据锚未落在任何原始工具小票上（仅受理票/无票面），交 R2/R3")
         return None
     try:
         parsed: object = json.loads(str(ticket["args_json"]))

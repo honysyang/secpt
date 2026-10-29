@@ -28,6 +28,10 @@ EventName = Literal[
     "exit_failed",
     "run_ended",
     "stall_alarm",
+    "worker_step_started",
+    "worker_step_ended",
+    "worker_ticket",
+    "worker_mission_ended",
 ]
 
 Subscriber = Callable[[str, Mapping[str, object]], None]

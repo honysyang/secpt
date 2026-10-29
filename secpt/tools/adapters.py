@@ -10,6 +10,7 @@ raw_ref 诚实原则：raw 指针必须指向真实存在的文件——每次�
 
 from __future__ import annotations
 
+import re
 import subprocess
 import uuid
 from collections.abc import Mapping
@@ -36,6 +37,20 @@ def _single_line(text: str, limit: int = 160) -> str:
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     single = first.replace("\t", " ")[:limit]
     return single + ("…" if len(first) > limit else "")
+
+
+_PORT_LINE = re.compile(r"^\s*\d+/(?:tcp|udp)\s+\S+", re.IGNORECASE)
+
+
+def _port_digest(stdout: str, limit: int = 3) -> str:
+    """nmap summary 优先给端口结论（M5-30）。
+
+    为什么：stdout 首行是 ``Starting Nmap 7.95 … at …``（启动 banner），模型从
+    摘要里根本看不到 `22/tcp open ssh`，只能再去 read_file——这正是上一轮 98 张
+    read_file 票的主要推力。端口行才是这一步的结论，banner 只是噪音。
+    """
+    ports = [line.strip() for line in stdout.splitlines() if _PORT_LINE.match(line)]
+    return "；".join(ports[:limit])
 
 
 class NmapTool:
@@ -103,7 +118,8 @@ class NmapTool:
         raw_path = self._write_raw(active.command(argv), proc.stdout, proc.stderr)
         exit_code = proc.returncode or 0
         summary = (
-            _single_line(proc.stdout.strip() if proc.stdout.strip() else proc.stderr.strip())
+            _port_digest(proc.stdout)
+            or _single_line(proc.stdout.strip() if proc.stdout.strip() else proc.stderr.strip())
             or f"exit={exit_code}"
         )
         return ToolOutput(
@@ -198,12 +214,21 @@ class AgentRunTool:
                 summary=f"E_TOOL_FAIL: agent_run 派单失败 {type(exc).__name__}: {exc}",
                 raw_ref="",
             )
+        finished = result.ok and result.finished
+        summary = f"agent_run 收拢：{result.summary}"
+        if result.ok and not result.finished:
+            # 未完工要写在摘要里（M5-27）：主循环只看得到 summary，不标清楚的话
+            # "预算用尽、零申报"读起来和"干完了"没区别。
+            summary += "（未完工）"
         return ToolOutput(
             tool_name=self.manifest.name,
             args=dict(args),
             exit_code=0 if result.ok else 1,
-            summary=f"agent_run 收拢：{result.summary}",
+            summary=summary,
             raw_ref="",
+            # ok=True/exit=0 只说明"没炸"：未完工同样不算进展，交回执显式声明，
+            # 由主循环的失速计按"无进展"收数（M5-27）。
+            made_progress=finished,
         )
 
     def _collect(self, future: Future[object]) -> MissionResult:

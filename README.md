@@ -51,12 +51,15 @@ secpt run "对 10.0.0.5 做资产测绘并给出可利用面"
 | `【任务】` | 本轮目标（闭环第一行固定可见） |
 | `【安全态势】` | 裁判/验收/探针/隔离/Guard 的真实开关状态（默认关的开关摊开） |
 | `【主LLM】` | 第 N/M 步开始决策（M=步数线预算） |
-| `【主LLM → 工具名】` | 哪个智能体调了哪个工具，附 exit 与一行 summary |
-| `【主LLM】…步骤决策` | 这一步想了什么、用了哪些工具 |
+| `【主LLM → 工具名】` | 哪个智能体调了哪个工具，附 exit、耗时与一行 summary |
+| `【主LLM】…步骤决策` | 这一步想了什么、用了哪些工具、这一步花了多久 |
 | `【双图】` | 双图写痕（本次新增节点/边数） |
+| `【workerA】` | worker 的第 k/N 步（多 worker 并发时按 actor 区分） |
+| `【workerA → 工具名】` | worker 调了什么工具、exit、耗时、一行 summary |
+| `【workerA·收单】` | 这单完工/未完工、步数、申报数、总耗时 |
 | `【LLMC·教练】` | 教练提案（只提案不裁决，下一步吸收） |
-| `【出场】` | 出场未过时的失败明细（哪条验没过） |
-| `【出口】` | 收束结论（exit_kind / 步数 / task_id） |
+| `【出场】` | 出场未过时的失败明细（哪条验没过，并随下一步进包） |
+| `【出口】` | 收束结论（exit_kind / 步数 / findings / 总用时 / task_id） |
 | `【你】` / `【secpt·对话】` | 对话模式下用户输入与助手回复 |
 
 web 面板同一份账本的投影：`/task/<id>` 黑板页、`/task/<id>/chat` 角色气泡 + 小票卡。
@@ -94,7 +97,7 @@ web 面板同一份账本的投影：`/task/<id>` 黑板页、`/task/<id>/chat` 
 | | prompts 库 | `secpt/assets/prompts/*.md` | 纯模板碎片，`{field}` 渲染 |
 | | 知识库 | `secpt/assets/knowledge/*.md` | 只读方法论，按关键词命中进注意力包 |
 | 数据库（migration 版本化） | 经验库 | sqlite `experience` 表 | 唯一跨 run 记忆体，只有 LLMB 收尾能写；回放只收 verified |
-| 进程型（manifest+hash） | 工具库 | MCP + 本地适配器 | nmap / agent_run / declare_finding / MCP servers |
+| 进程型（manifest+hash） | 工具库 | MCP + 本地适配器 | nmap / agent_run / declare_finding / http_get / read_file / list_dir / write_file / run_command / download / MCP servers |
 
 资产查找链：`SECPT_ASSETS_DIR` 覆盖目录 → 包内出厂资产；缺件抛 `E_ASSET` 不静默降级。
 
@@ -106,12 +109,13 @@ web 面板同一份账本的投影：`/task/<id>` 黑板页、`/task/<id>/chat` 
 | `[[acceptance]]` | `id` / `pattern` | 出场③"交付对目标"的机器判据（verified finding 命中） |
 | `[plan]` | `review_every_steps` / `review_limit` | 规划重估节拍与每 run 名额 |
 | `[budget]` | `max_steps` / `workers` | 步数线 / worker 线程数 |
-| `[stall]` | `failures` / `repeat_plans` | 工具连败 / 重复规划拉铃阈值 |
+| `[stall]` | `failures` / `repeat_plans` / `repeat_calls` | 工具连败 / 重复规划 / 同参数重复调用拉铃阈值 |
 | `[guard]` | `tiers` / `hitl_mode` | 可选：分级审批；缺段 = 闸常开，写错 tier 值 `E_PROFILE` |
 | `[execute]` | `isolation` / `step_tool_limit` / `docker_flags` | 可选：执行隔离（默认本机 shell）与每步工具上限（默认 4） |
 | `[probe]` / `[mcp]` | 见对应模块 docstring | 可选：流量探针（默认关）、MCP 服务器清单（默认无） |
 
-关键环境变量：`SECPT_DB`、`SECPT_RAW_DIR`、`SECPT_NMAP_BIN`、`SECPT_PROFILE`、
+关键环境变量：`SECPT_DB`、`SECPT_RAW_DIR`、`SECPT_WORK_DIR`（智能体工作区，默认 `work`）、
+`SECPT_EVIDENCE_DIR`（只读工具的第二根，默认 `evidence`）、`SECPT_NMAP_BIN`、`SECPT_PROFILE`、
 `SECPT_ENV`（经验环境键，默认 lab）、`SECPT_WORKERS`（临时覆盖配置）、
 `SECPT_ASSETS_DIR`、`SECPT_PROBE_BACKEND`、`LLM_PROVIDER`。
 
@@ -146,14 +150,14 @@ secpt/
 └── errors.py    # 分层错误码（E_CONFIG/E_PROFILE/E_LEDGER/E_STALL/...）
 configs/profile.toml    # 关键参数与裁判弹药
 docs/                   # 需求、开发蓝本、施工记档
-tests/unit/             # 517 例离线单测（FakeLLM，零网络）
+tests/unit/             # 605 例离线单测（FakeLLM，零网络）
 ```
 
 ## 质量与测试
 
 ```bash
 ruff format --check . && ruff check .   # line-length 100 / py312
-pytest -q                               # 517 passed，全部离线
+pytest -q                               # 605 passed，全部离线
 ```
 
 测试纪律：任何强依赖真实 LLM / 网络 / 靶场的路径都不进单测；真镜像无网、真模型

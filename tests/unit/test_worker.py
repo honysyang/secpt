@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -49,11 +50,15 @@ def _declare_call(title: str, detail: str, evidence_ref: str) -> dict[str, objec
 
 
 def _assemble(
-    script: list[object], mission_kwargs: dict[str, object] | None = None
+    script: list[object],
+    mission_kwargs: dict[str, object] | None = None,
+    *,
+    observer: object | None = None,
 ) -> tuple[Worker, Mission, FakeLLM, sqlite3.Connection]:
     """便捷装配：内存库开 task → Mission 带真锚 → 单线程 worker 起跑。
 
     返回 conn 供断言直读（findings/audit 查询）——实现内部属性名不进契约。
+    ``observer`` 供 M5-29 过程事件断言（None = 老语义，不接观测）。
     """
     conn = migrate_store.connect(":memory:")
     task = ledger.start_task(conn, input_text="worker 测试进场", goal="摸扫")
@@ -67,6 +72,7 @@ def _assemble(
         dispatcher=ToolRegistry([DeclareFindingTool()]),
         conn=conn,
         coach=Coach(client),  # 门槛为 0 时不会真调用（老语义守恒）
+        observer=observer,  # type: ignore[arg-type]
     )
     kwargs: dict[str, object] = {"task_id": task.id, "goal": "领单干活"}
     kwargs.update(mission_kwargs or {})
@@ -100,6 +106,57 @@ def test_happy_path_declares_finding(tmp_path: Path) -> None:
         for row in conn.execute("SELECT key FROM graph_nodes WHERE kind='finding'").fetchall()
     ]
     assert len(node_keys) == 1 and node_keys[0].startswith("finding-")  # M5-15 证据图
+
+
+def test_system_prompt_carries_tool_catalog() -> None:
+    """M5-28：worker 话术带工具签名——实测 49/54 张票是它猜不存在的工具名。"""
+    worker, mission, fake, _conn = _assemble([_step("收工", done=True)])
+    worker.run(mission)
+    system = fake.calls[0][0].content
+    assert "## 可用工具" in system
+    assert "declare_finding(title*:str, detail*:str, evidence_ref*:str)" in system
+
+
+def test_observer_sees_step_ticket_and_mission_end(tmp_path: Path) -> None:
+    """M5-29：worker 过程事件（步起/票/步结/收单）实时可见，且带耗时。"""
+    events: list[tuple[str, dict[str, object]]] = []
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("客观证据\n", encoding="utf-8")
+    script = [
+        _step("申报", calls=[_declare_call("w 发现", "依据在档", str(evidence))]),
+        _step("收工", done=True),
+    ]
+    worker, mission, _fake, _conn = _assemble(
+        script,
+        {"step_budget": 8},
+        observer=lambda name, payload: events.append((name, dict(payload))),
+    )
+    result = worker.run(mission)
+
+    assert result.finished
+    names = [name for name, _ in events]
+    assert names[0] == "worker_step_started"
+    assert {"worker_ticket", "worker_step_ended", "worker_mission_ended"} <= set(names)
+    assert names[-1] == "worker_mission_ended"
+    ticket = next(payload for name, payload in events if name == "worker_ticket")
+    assert ticket["tool_name"] == "declare_finding"
+    assert isinstance(ticket["duration_ms"], int)
+    ended = events[-1][1]
+    assert ended["finished"] is True and ended["steps"] == 2 and ended["findings"] == 1
+
+
+def test_summary_carries_recent_tickets(tmp_path: Path) -> None:
+    """M5-27：收拢摘要带真实回执——worker 的 thought 自述不可核，小票事实可核。"""
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("客观证据\n", encoding="utf-8")
+    script = [
+        _step("申报", calls=[_declare_call("w 发现", "依据在档", str(evidence))]),
+        _step("收工", done=True),
+    ]
+    worker, mission, _fake, _conn = _assemble(script, {"step_budget": 8})
+    result = worker.run(mission)
+    assert "最近小票" in result.summary
+    assert "declare_finding exit=0" in result.summary
 
 
 def test_budget_exhausted_honest_unfinished() -> None:
@@ -275,3 +332,64 @@ def test_worker_records_tickets_for_tool_calls(tmp_path: Path) -> None:
     assert rows[0]["exit_code"] == 0
     assert rows[0]["raw_ref"] == str(evidence)
     assert rows[0]["step_id"].startswith("worker-workerA-")  # 无主循环步，前缀可辨
+
+
+# ---- M5-31 回执记忆 / 内部并发批派单 ----------------------------------------------
+
+
+def test_worker_sees_previous_receipts_in_next_message(tmp_path: Path) -> None:
+    """回执记忆：第 2 步的 user 消息携带第 1 步回执——worker 不再失忆空转
+    （真实 run 实测 worker 10 步里 6 步在重复自己昨天的动作）。"""
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("证据\n", encoding="utf-8")
+    script = [
+        _step("先摸", calls=[_declare_call("发现 A", "d", str(evidence))]),
+        _step("再看", done=True),
+    ]
+    worker, mission, fake, _conn = _assemble(script, {"step_budget": 2})
+    worker.run(mission)
+    second_msg = fake.calls[1][1].content  # calls[0] 是第 1 步
+    assert "最近工具回执" in second_msg
+    assert "declare_finding exit=0" in second_msg
+
+
+def test_worker_parallel_batch_dispatch(tmp_path: Path) -> None:
+    """worker 内部批派单（M5-31）：全批 parallel_safe 且开关开启才并发——
+    两张慢票用 Barrier 证明"同时在跑"，串行执行必超时。"""
+    import threading
+
+    from secpt.tools.registry import ToolManifest, ToolOutput
+
+    barrier = threading.Barrier(2, timeout=5)
+    ran_on: list[str] = []
+
+    class SlowTool:
+        manifest = ToolManifest(
+            name="slow",
+            kind="in-process",
+            description="慢票替身",
+            params={"x": "str"},
+            read_only=True,
+            parallel_safe=True,
+        )
+
+        def run(self, args: Mapping[str, str]) -> ToolOutput:
+            ran_on.append(threading.current_thread().name)
+            barrier.wait()  # 串行时第一张票等不到第二张 → 超时炸
+            return ToolOutput(
+                tool_name="slow", args=dict(args), exit_code=0, summary="ok", raw_ref=""
+            )
+
+    script = [
+        _step(
+            "并行两张",
+            calls=[{"name": "slow", "args": {"x": "1"}}, {"name": "slow", "args": {"x": "2"}}],
+        ),
+        _step("收工", done=True),
+    ]
+    worker, mission, _fake, _conn = _assemble(script, {"step_budget": 2})
+    object.__setattr__(worker, "_dispatcher", ToolRegistry([SlowTool()]))  # type: ignore[arg-type]
+    object.__setattr__(worker, "_parallel_dispatch", True)
+    result = worker.run(mission)
+    assert result.ok and result.finished
+    assert len(ran_on) == 2 and len(set(ran_on)) == 2  # 两个不同线程 = 真并发

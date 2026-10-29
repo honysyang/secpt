@@ -24,6 +24,9 @@ missions/
 snapshots/
 outputs/
 raw/
+# 智能体工作区（M5-29：自写脚本 / 下载工具）与证据目录
+work/
+evidence/
 
 # --- 密钥与本地配置（永不入库） ---
 .env

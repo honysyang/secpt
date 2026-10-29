@@ -82,6 +82,53 @@ def test_exit_checklist_implements_core_protocol(conn: sqlite3.Connection) -> No
     assert isinstance(verdict, ExitVerdict)
 
 
+# ---- 出场清单⑥ 零进展步（M5-27）------------------------------------------------
+
+
+def test_checklist_fails_on_zero_progress_step(conn: sqlite3.Connection) -> None:
+    """有回执但全失败 = 零进展步：status 记 ok 也不许正常出场。"""
+    task = _task_with_run(conn)
+    run = ledger.latest_run(conn, task.id)
+    step = ledger.record_step(conn, task.id, run.id, 1, "{}")
+    ledger.append_ticket(
+        conn, task.id, run.id, step.id, "nmap", {}, None, "E_SCHEMA_TOOL: 未知参数", ""
+    )
+    verdict = exit_checklist.run_checklist(conn, task.id)
+    assert verdict.passed is False
+    assert any("收工步零进展" in f and "step 1" in f for f in verdict.failures)
+
+
+def test_checklist_ignores_earlier_failed_step(conn: sqlite3.Connection) -> None:
+    """历史失败步不追罚：只判收工步——否则一次 typo 会永久封印正常出场。"""
+    task = _task_with_run(conn)
+    run = ledger.latest_run(conn, task.id)
+    bad = ledger.record_step(conn, task.id, run.id, 1, "{}")
+    ledger.append_ticket(conn, task.id, run.id, bad.id, "nmap", {}, None, "E_SCHEMA_TOOL", "")
+    ledger.record_step(conn, task.id, run.id, 2, "{}")  # 收工步：无工具调用
+    assert exit_checklist.run_checklist(conn, task.id).passed is True
+
+
+def test_checklist_ignores_denied_only_step(conn: sqlite3.Connection) -> None:
+    """denied 步与失速计同口径：闸门没放行 ≠ 零进展（病因在授权不在打法）。"""
+    task = _task_with_run(conn)
+    run = ledger.latest_run(conn, task.id)
+    step = ledger.record_step(conn, task.id, run.id, 1, "{}")
+    ledger.append_ticket(
+        conn, task.id, run.id, step.id, "nmap", {}, None, "E_GUARD_DENY: 不在白名单", ""
+    )
+    assert exit_checklist.run_checklist(conn, task.id).passed is True
+
+
+def test_checklist_passes_when_step_has_one_success(conn: sqlite3.Connection) -> None:
+    """边界：同一步里有一张成功的回执就算有进展（失败小票不抹掉真实产出）。"""
+    task = _task_with_run(conn)
+    run = ledger.latest_run(conn, task.id)
+    step = ledger.record_step(conn, task.id, run.id, 1, "{}")
+    ledger.append_ticket(conn, task.id, run.id, step.id, "nmap", {}, None, "E_SCHEMA_TOOL", "")
+    ledger.append_ticket(conn, task.id, run.id, step.id, "nmap", {}, 0, "22/tcp open", "raw/a")
+    assert exit_checklist.run_checklist(conn, task.id).passed is True
+
+
 # ---- 出场清单③ 交付对目标（M5）------------------------------------------------
 
 

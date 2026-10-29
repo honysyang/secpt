@@ -136,11 +136,21 @@ class FindingRow(BaseModel):
     judged_at: int | None
     created_at: int
     actor: str = "main"  # M5-11：谁申报（main / workerA / workerB）
+    sweep_count: int = 0  # M5-31：已被 sweep 处理过的轮数（悬置上限的可复算原料）
 
 
 _VERIFY_STATES = frozenset({"claimed", "verified", "rejected"})
 _VERIFY_METHODS = frozenset({"rerun", "dual-path", "negative", "oracle", "manual"})
 _TERMINAL_STATES = frozenset({"verified", "rejected"})
+
+
+def _norm_title(title: str) -> str:
+    """标题归一（M5-31 重复申报拦截的判同口径）：大小写折叠 + 空白折叠。
+
+    与 judge.r23 的结论归一同手式——格式差异不算不同结论；同 title 的两条
+    claim 大概率是同一发现的重复申报，不该各占一个裁判名额。
+    """
+    return " ".join(title.split()).casefold()
 
 
 def start_task(conn: sqlite3.Connection, input_text: str, goal: str) -> TaskRow:
@@ -218,6 +228,20 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> RunRow:
     if row is None:
         raise LedgerError("该 task 查无 run", context={"task_id": task_id})
     return RunRow.model_validate(dict(row))
+
+
+def unfinished_task(conn: sqlite3.Connection) -> TaskRow | None:
+    """最近一个"有 running run 且 task 未收尾"的 task（只读，启动提示用）。
+
+    为什么不是 latest_task：刚正常收尾的 task 也是"最近"，只有 run 还挂在
+    running 才说明上次被打断（进程被杀/断电），resume 才有意义。纯读、不写账。
+    """
+    row = conn.execute(
+        "SELECT t.* FROM tasks t JOIN runs r ON r.task_id = t.id"
+        " WHERE t.exit_kind IS NULL AND r.status = 'running'"
+        " ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1"
+    ).fetchone()
+    return TaskRow.model_validate(dict(row)) if row is not None else None
 
 
 def mark_step(conn: sqlite3.Connection, run_id: str, step_no: int) -> None:
@@ -474,8 +498,8 @@ def append_finding(
     try:
         conn.execute(
             "INSERT INTO findings (id, task_id, title, detail, verify_state, method,"
-            " evidence_ref, confidence, judged_at, created_at, actor)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " evidence_ref, confidence, judged_at, created_at, actor, sweep_count)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 finding.id,
                 finding.task_id,
@@ -488,12 +512,63 @@ def append_finding(
                 finding.judged_at,
                 finding.created_at,
                 finding.actor,
+                0,
             ),
         )
         _maybe_commit(conn)
     except sqlite3.Error as exc:
         raise LedgerError("findings 写入失败", context={"task_id": task_id}) from exc
     return finding
+
+
+def pending_duplicate(
+    conn: sqlite3.Connection, task_id: str, title: str, evidence_ref: str = ""
+) -> FindingRow | None:
+    """重复申报查重（M5-31）：返回应拦截的既有行，None = 放行。
+
+    两条口径（对 R2 双路径燃料的保护写在第二条里）：
+    - **claimed 同名**（任意锚）→ 拦：出场第 2 验拦着悬置行，模型为过关反复申报
+      只会让悬置越积越多（实测一轮从 1 条攒到 2 条直到 E_WALL），而新申报在同样
+      的裁判条件下一样判不了真；
+    - **verified 同名同锚** → 拦：同一结论同一条证据已判真，再申报纯属重复；
+    - **verified 同名不同锚** → 放行：这是 R2 双路径裁判的燃料——"同一结论被
+      第二条独立路径也验证过"必须允许第二条 claim 入账；
+    - **rejected** → 永不拦：带着新证据重新申报是合法的"再来一次"。
+
+    纯读。
+    """
+    key = _norm_title(title)
+    if not key:
+        return None
+    for row in task_findings(conn, task_id):
+        if _norm_title(row.title) != key:
+            continue
+        if row.verify_state == "claimed":
+            return row
+        if row.verify_state == "verified" and evidence_ref and row.evidence_ref == evidence_ref:
+            return row
+    return None
+
+
+def bump_sweep_counts(conn: sqlite3.Connection, finding_ids: Sequence[str]) -> None:
+    """裁判 sweep 计数推进（M5-31）：被处理过的 claim 各 +1（悬置上限的原料）。
+
+    为什么是批量 UPDATE 而不是逐行 set：sweep 一轮处理 N 条 claim，一次提交
+    一个原子动作；账本层错误照常包 LedgerError 上抛（库层不吞错）。
+    """
+    if not finding_ids:
+        return
+    try:
+        conn.execute(
+            "UPDATE findings SET sweep_count = sweep_count + 1"
+            f" WHERE id IN ({','.join('?' * len(finding_ids))})",
+            tuple(finding_ids),
+        )
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError(
+            "findings sweep 计数推进失败", context={"count": len(finding_ids)}
+        ) from exc
 
 
 def task_findings(
@@ -562,6 +637,8 @@ __all__ = [
     "TaskRow",
     "TicketRow",
     "append_finding",
+    "bump_sweep_counts",
+    "pending_duplicate",
     "append_ticket",
     "audit",
     "end_run",

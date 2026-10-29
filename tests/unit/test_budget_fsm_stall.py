@@ -135,3 +135,45 @@ def test_stall_reset_after_rescue() -> None:
     for _ in range(4):
         counter.observe(ok=False)
     assert counter.observe(ok=False) is True  # 仍需数满完整 n
+
+
+# ---- M5-31 重复调用计：同 (工具, 参数) 累计到顶拉铃 -------------------------------
+
+
+def test_repeat_calls_rings_at_threshold() -> None:
+    """同签名累计满 repeat_calls 拉铃：恰好到顶那次 True，此后不重复响。"""
+    counter = stall.StallCounter(n=5, repeat_n=2, repeat_calls=4)
+    key = 'http_get|{"url": "https://x"}'
+    assert counter.observe_calls([key]) is False
+    assert counter.observe_calls([key]) is False
+    assert counter.observe_calls([key]) is False
+    assert counter.observe_calls([key]) is True  # 第 4 次撞线
+    assert counter.observe_calls([key]) is False  # 已响过，不刷屏
+
+
+def test_repeat_calls_counts_across_other_calls() -> None:
+    """累计口径：中间插别的调用不洗白——重复 3 次 + 别的 1 步 + 再 1 次 = 到顶。"""
+    counter = stall.StallCounter(n=5, repeat_n=2, repeat_calls=4)
+    dup = 'read_file|{"path": "raw/a.txt"}'
+    other = 'nmap|{"target": "t"}'
+    assert counter.observe_calls([dup]) is False
+    assert counter.observe_calls([dup]) is False
+    assert counter.observe_calls([dup]) is False
+    assert counter.observe_calls([other]) is False  # 插步不清零
+    assert counter.observe_calls([dup]) is True  # 第 4 次重复
+
+
+def test_repeat_calls_reset_clears_counts() -> None:
+    """救场重置三口径一起清：换打法后旧的同参数重复不再记账。"""
+    counter = stall.StallCounter(n=5, repeat_n=2, repeat_calls=3)
+    key = 'nmap|{"target": "t"}'
+    counter.observe_calls([key, key])
+    counter.reset()
+    assert counter.observe_calls([key]) is False
+    assert counter.observe_calls([key]) is False
+    assert counter.observe_calls([key]) is True  # 重新起算，数满 3 才再响
+
+
+def test_repeat_calls_thresholds_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="repeat_calls"):
+        stall.StallCounter(n=5, repeat_n=2, repeat_calls=0)
