@@ -2178,3 +2178,68 @@ None/渲染/CLI）；test_loop 3 新例（节点+边/事件序+payload/audit 写
 test_web_view 总览两杆。CLI mock 冒烟：【图】行、normal 收束、metrics 暂无。
 遗留：两杆是全库口径（跨 task 累计），单 task 杆可后续按需加参数；experience
 "曾命中过但被打回"的条目在净票口径下记 0（MAX 痕迹未留，如需"曾命中率"需加列）。
+
+## §78 M5 设计文档缺口五项（prompts/skills 库 · 事件线消费端 · R2/R3 · 角色气泡页）
+
+盘点口径：对照 `docs/pentest-agent-goals-requirements-v0.1.md` 逐条核准现状后，
+补齐五处未落地项（角色库/知识库仍按文档"M2 后填语料"不建；prompts 库先行）。
+
+**拍板①：prompts 库 = 包内出厂资产 + env 覆盖，两道查找链，缺件 E_ASSET。**
+资产放 `secpt/assets/prompts/*.md`（随 wheel 分发，离线可跑），运维可用
+`SECPT_ASSETS_DIR` 覆盖（同 id 覆盖目录胜出）。装载器 `assets/library.py`
+只做"读文件 + `{field}` 渲染"：未知占位原样保留（写错字段名要看得见），
+缺失抛 `E_ASSET` 而非返回空串（空 prompt 让 LLM 行为不可解释）。
+接线六处：main.system/main.entrance/worker.system/coach.propose/coach.review/
+distiller/reporter——代码只剩"用哪个资产 + 填什么值"，话术可 diff 可评审。
+
+**拍板②：skills 库 = 动作模块（正文）+ 引用纪律片段（prompts）。**
+`secpt/assets/skills/*.md` 用 YAML 头（id/name/description/prompts）+ 正文；
+`skill_fragments` 是"skills ← prompts"引用链唯一实现点，断链 E_ASSET。
+工单面：`Mission.skills`（M3 只有 persona/goal/step_budget，L11 要求的
+"分配 skills"落在这里）；`agent_run` 加可选 `skills` 参数（逗号清单）。
+worker 领单把技能正文 + 引用纪律拼进系统话术；缺件/断链 audit 留痕后按
+"未挂载"继续——技能是增强不是前置，但"没挂上"必须可证。领单行带
+`skills=...`，多 worker 下可复算"这单按哪套打法做"。
+角色库（who+how 打包，引用 skills）仍不做——它是本链的上一层，需要语料。
+
+**拍板③：事件线消费端 = 订阅只置旗，步界才动 LLMC（R3 红线不破）。**
+M4-6 只有生产端（emit graph_changed）没有消费者，L16"根据双图状态灵活调整
+规划"实际是断的。新增 `core/plan_watch.PlanWatcher`：订阅 graph_changed，
+步号整除节拍（`[plan].review_every_steps`，默认 5）置旗；`take()` 读后即清。
+主循环在步界取旗 → 调 `Coach.review`（读 graph_summary + 当前规划）→
+audit(actor=llmc) 先账 → 提案挤进下一步注意力包（吸收一次即还原）。
+名额 `[plan].review_limit` 默认 3，用尽只落一次账；空白提案 = "规划仍成立"
+（不落账不占名额，与失速救场的"无话=降级"口径不同）。事件 `plan_reviewed`
+只报告不接管：EventBus.emit 无返回值，消费端手里没有账本写口/预算杠杆。
+坏配置（bool/"5"/≤0/非表）E_PROFILE 拒跑（同 [execute] 段口径）。
+
+**拍板④：R2/R3 接线，R1 之后的两条独立背书。**
+- R2 双路径：要求对侧"同结论（大小写/空白归一）+ 不同工具 + 不同证据锚 +
+  已 verified + R0 仍过"才升级 dual-path。**两条未验证的相似说法不互证**——
+  同一模型/同知识源的两个幻觉会自我壮胆，只有一条已被 R1/R4 独立确认时，
+  第二条才算独立信息。
+- R3 反证：只认流量锚 `obs:<id>` 且要求实质事件（meta 解析成非空字典 +
+  snapshot 非空）→ "证明没发生"失败 → verified(negative)（L76"动作发生时
+  取证"消解写操作悬案）。文件锚的写操作没有可对账事件流 → 悬置。
+- 管线：R0 → R4 → R1（仅注入 replay 且非流量锚）→ R2 → R3。不注入 replay 时
+  R1 照旧不跑（守恒机位），单 claim 场景与旧版逐字节一致；r1 悬置文案从
+  "图纸位/M5 接线"改为"交 R2/R3 接手"。
+
+**拍板⑤：web 对话过程页 = 同一账本的另一种投影，零新写路径。**
+`/task/<id>/chat`：audit 行 → 角色气泡（main→主LLM / workerA→workerA /
+llmc→LLMC 教练 / llma·llmb·judge 各自标签），ticket 行 → 小票摘要卡；
+按 (created_at, 同秒 audit 先于 ticket, rowid) 合并排序。仍走 ro 连接 +
+GET-only 路由，无 `<script>`；黑板页加入口链接。
+
+**测试面（45 新例，全库 426 例）**：test_assets.py 12（出厂枚举/覆盖胜出/未知占位
+保留/E_ASSET/引用链/断链/worker 挂载+缺件留痕/Mission 默认/agent_run 逗号解析）；
+test_plan_watch.py 15（节拍/take 即清/坏 payload 忽略/配置四档/步界重估吸收/
+名额用尽只落一次账/空白不占名额/limit 构造期校验/CLI 气泡）；
+test_r23.py 14（R2 四反例 + R3 四反例 + sweep 管线三段 + 导入面/只读门守门）；
+test_web_view 新增 4（气泡页/入口链接/405/404）。ruff format+check 全绿。
+
+**遗留**：① 角色库/知识库仍未建（文档口径 M2 后填语料）；② R2 的"不同 worker"
+维度未单独判（当前以"不同工具"近似独立路径——worker 产出都落 ticket 工具名，
+真正按 actor 区分需要 findings 记 actor 列，属 schema 变更）；③ 规划重估是
+确定性节拍（每 N 步），未做"仅当双图无新增 verified 才重估"的条件触发；
+④ 面板对话页是静态投影（刷新可见），未接 SSE 实时追加。
