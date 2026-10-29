@@ -1971,3 +1971,43 @@ E_LLM_CONNECT；**openai 档完整 run 离线 e2e**（脚本与 mock 出厂脚�
 
 **遗留**：真模型（DeepSeek 等）联网冒烟不进 CI，留给手工验证；流式输出、
 429 限流重试策略（当前 fail-fast）待 M5+ 按需补。
+
+---
+
+## 73. M4-2 施工结论：MCP stdio 工具管道——一发一会话、掉线只告警、同权过闸
+
+**拍板①：一发一会话，不做长连。**
+每次 list_tools / tools/call 独立起进程 → initialize 握手 → 请求 → 收尸
+（stdin 关闭 → terminate → 顽固 kill），与 NmapTool"每次 run 一个子进程"同手式。
+理由：无长连状态则天然幂等、无生命周期泄漏——registry 没有"关停"语义，
+会话在 with 里自灭；进程单价对齐 nmap 调用本就一发一进程，MVP 不为常驻 server
+做连接池。
+
+**拍板②：协议层失败一律 McpError，两个消化口分层。**
+- 注册期：`build_mcp_adapters` 捕 McpError → structlog warning + 跳过该 server
+  （"连接失败不注册只告警"，装配绝不被坏 server 炸）；
+- 调用期：`McpTool.run` 捕 McpError → E_TOOL_FAIL 回执（与 nmap 失败同手式，
+  不抛不重试不炸主循环）。
+McpError 升格为真实产错误类（此前只在注册冲突出现）：启动失败/读超时/提前断线/
+error 响应/id 不配对/形状不合法全部带 server 名进 context。
+
+**拍板③：manifest 从 inputSchema 收敛，read_only 恒 False（未知即写）。**
+string/integer/number → str/int/float，其余类型落 str；required 原样收敛。
+MCP 工具的副作用无从断言，R1 重放门默认不放行——诚实优先，确证只读的 server
+待白名单化后再声明。参数类型转换在 adapter 层如实做（int/float 转换失败转
+E_TOOL_FAIL 回执）。raw_ref 诚实锚：JSON-RPC 结果落 raw 真文件（文件名对
+server/tool 名先消毒——名字来自外部，不信任其字符集）。
+
+**拍板④：配置 [[mcp.servers]]，缺段零行为。**
+name + command（argv 列表，禁 shell）+ timeout_s（默认 10s，select 读超时
+deadline 到点杀进程，绝不悬死）；无 [mcp] 段 = 空列表零行为变化；坏 toml /
+command 非字符串列表 / 缺 name → E_PROFILE 拒跑（笔误有痕）。
+主循环与 worker 货架都挂 MCP adapter；worker 侧装配期构建一次、各线程共享
+（McpTool 无状态，registry 对 adapter 只读 manifest + 调 run）。
+stderr 直通 DEVNULL：协议走 stdout，混流会污染 JSON-RPC 帧。
+
+**测试面（13 例 + echo 桩）**：本地 echo MCP server（initialize/tools/list/
+tools/call 最小子集，`__crash__` 魔法文本 = 半途死亡失败注入口）；回声回路
+（manifest 形状/hash 自洽、raw 真文件、int 转换）；掉线与二进制缺失只告警不注册；
+配置三档（缺段零行为/坏 toml E_PROFILE/command 非法 E_PROFILE）；Guard 白名单
+拒绝 denied 回执（同权过闸可证）；secpt tools 清单可见 echo kind=mcp+hash。
