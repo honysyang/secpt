@@ -1,4 +1,4 @@
-"""执行隔离（M3-5 拍板②）：runner seam + Docker 包裹 + profile [execute] 装配。
+"""执行隔离（M3-5 拍板②）与容器加固（M4-5 §71 遗留④）。
 
 为什么 seam 在 NmapTool 构造器而不是 dispatch 层：argv 构建属工具自洽（工具知道
 怎么调自己），执行方式属装配决策（宿主跑还是容器跑）——两层各司其职，测试可
@@ -9,20 +9,33 @@ E_TOOL_FAIL 回执、绝不静默退回本机执行——宿主方案不可信 =
 NmapTool 管"转回执"，本层只管"如实失败"（FileNotFoundError 原样上抛）。
 
 build_docker_argv 是纯函数：无 subprocess、无副作用，argv 序 = 手写固定——
-原始 argv 原样垫底（[docker, run, --rm, image, *argv]），容器内看到的就是
-宿主本来要跑的那串命令，一字不差。
+加固 flags（M4-5）垫在 --rm 与 image 之间，原始 argv 原样垫底
+（[docker, run, --rm, *flags, image, *argv]），容器内看到的就是宿主本来要跑的
+那串命令，一字不差；flags 序 = 配置序，稳定可测。默认四连（--network=none /
+--memory=512m / --read-only / --cap-drop=ALL）取最小权限原则：无网、限额、
+只读根fs、弃全部 capability——渗透工具箱的副作用面被压到容器本体内。
 """
 
 from __future__ import annotations
 
 import subprocess
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from secpt.errors import SecptError
+
+# M4-5 加固默认四连：顺序即语义（网络/内存/根fs/capability），[execute].docker_flags
+# 可整体覆盖但覆盖序 = 配置序——"顺序稳定可测"指 flags 与 image 的相对位置恒定。
+DEFAULT_DOCKER_FLAGS: tuple[str, ...] = (
+    "--network=none",
+    "--memory=512m",
+    "--read-only",
+    "--cap-drop=ALL",
+)
 
 
 class ArgvRunner(Protocol):
@@ -58,17 +71,34 @@ class LocalRunner:
         )
 
 
-def build_docker_argv(argv: list[str], *, image: str, docker_bin: str = "docker") -> list[str]:
-    """把宿主 argv 包成 [docker_bin, run, --rm, image, *argv]（纯函数）。"""
-    return [docker_bin, "run", "--rm", image, *argv]
+def build_docker_argv(
+    argv: list[str],
+    *,
+    image: str,
+    docker_bin: str = "docker",
+    flags: Sequence[str] = DEFAULT_DOCKER_FLAGS,
+) -> list[str]:
+    """把宿主 argv 包成 [docker_bin, run, --rm, *flags, image, *argv]（纯函数）。
+
+    flags 缺省 = M4-5 加固四连；显式传空列表 = 摘除加固（对照组/测试用），
+    任何情况下容器 argv 都原样垫底不被 flags 挤占。
+    """
+    return [docker_bin, "run", "--rm", *flags, image, *argv]
 
 
 class DockerRunner:
     """容器执行器：argv 包裹后仍走 subprocess（exec 语义与 shell 同械）。"""
 
-    def __init__(self, image: str, docker_bin: str = "docker") -> None:
+    def __init__(
+        self,
+        image: str,
+        docker_bin: str = "docker",
+        flags: Sequence[str] = DEFAULT_DOCKER_FLAGS,
+    ) -> None:
+        """flags 由装配层从 [execute].docker_flags 注入；缺省 = 加固四连。"""
         self._image = image
         self._docker_bin = docker_bin
+        self._flags = tuple(flags)
 
     @property
     def label(self) -> str:
@@ -77,7 +107,9 @@ class DockerRunner:
 
     def command(self, argv: list[str]) -> list[str]:
         """实际命令 = docker 包裹后的完整 argv（raw 落盘照此署名）。"""
-        return build_docker_argv(argv, image=self._image, docker_bin=self._docker_bin)
+        return build_docker_argv(
+            argv, image=self._image, docker_bin=self._docker_bin, flags=self._flags
+        )
 
     def run(self, argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[str]:
         """包裹一次：纯函数定 argv 序 → subprocess 照跑（缺 bin/镜像 = FileNotFoundError/诚
@@ -89,11 +121,17 @@ class DockerRunner:
 
 
 class IsolationConfig(BaseModel):
-    """[execute] 段装配快照：isolation 档位 / 镜像 / docker bin 三字段。"""
+    """[execute] 段装配快照：isolation 档位 / 镜像 / docker bin + M4-5 加固面。
+
+    docker_flags 缺省 = 加固四连（DEFAULT_DOCKER_FLAGS）；step_tool_limit 缺省 4
+    （主循环每步 tool_calls 上限，shell/docker 两档共用——执行面收口同段管理）。
+    """
 
     isolation: Literal["shell", "docker"] = "shell"
     image: str = "secpt-sandbox"
     docker_bin: str = "docker"
+    docker_flags: list[str] = Field(default_factory=lambda: list(DEFAULT_DOCKER_FLAGS))
+    step_tool_limit: int = 4
 
 
 def load_isolation_config(path: str | None) -> IsolationConfig:
@@ -124,6 +162,8 @@ def load_isolation_config(path: str | None) -> IsolationConfig:
     raw_isolation = section.get("isolation", "shell")
     raw_image = section.get("image", "secpt-sandbox")
     raw_docker_bin = section.get("docker_bin", "docker")
+    raw_flags = section.get("docker_flags", list(DEFAULT_DOCKER_FLAGS))
+    raw_limit = section.get("step_tool_limit", 4)
     if not isinstance(raw_isolation, str) or raw_isolation not in ("shell", "docker"):
         raise SecptError(
             '[execute].isolation 必须是 "shell" 或 "docker"',
@@ -136,14 +176,31 @@ def load_isolation_config(path: str | None) -> IsolationConfig:
             code="E_PROFILE",
             context={"path": str(file)},
         )
+    # M4-5 加固面校验：docker_flags 必须是字符串列表（覆盖序 = 配置序）；
+    # step_tool_limit 必须是正整数（bool 是 int 子类，显式排除防 step_tool_limit=true 混过）。
+    if not isinstance(raw_flags, list) or not all(isinstance(f, str) for f in raw_flags):
+        raise SecptError(
+            "[execute].docker_flags 必须是字符串列表",
+            code="E_PROFILE",
+            context={"path": str(file), "got": str(raw_flags)},
+        )
+    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit <= 0:
+        raise SecptError(
+            "[execute].step_tool_limit 必须是正整数",
+            code="E_PROFILE",
+            context={"path": str(file), "got": str(raw_limit)},
+        )
     return IsolationConfig(
         isolation=raw_isolation,  # type: ignore[arg-type]  # 已人工收紧到字面量
         image=raw_image,
         docker_bin=raw_docker_bin,
+        docker_flags=raw_flags,
+        step_tool_limit=raw_limit,
     )
 
 
 __all__ = [
+    "DEFAULT_DOCKER_FLAGS",
     "ArgvRunner",
     "DockerRunner",
     "IsolationConfig",

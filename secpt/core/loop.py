@@ -144,7 +144,12 @@ class PentestLoop:
         judge_note: str | None = None,
         coach: Coach | None = None,
         probe_note: str | None = None,
+        step_tool_limit: int = 4,
     ) -> None:
+        if step_tool_limit <= 0:
+            raise ValueError(
+                f"step_tool_limit 必须为正整数（截断面是构造期契约），got {step_tool_limit}"
+            )
         self._conn = conn
         self._llm = main_llm
         self._dispatcher = dispatcher
@@ -156,6 +161,7 @@ class PentestLoop:
         self._judge_note = judge_note
         self._coach = coach
         self._probe_note = probe_note
+        self._step_tool_limit = step_tool_limit
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -336,9 +342,23 @@ class PentestLoop:
                     status="voided",
                 )
             raise
+        # M4-5 每步工具上限（默认 4，[execute].step_tool_limit 可配）：超限截断在
+        # dispatch 之前——执行器连见都见不到超限调用，小票（执行结果的记录）天然
+        # 不存在；截断事实 audit 落痕（actor=main，逐个点名）满足"不静默丢弃"。
+        # 不进失速计是截断的结构属性而非额外逻辑：失速计只吃 dispatch 产出的回执，
+        # 被截断的调用没有回执，收数资格从根上不存在。
+        kept = output.tool_calls[: self._step_tool_limit]
+        dropped = output.tool_calls[self._step_tool_limit :]
+        if dropped:
+            names = ", ".join(call.name for call in dropped)
+            self._audit(
+                task.id,
+                f"工具上限截断：step {step_no} 共 {len(output.tool_calls)} 个 tool_calls，"
+                f"执行前 {self._step_tool_limit} 个，未执行 {len(dropped)} 个：{names}",
+            )
         receipts = [
             self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
-            for call in output.tool_calls
+            for call in kept
         ]
         # M3-1/M3-2：Guard 拒绝（denied）与 HITL 批准（hitl_approved）都由主循环
         # 落 audit actor=main——registry ledger-free，此处是唯一握有 task_id 与

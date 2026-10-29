@@ -257,13 +257,20 @@ def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Wor
 def _runner() -> ArgvRunner | None:
     """M3-5 执行隔离：docker 档包 DockerRunner，shell 档 None（LocalRunner 默认）。
 
+    M4-5 容器加固：[execute].docker_flags 原样注入 DockerRunner（缺省 = 加固
+    四连 --network=none/--memory=512m/--read-only/--cap-drop=ALL）。
     fail-closed 语义在 adapters 层：docker 不可用 → E_TOOL_FAIL 回执，
     绝不静默退回本机执行（宿主方案不可信）。
     """
     cfg = load_isolation_config(_profile_path())
     if cfg.isolation != "docker":
         return None
-    return DockerRunner(image=cfg.image, docker_bin=cfg.docker_bin)
+    return DockerRunner(image=cfg.image, docker_bin=cfg.docker_bin, flags=tuple(cfg.docker_flags))
+
+
+def _step_tool_limit() -> int:
+    """M4-5 每步工具上限（默认 4）：[execute].step_tool_limit 可配，主循环装配注入。"""
+    return load_isolation_config(_profile_path()).step_tool_limit
 
 
 def _broker_audit_sink(name: str, approved: bool, via: str) -> None:
@@ -460,6 +467,7 @@ def _assemble(
         judge_note=note_for(prof),
         coach=Coach(client),
         probe_note=probe_note_for(probe_cfg, _probe_backend_name()),
+        step_tool_limit=_step_tool_limit(),
     )
 
 
