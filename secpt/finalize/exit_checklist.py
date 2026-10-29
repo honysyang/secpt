@@ -60,6 +60,10 @@ def run_checklist(
     if orphans:
         failures.append(f"账本交不齐：{len(orphans)} 张孤儿小票（如「{orphans[0]['summary']}」）")
 
+    # 条 1 补充（M5-15）：小票/双图一致——ok 步要有探索图节点、verified finding
+    # 要有证据图节点。
+    failures.extend(_graph_gaps(conn, task_id))
+
     # 条 2：claimed 悬置=0——所有 finding 必须落 verified/rejected 终态。
     pending = conn.execute(
         "SELECT COUNT(*) FROM findings WHERE task_id = ? AND verify_state = 'claimed'",
@@ -108,8 +112,51 @@ def run_checklist(
     return ExitVerdict(passed=not failures, failures=failures)
 
 
+def _graph_gaps(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """小票/双图一致性（M5-15）：ok 步 ↔ 探索图节点、verified finding ↔ 证据图节点。
+
+    为什么用"图上是否已有该类节点"作闸：M5-15 之前落账的老库没有 finding 节点，
+    直接倒判会把历史账全判红。引擎生产的任务必然有 step 节点（M4-6 起每步写），
+    所以当 step 节点存在时按严格口径判；findings 侧同理（进场会先补节点）。
+    """
+    gaps: list[str] = []
+    step_nodes = conn.execute(
+        "SELECT COUNT(*) FROM graph_nodes WHERE task_id = ? AND kind = 'step'", (task_id,)
+    ).fetchone()[0]
+    if step_nodes:
+        missing_steps = conn.execute(
+            "SELECT s.step_no FROM steps s WHERE s.task_id = ? AND s.status = 'ok'"
+            " AND NOT EXISTS (SELECT 1 FROM graph_nodes g WHERE g.task_id = s.task_id"
+            " AND g.kind = 'step' AND g.key = 'step-' || s.step_no)"
+            " ORDER BY s.step_no LIMIT 5",
+            (task_id,),
+        ).fetchall()
+        if missing_steps:
+            gaps.append(
+                f"账本与探索图不一致：{len(missing_steps)} 个 ok 步缺 step 节点"
+                f"（如 step {missing_steps[0]['step_no']}）"
+            )
+    finding_nodes = conn.execute(
+        "SELECT COUNT(*) FROM graph_nodes WHERE task_id = ? AND kind = 'finding'", (task_id,)
+    ).fetchone()[0]
+    if finding_nodes:
+        missing_findings = conn.execute(
+            "SELECT f.title FROM findings f WHERE f.task_id = ?"
+            " AND f.verify_state = 'verified'"
+            " AND NOT EXISTS (SELECT 1 FROM graph_nodes g WHERE g.task_id = f.task_id"
+            " AND g.kind = 'finding' AND g.key = 'finding-' || f.id) LIMIT 5",
+            (task_id,),
+        ).fetchall()
+        if missing_findings:
+            gaps.append(
+                f"账本与证据图不一致：{len(missing_findings)} 条 verified finding 缺节点"
+                f"（如「{missing_findings[0]['title']}」）"
+            )
+    return gaps
+
+
 class ExitChecklist:
-    """ExitChecker 协议的实现体（M1 三条 + M5 交付验收 + 规划收口）。"""
+    """ExitChecker 协议的实现体（M1 三条 + M5 交付验收/规划收口/双图一致）。"""
 
     def __init__(self, acceptance: Sequence[AcceptanceRule] = ()) -> None:
         """acceptance 由装配层从 profile 映射（finalize 不 import judge：分层单向）。"""

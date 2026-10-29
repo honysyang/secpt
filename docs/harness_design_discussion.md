@@ -2517,3 +2517,31 @@ claimed 永远进不了包。本卡把它从"实现漂移"升格为**显式决�
 线索单独成节（"仅线索，无命令"），与 verified 正典物理分开。
 
 **测试面**：0 新例（行为未变），全库 506 例仍全绿；ruff 全绿。
+
+## §87 M5-15 证据图落地 + 出场①"小票/双图一致"
+
+此前"双图记账"只有一张：主循环每步写 `step` 节点（探索图），`finding` 节点
+零写入（全仓仅一处 put_node）。本卡补齐证据图，并把出场清单①的一致性变成可判。
+
+**写入面（同事务）**：主循环在 declare_finding 落账的同一事务里写
+`put_finding_node`（key=`finding-{id}`，props 带 title/evidence_ref/actor）+
+`evidences` 边（`step-{n} → finding-{id}`）；worker 直写 finding 时同步写节点。
+`graph_changed` 的 nodes/edges 计数随之如实（1+finding 数 / 步进边+证据边）。
+
+**补齐面（幂等）**：`graph.ensure_step_nodes` / `ensure_finding_nodes` 在
+`_advance` 开跑前各跑一次——续跑旧 run、worker 直写、半截事务的缺口先对齐，
+补了几条落 audit（"双图补齐：N 个节点"）。step 节点的 thought 从 steps.llm_output
+反解析，props 标 `backfilled: true`，不冒充引擎原写。
+
+**判定面**：exit_checklist 新增 `_graph_gaps`——① 每个 `status='ok'` 的步要有
+step 节点；② 每条 verified finding 要有 finding 节点。**闸门**：图上没有任何该类
+节点时跳过（老库/测试预置账不倒判），引擎产的任务必然有 step 节点，因此生产环境
+始终按严格口径判。
+
+**测试面（+5 例，全库 511 例）**：test_evidence_graph 5（补齐器幂等 ×2 /
+主循环写节点+边+audit 写痕 / 步节点缺口阻断 / verified finding 缺口阻断）+
+test_worker 追加证据图断言。ruff 全绿。
+
+**遗留**：① 证据图目前只有 finding 实体与 evidences 边，`asset/hypo` 节点仍无写者
+（探索图的"资产/假设"半张图未建，文档只要求双图记账，未要求资产图）；② 补齐是
+"跑前一次"，若进程在补齐与出场之间崩掉，下一轮会再补（幂等，无需人工）。

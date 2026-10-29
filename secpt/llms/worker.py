@@ -33,7 +33,7 @@ from secpt.core.mission_board import Mission, MissionResult
 from secpt.errors import SecptError
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message, StepOutput
 from secpt.llms.coach import Coach
-from secpt.store import ledger
+from secpt.store import graph, ledger
 from secpt.tools.registry import ToolOutput, ToolRegistry
 
 
@@ -257,8 +257,17 @@ class Worker:
             return 0
         title = (receipt.args.get("title") or "").strip()
         detail = (receipt.args.get("detail") or "").strip()
-        ledger.append_finding(
+        row = ledger.append_finding(
             self._conn, task_id, title or "(无题)", detail, receipt.raw_ref, actor=self._actor
+        )
+        # M5-15 证据图：worker 直写的 finding 也要有节点（否则出场①一致性会缺一条）。
+        graph.put_finding_node(
+            self._conn,
+            task_id,
+            row.id,
+            title=row.title,
+            evidence_ref=row.evidence_ref,
+            actor=self._actor,
         )
         return 1
 

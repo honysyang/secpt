@@ -93,6 +93,11 @@ def test_happy_path_declares_finding(tmp_path: Path) -> None:
         ).fetchall()
     ]
     assert rows == [("claimed", "w 发现", WORKER_ACTOR)]  # M5-11：申报者身份如实落账
+    node_keys = [
+        row["key"]
+        for row in conn.execute("SELECT key FROM graph_nodes WHERE kind='finding'").fetchall()
+    ]
+    assert len(node_keys) == 1 and node_keys[0].startswith("finding-")  # M5-15 证据图
 
 
 def test_budget_exhausted_honest_unfinished() -> None:

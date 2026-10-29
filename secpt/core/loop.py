@@ -238,6 +238,13 @@ class PentestLoop:
         machine = fsm.Fsm()
         machine.go(fsm.FSMState.WORK)
         counter = stall.StallCounter(n=self._stall_failures, repeat_n=self._stall_repeat_plans)
+        # M5-15 双图补齐：历史账（水位线之前的步）与 worker 直写的 finding 可能缺
+        # 节点——跑第一步前对齐一次，出场清单①的"小票/双图一致"才有可判的基础。
+        healed = graph.ensure_step_nodes(self._conn, task.id) + graph.ensure_finding_nodes(
+            self._conn, task.id
+        )
+        if healed:
+            self._audit(task.id, f"双图补齐：{healed} 个节点（历史账/worker 直写）")
         outcomes: list[StepOutcome] = []
         exit_streak = 0  # 出场三验连败计（W2-1）：每次 done 过验，不过弹回
         rescue_used = False  # 救场名额（WF5）：每 run 只有一次 LLMC 救场机会
@@ -463,19 +470,22 @@ class PentestLoop:
             # 转 finding——回执在账也在，小票丢了账不会独活；写走 ledger 官门，
             # 本循环保持"黑板写入口只经 store/*"的纪律。真伪裁决不在本事务：
             # 先提交，再交 sweep 刻点逐条裁决（先账后判）。
+            finding_rows: list[FindingRow] = []
             for receipt in receipts:
                 if (
                     receipt.tool_name == "declare_finding"
                     and receipt.exit_code == 0
                     and receipt.raw_ref
                 ):
-                    ledger.append_finding(
-                        self._conn,
-                        task.id,
-                        receipt.args.get("title", ""),
-                        receipt.args.get("detail", ""),
-                        receipt.raw_ref,
-                        actor="main",
+                    finding_rows.append(
+                        ledger.append_finding(
+                            self._conn,
+                            task.id,
+                            receipt.args.get("title", ""),
+                            receipt.args.get("detail", ""),
+                            receipt.raw_ref,
+                            actor="main",
+                        )
                     )
             # M3-3 流量真相落账（黑板写入口只经 store/*）：观测窗交割的事件在
             # 此入 observations——LLM 小票之外的客观事件流，task/run 锚点由
@@ -503,6 +513,25 @@ class PentestLoop:
                     self._conn, task.id, f"step-{step_no - 1}", f"step-{step_no}", "sequence"
                 )
                 edge_writes = 1
+            # M5-15 证据图：本步申报的 finding 落节点，用 evidences 边挂在本步节点上。
+            # 双图自此名副其实——探索图（step 链）+ 证据图（finding 实体及其锚点）。
+            for finding in finding_rows:
+                graph.put_finding_node(
+                    self._conn,
+                    task.id,
+                    finding.id,
+                    title=finding.title,
+                    evidence_ref=finding.evidence_ref,
+                    actor=finding.actor,
+                )
+                graph.put_edge(
+                    self._conn,
+                    task.id,
+                    f"step-{step_no}",
+                    graph.finding_key(finding.id),
+                    "evidences",
+                )
+                edge_writes += 1
         for ticket in tickets:
             if self._bus is not None:
                 self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
@@ -515,7 +544,7 @@ class PentestLoop:
                 task_id=task.id,
                 run_id=run.id,
                 step_no=step_no,
-                nodes=1,
+                nodes=1 + len(finding_rows),
                 edges=edge_writes,
             )
         # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。

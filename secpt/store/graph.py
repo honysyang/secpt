@@ -214,6 +214,92 @@ def task_edges(conn: sqlite3.Connection, task_id: str) -> list[GraphEdgeRow]:
     ]
 
 
+def finding_key(finding_id: str) -> str:
+    """证据图里 finding 节点的键（与出场清单的一致性校验共用同一约定）。"""
+    return f"finding-{finding_id}"
+
+
+def put_finding_node(
+    conn: sqlite3.Connection,
+    task_id: str,
+    finding_id: str,
+    *,
+    title: str,
+    evidence_ref: str,
+    actor: str,
+) -> GraphNodeRow:
+    """落一条证据图节点（M5-15）：finding 是"证据图"里的实体。
+
+    双图口径：``step`` 节点串成探索图（主循环每步一条），``finding`` 节点是证据图
+    （每条 claim 一条，锚点随节点存 props 便于面板/一致性校验）。同一 finding 重复
+    落键走 version+1（幂等重放安全）。
+    """
+    return put_node(
+        conn,
+        task_id,
+        "finding",
+        finding_key(finding_id),
+        {"title": title[:80], "evidence_ref": evidence_ref[:200], "actor": actor},
+    )
+
+
+def ensure_step_nodes(conn: sqlite3.Connection, task_id: str) -> int:
+    """补齐缺失的探索图 step 节点（幂等）：返回本次补了几条。
+
+    M4-6 起主循环每步都写 step 节点；本函数只兜"历史账/半截事务"的缺口——
+    续跑一个旧 run 时若水位线之前的步没有节点，出场清单①会倒判红，这里先对齐。
+    """
+    rows = conn.execute(
+        "SELECT s.step_no, s.llm_output FROM steps s WHERE s.task_id = ? AND s.status = 'ok'"
+        " AND NOT EXISTS (SELECT 1 FROM graph_nodes g WHERE g.task_id = s.task_id"
+        " AND g.kind = 'step' AND g.key = 'step-' || s.step_no)"
+        " ORDER BY s.step_no",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        thought = ""
+        try:
+            payload = json.loads(str(row["llm_output"]))
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            thought = str(payload.get("thought") or "")
+        put_node(
+            conn,
+            task_id,
+            "step",
+            f"step-{row['step_no']}",
+            {"thought": thought[:80], "backfilled": True},
+        )
+    return len(rows)
+
+
+def ensure_finding_nodes(conn: sqlite3.Connection, task_id: str) -> int:
+    """补齐缺失的证据图节点（幂等）：返回本次补了几条。
+
+    为什么需要：worker 直写的 finding 与 M5-15 之前的历史 finding 可能没有节点；
+    出场清单①要"小票/双图一致"，进场/续跑时补一次，保证账本与证据图对齐。
+    """
+    rows = conn.execute(
+        "SELECT f.id, f.title, f.evidence_ref, f.actor FROM findings f"
+        " WHERE f.task_id = ? AND NOT EXISTS ("
+        "   SELECT 1 FROM graph_nodes g WHERE g.task_id = f.task_id"
+        "   AND g.kind = 'finding' AND g.key = 'finding-' || f.id)"
+        " ORDER BY f.rowid",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        put_finding_node(
+            conn,
+            task_id,
+            str(row["id"]),
+            title=str(row["title"]),
+            evidence_ref=str(row["evidence_ref"]),
+            actor=str(row["actor"]),
+        )
+    return len(rows)
+
+
 def graph_summary(conn: sqlite3.Connection, task_id: str) -> str:
     """渲染给注意力包的一屏摘要：kind 计数 + 边数 + 最近五个键。
 
@@ -244,8 +330,12 @@ def graph_summary(conn: sqlite3.Connection, task_id: str) -> str:
 __all__ = [
     "GraphEdgeRow",
     "GraphNodeRow",
+    "ensure_finding_nodes",
+    "ensure_step_nodes",
+    "finding_key",
     "graph_summary",
     "put_edge",
+    "put_finding_node",
     "put_node",
     "task_edges",
     "task_nodes",
