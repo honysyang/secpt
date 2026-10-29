@@ -19,10 +19,13 @@ import pytest
 
 from secpt.assets import (
     list_prompts,
+    list_roles,
     list_skills,
+    load_role,
     load_skill,
     prompt_text,
     render_prompt,
+    role_fragments,
     skill_fragments,
 )
 from secpt.core.mission_board import Mission, MissionBoard, MissionResult
@@ -128,7 +131,42 @@ class TestSkillLibrary:
         assert info.value.code == "E_ASSET"
 
 
-# ---------- worker 挂载技能 ----------------------------------------------------
+# ---------- 角色库（who+how 打包） ----------------------------------------------
+
+
+class TestRoleLibrary:
+    def test_bundled_role_shipped_with_reference_chain(self) -> None:
+        """角色包引用 skills 与 prompts：三库链路在同一条资产上闭合。"""
+        assert "recon" in list_roles()
+        role = load_role("recon")
+        assert role is not None
+        assert role.name == "侦察员"
+        assert role.skills == ("port-recon", "web-surface")
+        assert role.prompts == ("skills.evidence",)
+        assert "侦察员" in role.instruction
+        assert "证据纪律" in role_fragments(role)[0]
+
+    def test_missing_role_returns_none(self) -> None:
+        assert load_role("no-such-role") is None
+
+    def test_md_role_uses_body_as_instruction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """md 角色包：正文即 instruction（允许"先写 who/how、后补元数据"）。"""
+        roles = tmp_path / "roles"
+        roles.mkdir()
+        (roles / "scout.md").write_text(
+            "---\nid: scout\nname: 斥候\nskills:\n  - port-recon\n---\n只管看，不动手。\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("SECPT_ASSETS_DIR", str(tmp_path))
+        role = load_role("scout")
+        assert role is not None
+        assert role.instruction == "只管看，不动手。"
+        assert role.skills == ("port-recon",)
+
+
+# ---------- worker 挂载技能 / 角色 ---------------------------------------------
 
 
 def _step(thought: str, *, done: bool = False) -> str:
@@ -143,7 +181,7 @@ def _worker_env(script: list[object]) -> tuple[Worker, Mission, FakeLLM, sqlite3
     task = ledger.start_task(conn, input_text="技能挂载演示", goal="摸扫")
     fake = FakeLLM(list(script))
     worker = Worker(llm=LlmClient(fake), dispatcher=ToolRegistry([]), conn=conn)
-    mission = Mission(persona="recon", goal="摸扫一圈", step_budget=1, task_id=task.id)
+    mission = Mission(persona="worker", goal="摸扫一圈", step_budget=1, task_id=task.id)
     return worker, mission, fake, conn
 
 
@@ -182,6 +220,43 @@ def test_worker_missing_skill_degrades_with_audit() -> None:
 
 def test_mission_skills_default_empty_keeps_old_semantics() -> None:
     assert Mission(goal="g").skills == ()
+
+
+def test_worker_mounts_role_by_persona() -> None:
+    """persona 命中角色库 → 整包挂上：行事风格 + 角色引用的技能 + 纪律片段。"""
+    worker, mission, fake, conn = _worker_env([_step("收工", done=True)])
+    mounted = mission.model_copy(update={"persona": "recon"})
+    result = worker.run(mounted)
+
+    assert result.ok and result.finished
+    system = fake.calls[0][0].content
+    assert "## 角色：侦察员" in system
+    assert "优先只读侦察" in system  # instruction 在场
+    assert "挂载技能：端口摸底" in system  # 角色 skills 自动挂
+    assert "挂载技能：web 面初筛" in system
+    entry = conn.execute(
+        "SELECT what FROM audit_log WHERE actor = 'workerA' ORDER BY rowid LIMIT 1"
+    ).fetchone()["what"]
+    assert "role=侦察员" in entry
+
+
+def test_worker_unknown_persona_keeps_free_text() -> None:
+    """persona 不命中角色库 = 自由文本（M3-5 老语义守恒，不阻断派单）。"""
+    worker, mission, fake, _conn = _worker_env([_step("收工", done=True)])
+    mounted = mission.model_copy(update={"persona": "自由文本角色"})
+    result = worker.run(mounted)
+
+    assert result.ok
+    assert "## 角色：" not in fake.calls[0][0].content
+
+
+def test_worker_unions_role_skills_and_mission_skills_without_dup() -> None:
+    worker, mission, fake, _conn = _worker_env([_step("收工", done=True)])
+    mounted = mission.model_copy(update={"persona": "recon", "skills": ("port-recon",)})
+    worker.run(mounted)
+
+    system = fake.calls[0][0].content
+    assert system.count("挂载技能：端口摸底") == 1  # 角色 ∪ 工单 保序去重
 
 
 # ---------- agent_run 把 skills 带进工单 ---------------------------------------

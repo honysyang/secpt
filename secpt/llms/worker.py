@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from secpt.assets import load_skill, prompt_text, skill_fragments
+from secpt.assets import load_role, load_skill, prompt_text, role_fragments, skill_fragments
 from secpt.core.mission_board import Mission, MissionResult
 from secpt.errors import SecptError
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message, StepOutput
@@ -66,13 +66,14 @@ class Worker:
                 findings_count=0,
                 summary="E_TOOL_FAIL: mission 缺 task_id 锚点，worker 不接悬空单",
             )
-        system_prompt = self._system_prompt(mission, task_id)
+        system_prompt, role_name = self._system_prompt(mission, task_id)
+        role_note = f"，role={role_name}" if role_name else ""
         skills_note = f"，skills={','.join(mission.skills)}" if mission.skills else ""
         ledger.audit(
             self._conn,
             task_id,
             self._actor,
-            f"领单：{mission.goal}（persona={mission.persona}{skills_note}）",
+            f"领单：{mission.goal}（persona={mission.persona}{role_note}{skills_note}）",
         )
         findings_count = 0
         for step_no in range(1, mission.step_budget + 1):
@@ -124,14 +125,36 @@ class Worker:
             summary=summary,
         )
 
-    def _system_prompt(self, mission: Mission, task_id: str) -> str:
-        """基线话术 + 工单挂载技能（正文 + 引用纪律片段）。
+    def _system_prompt(self, mission: Mission, task_id: str) -> tuple[str, str | None]:
+        """基线话术 + 角色包（who+how）+ 工单挂载技能（正文 + 引用纪律片段）。
 
-        缺件与引用断裂都 audit 留痕后跳过该技能——技能挂载失败不阻断领单，
-        但"这单实际挂了哪几条"必须能从账本复算（领单行带 skills 清单）。
+        角色解析口径（M5，设计文档 L11/L41）：``persona`` 若命中角色库 id，就把
+        整包挂上（行事风格 + 角色引用的技能 + 纪律片段）；不命中则沿用自由文本
+        persona（M3-5 老语义守恒，不阻断派单）。
+        技能清单 = 角色引用的技能 ∪ 工单显式技能（保序去重）——工单可覆盖/追加。
+        缺件与引用断裂都 audit 留痕后跳过——技能是增强不是前置，但"这单实际挂了
+        哪几条"必须能从账本复算（领单行带 role=/skills=）。
+
+        Returns:
+            (系统话术, 命中的角色名或 None) —— 角色名供领单审计行如实署名。
         """
         parts = [prompt_text("worker.system")]
-        for skill_id in mission.skills:
+        role = load_role(mission.persona) if mission.persona else None
+        skill_ids: list[str] = []
+        if role is not None:
+            parts.append(f"## 角色：{role.name}\n{role.description}\n{role.instruction}".strip())
+            try:
+                parts.extend(role_fragments(role))
+            except SecptError as exc:
+                ledger.audit(
+                    self._conn,
+                    task_id,
+                    self._actor,
+                    f"角色 {role.id} 引用纪律缺失：{exc}（角色其余部分照挂）",
+                )
+            skill_ids.extend(role.skills)
+        skill_ids.extend(mission.skills)
+        for skill_id in dict.fromkeys(skill_ids):
             skill = load_skill(skill_id)
             if skill is None:
                 ledger.audit(
@@ -150,7 +173,7 @@ class Worker:
                 continue
             parts.append(f"## 挂载技能：{skill.name}\n{skill.description}\n{skill.body}".strip())
             parts.extend(fragments)
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), (role.name if role is not None else None)
 
     def _audit_hitl(self, task_id: str, receipt: ToolOutput) -> None:
         """M4-4 发起侧落账：HIGH 审批批/拒两路各有 audit 痕（actor=workerA）。

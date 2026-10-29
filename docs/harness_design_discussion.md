@@ -2243,3 +2243,53 @@ test_web_view 新增 4（气泡页/入口链接/405/404）。ruff format+check �
 真正按 actor 区分需要 findings 记 actor 列，属 schema 变更）；③ 规划重估是
 确定性节拍（每 N 步），未做"仅当双图无新增 verified 才重估"的条件触发；
 ④ 面板对话页是静态投影（刷新可见），未接 SSE 实时追加。
+
+## §79 M5 第二梯队（规划对象 · 出场③ · 关键参数/重复抑制 · 角色库）
+
+按 §78 盘点的优先级补四卡，逐条对照 `pentest-agent-goals-requirements-v0.1.md`：
+
+**拍板①：规划对象落账（L9-10 规划 A/B/C、L16 规划状态实时更新）。**
+此前 plan_updates 只是 StepOutput 字段、主循环从不消费，规划段是硬编码占位。
+落地：`store/plan.py`（add/active/latest_id/render）+ baseline 的 plans 表终于
+有写者——每步 plan_updates 与 steps/小票/水位线同一事务落 plans，steps.plan_refs
+记本步新增行 id（schema 早有此列）；注意力包每步从账本渲染"规划 vN（active M 条）
++ 逐条[step k]"，resume 自然延续。去重口径：内容 strip 后相同且仍 active 不重复
+落行，版本号 = 全 task max(version)+1（同批共享一号）。
+教练提案（救场/重估）作为规划修订落账（parent_id 指向上版）——规划从此是
+"可被重估的对象"，而不是重估一段空文本。
+
+**拍板②：出场清单③"交付对目标"= profile 驱动的 verified 命中（L24-28）。**
+criteria 是自然语言，机器判据必须可一键复算：`[[acceptance]]`（id/pattern）逐条
+须被 verified finding 的 title/detail 子串命中（不分大小写），claimed 不算交付；
+未配 = 不判（mock/探索型任务不虚红）。`ExitChecklist(acceptance=...)` 注入，
+finalize 不 import judge（分层单向，映射在 main 装配层）。连败 3 轮 E_WALL 走异常出口。
+
+**拍板③：关键参数进配置 + 重复规划抑制 + 撞墙升温（L66/L84/L83）。**
+- `core/limits.py`：`[budget].max_steps`（200）与 `[stall].failures/repeat_plans`
+  （5/2）从 profile 装配；此前 CLI 永远 200，不可配；坏值 E_PROFILE；
+- StallCounter 双口径：工具连败计 + **重复规划计**（同一段非空 plan_updates 连续
+  repeat_n 步提出即拉铃，共用救场通道，reset 清双计）。归一化只做去空白——
+  "这两段规划是不是一回事"要 LLM 判断，而失速计必须零成本纯算术（判零归代码）；
+- 温度分档：Coach.propose（撞墙换路）走发散档 0.8，Coach.review（重估核对）
+  保持规划档 0.2；TEMPERATURE_FREESTYLE 此前只用于 chat，现正式接入器官。
+
+**拍板④：角色库 = who+how 打包（L41），persona 即角色 id。**
+`secpt/assets/roles/*.{md,yaml}`：id/name/description/skills/prompts/instruction。
+worker 领单时 persona 命中角色库 → 整包挂上（行事风格 + 角色技能 ∪ 工单 skills
+保序去重 + 纪律片段）；不命中则沿用自由文本 persona（M3-5 老语义守恒）。
+领单 audit 带 `role=` 与 `skills=`，多 worker 下"这单按哪套打法做"可复算。
+至此六库活 5：工具库/prompts/skills/角色/经验，只剩知识库（文档口径"有积累再独立"）。
+
+**测试面（43 新例，全库 469 例）**：test_plan 7（器官 4 + 接线 3）；
+test_finalize +5（验收命中/仅 claimed/缺项/未配守恒/E_WALL 接线）；test_judge +4
+（acceptance 解析与坏值）；test_limits 19（配置 8/失速计 6/接线 2/温度 2/构造校验 1）；
+test_assets +6（角色包解析与引用链/worker 挂载/自由文本守恒/技能并集去重）；
+test_main +1（max_steps=1 真掐步数线）。CLI mock 演示冒烟：worker 领单行出现
+`role=侦察员`，step 行出现 `plan=+0`。
+
+**遗留**：① plans.status（active/done/cancelled/failed）仍无推进者——"每条规划
+是否完成"的判定与出场③同源，需要主 LLM 显式标注（StepOutput 增加 plan_done 字段
+或规划条目 id 引用），属契约变更，留待与知识库一并评估；② 重复抑制只看"连续
+完全相同的 plan_updates"，语义相似（换个说法复述）不判——那需要 LLM，违背失速计
+零成本口径；③ 角色库只有 recon 一个出厂语料，其余角色待填；④ max_steps 配置在
+run/resume 生效，尚未做"超限后半场报告里的预算余量"展示。
