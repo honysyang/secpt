@@ -23,6 +23,7 @@ from functools import partial
 
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
+from secpt.core.plan_watch import PlanWatcher, load_plan_config
 from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
@@ -448,6 +449,11 @@ def _assemble(
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
     probe_cfg = load_probe_config(_profile_path())
+    # M5 事件驱动调规划：PlanWatcher 订阅 graph_changed（消费端只置旗），
+    # 主循环在步界调 LLMC 重估（名额来自 [plan] 段，默认 5 步一次 / 每 run 3 次）。
+    plan_cfg = load_plan_config(_profile_path())
+    watcher = PlanWatcher(plan_cfg.review_every_steps)
+    bus.subscribe(watcher)
     reg = _registry(board=board, runner=runner, broker=broker)
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
@@ -469,6 +475,8 @@ def _assemble(
         coach=Coach(client),
         probe_note=probe_note_for(probe_cfg, _probe_backend_name()),
         step_tool_limit=_step_tool_limit(),
+        plan_watcher=watcher,
+        plan_review_limit=plan_cfg.review_limit,
     )
 
 

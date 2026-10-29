@@ -92,6 +92,12 @@ class CliView:
             f" +{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e"
         )
 
+    def _on_plan_reviewed(self, payload: Mapping[str, object]) -> None:
+        """M5 规划重估行（角色气泡：LLMC）：提案经下一包吸收，本行只报告不裁决。"""
+        self._print(
+            f"【LLMC】step {payload.get('step_no', '?')} 规划重估：{payload.get('idea', '')}"
+        )
+
 
 def _on_unknown(_view: CliView, _payload: Mapping[str, object]) -> None:
     """M1 契约外的 M2 事件不渲染——面板保持干净，接口在、接线留给后续里程碑。"""
@@ -101,6 +107,7 @@ _HANDLERS: dict[str, Callable[[CliView, Mapping[str, object]], None]] = {
     "run_step_started": CliView._on_step_started,
     "ticket_appended": CliView._on_ticket,
     "graph_changed": CliView._on_graph_changed,
+    "plan_reviewed": CliView._on_plan_reviewed,
     "run_ended": CliView._on_run_ended,
 }
 

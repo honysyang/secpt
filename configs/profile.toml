@@ -10,3 +10,10 @@ enabled = true
 [[ground_truth]]
 id = "GT-22-open"
 pattern = "22/tcp open"
+
+# 规划重估（M5 双图事件线）：graph_changed 每 review_every_steps 步置一次旗，
+# 主循环在步界调 LLMC 重估规划；review_limit = 每 run 名额上限（防烧钱）。
+# LLMC 只提案不裁决，提案经下一步注意力包吸收才生效。缺段=取默认 5/3。
+[plan]
+review_every_steps = 5
+review_limit = 3

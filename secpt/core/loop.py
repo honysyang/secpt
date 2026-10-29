@@ -21,6 +21,9 @@ M1 边界（诚实声明，不做假实现）：
   audit（probe_note 一句话，与裁判装配同手式）。
 - 三问投影从账本还原（target=tasks.goal、objective/success_criteria=runs.config_json）：
   fresh 与 resume 走同一条还原路径，不依赖内存状态。
+- M5 事件驱动调规划：双图变化事件线（graph_changed）由 PlanWatcher 消费端在
+  步界置旗，主循环每 N 步调一次 LLMC 重估规划（每 run 名额有限，默认 3）；
+  与失速救场同款纪律——只提案不裁决，提案经下一包注意力吸收才生效。
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from secpt.core import budget, checkpointer, fsm, stall
+from secpt.core.plan_watch import PlanWatcher
 from secpt.errors import LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput
 from secpt.llms.coach import Coach
@@ -145,11 +149,15 @@ class PentestLoop:
         coach: Coach | None = None,
         probe_note: str | None = None,
         step_tool_limit: int = 4,
+        plan_watcher: PlanWatcher | None = None,
+        plan_review_limit: int = 3,
     ) -> None:
         if step_tool_limit <= 0:
             raise ValueError(
                 f"step_tool_limit 必须为正整数（截断面是构造期契约），got {step_tool_limit}"
             )
+        if plan_review_limit <= 0:
+            raise ValueError(f"plan_review_limit 必须为正整数（名额上界），got {plan_review_limit}")
         self._conn = conn
         self._llm = main_llm
         self._dispatcher = dispatcher
@@ -162,6 +170,8 @@ class PentestLoop:
         self._coach = coach
         self._probe_note = probe_note
         self._step_tool_limit = step_tool_limit
+        self._plan_watcher = plan_watcher
+        self._plan_review_limit = plan_review_limit
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -217,6 +227,8 @@ class PentestLoop:
         outcomes: list[StepOutcome] = []
         exit_streak = 0  # 出场三验连败计（W2-1）：每次 done 过验，不过弹回
         rescue_used = False  # 救场名额（WF5）：每 run 只有一次 LLMC 救场机会
+        reviews_used = 0  # 规划重估名额（M5 事件线）：每 run 至多 plan_review_limit 次
+        review_stop_noted = False  # "名额用尽"只落一次账（不随节拍刷屏）
         plan_note = _BASE_PLAN_NOTE  # 注意力包规划段；救场提案临时替换一个步
         exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
         crashed: SecptError | None = None
@@ -227,6 +239,22 @@ class PentestLoop:
                 outcome, done, ring = self._one_step(task, run, step_no, counter, plan_note)
                 outcomes.append(outcome)
                 plan_note = _BASE_PLAN_NOTE  # 提案吸收一次即用掉：下一步还原占位
+                # M5 事件线消费：graph_changed 订阅者已在步界置旗；此处才动 LLMC
+                # （消费端只报告不接管——重估的账先落、提案下一步才被吸收）。
+                if self._plan_watcher is not None and self._plan_watcher.take():
+                    if reviews_used >= self._plan_review_limit:
+                        if not review_stop_noted:
+                            self._audit(
+                                task.id,
+                                "规划重估名额用尽"
+                                f"（{self._plan_review_limit} 次），后续按现规划续跑",
+                            )
+                            review_stop_noted = True
+                    else:
+                        hint = self._plan_review(task, run, outcome.step_no, plan_note)
+                        if hint is not None:
+                            reviews_used += 1
+                            plan_note = hint
                 if ring:
                     hint = self._on_stall_ring(
                         task, run, outcome.step_no, counter, plan_note, rescue_used
@@ -509,6 +537,41 @@ class PentestLoop:
         ledger.audit(self._conn, task.id, "llmc", f"教练提案（只提案不裁决）：{hint}")
         counter.reset()
         _log.info("coach_proposal_accepted", task_id=task.id)
+        return hint
+
+    def _plan_review(self, task: TaskRow, run: RunRow, step_no: int, plan_note: str) -> str | None:
+        """M5 规划重估（事件驱动）：读双图给"要不要换规划"的提案，只提案不裁决。
+
+        分支纪律与 :meth:`_on_stall_ring` 同款（可降级器官）：
+        - coach 缺位 → None（事件线照旧只报告，不接管执行流）；
+        - 教练失能（LlmError 等）→ warning + audit(actor=main) 留痕后 None；
+        - 提案在手 → audit(actor=llmc) 先账后吸收 → 下一步注意力包吸收一次。
+
+        提案空白与失速救场的口径**不同**：重估的语义是"确认现状仍成立"，
+        确认成功不需要账，也不占名额（所以返回 None 且不落 audit）。
+        """
+        if self._coach is None:
+            return None
+        try:
+            proposal = self._coach.review(graph.graph_summary(self._conn, task.id), plan_note)
+        except Exception as exc:  # noqa: BLE001  可降级器官兜底（见 docstring）
+            _log.warning("plan_review_degraded", task_id=task.id, step_no=step_no, error=str(exc))
+            self._audit(task.id, f"规划重估降级：{exc}")
+            return None
+        if proposal is None:
+            _log.info("plan_review_no_proposal", task_id=task.id, step_no=step_no)
+            return None
+        hint = f"教练规划重估待吸收（事件驱动，只提案不裁决）：{proposal.idea}——{proposal.reason}"
+        ledger.audit(self._conn, task.id, "llmc", hint)
+        _log.info("plan_review_accepted", task_id=task.id, step_no=step_no)
+        if self._bus is not None:
+            self._bus.emit(
+                "plan_reviewed",
+                task_id=task.id,
+                run_id=run.id,
+                step_no=step_no,
+                idea=proposal.idea,
+            )
         return hint
 
     def _judge_pass(self, task_id: str) -> None:

@@ -23,6 +23,7 @@ EventName = Literal[
     "run_step_started",
     "ticket_appended",
     "graph_changed",
+    "plan_reviewed",
     "exit_passed",
     "exit_failed",
     "run_ended",
