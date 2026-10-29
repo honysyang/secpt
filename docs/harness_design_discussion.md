@@ -2645,3 +2645,38 @@ key/model）；README 增加"用 .env 配置"小节；`secpt/env_file.py` 为唯
 
 **测试面（+8 例，全库 525 例）**：test_env_file（解析四形态/非法键/白名单/
 缺失 E_CONFIG/真实环境优先/未设置不读/CLI 入口装载/坏路径 rc=1）。ruff 全绿。
+
+## §93 M5-21/22 自动加载 .env + 统一入口（主智能体判任务/对话）
+
+两个用户侧需求，外加顺手修掉上一轮观察到的 mock 报告降级。
+
+**M5-21 自动加载 .env**：装载顺序改为「`SECPT_ENV_FILE` 显式 > 当前目录 `./.env`
+（存在才读）」，`SECPT_DOTENV=0` 可关闭 cwd 读取（CI/单测用，仓库根就有一份含真
+key 的 .env）。三条安全边界不变：键白名单（只收 `SECPT_*` 与 `LLM_PROVIDER`）、
+真实环境变量优先、零 shell 求值。显式路径指空仍 `E_CONFIG` 拒跑。
+测试侧新增 `tests/conftest.py` 统一 `SECPT_DOTENV=0`，防仓库 .env 污染用例
+（显式路径的用例不受影响）。
+
+**M5-22 统一入口**：`secpt run` 的 `--goal` 变可选，位置参数（或 stdin）走
+`llms.route.Router` 一次结构化调用判断模式：
+- `pentest` → 照常进闭环（模型没给 goal 就用原文兜底）；
+- `chat` → 打印答复、**不建 task 不落账**（对应文档 L2-3"无 goal → 对话模式"）；
+- `--goal` 仍可显式跳过判断（脚本/CI 与既有用例保持不变）；`secpt chat` 保留为
+  "强制对话"入口。
+路由失败（LlmError）原样上抛 → main 兜底非零退出，绝不"猜一个模式"。
+mock 档一律判 pentest（离线演示意图就是跑通闭环，假模型分类无信息量）。
+
+**顺手修**：`_mock_run_script` 尾项改为**双用途 JSON**（`entries` + `summary`）并
+备两份——工具真成功时蒸馏会多调一次 LLM、先吃掉一格，只备一份会让终场报告降级
+（上一轮在真 nmap 机器上实际观察到 `report_degraded`）。
+
+**实测**：
+- `secpt run "什么是 XSS？一句话解释"` → `【模式】自动判断为对话` + `【AI】XSS…`
+  （自动加载 .env、真模型回答、零落账）；
+- `LLM_PROVIDER=mock secpt run "扫一下 10.0.0.1 的端口"` → `【模式】自动判断为
+  渗透任务：…` + `exit_kind=normal`。
+
+**测试面（+13 例，全库 536 例）**：test_env_file 增 3（cwd 自动加载 / 开关关闭 /
+显式优先于开关）+ conftest 护栏；test_route 5（goal 兜底 / 答复兜底 / prompt 携带
+输入 / 错误上抛 / 正常 chat）；test_main 3（自动判任务 / 自动判对话且零任务 /
+工具成功时报告不降级）。ruff 全绿。

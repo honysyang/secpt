@@ -1,18 +1,20 @@
-"""可选 `.env` 装载（M5-20）：只认显式路径，绝不隐式读当前目录。
+"""可选 `.env` 装载（M5-21）：显式路径优先，其次自动读当前目录的 `.env`。
 
-为什么不做"自动读 ./.env"：`secpt` 是渗透工具，配置里握着 API key 与执行隔离
-开关；隐式读 cwd 意味着"在哪个目录运行就吃哪份配置"，把目录变成攻击面。这里
-只认 ``SECPT_ENV_FILE`` 显式指路，且真实环境变量永远优先（容器/CI 里注入的
-值不会被文件覆盖）。
+装载顺序：
+1. ``SECPT_ENV_FILE`` 显式指路（指空文件 → ``E_CONFIG`` 拒跑，不静默跳过）；
+2. 未显式指路时自动读 ``./.env``（存在才读）；
+3. ``SECPT_DOTENV=0`` 可关闭第 2 步（CI / 单测用，避免仓库根 .env 影响用例）。
 
 安全边界（两道）：
 1. **键白名单**：只接受 ``SECPT_*`` 与 ``LLM_PROVIDER``——.env 里写 ``PATH``/
    ``HOME`` 之类不会被采纳，防"配错文件改坏进程环境"；
-2. **不执行任何 shell 语法**：只支持 ``KEY=VALUE`` / ``export KEY=VALUE`` /
+2. **真实环境变量优先**：``apply_env_file`` 逐键判存在，容器/CI/临时 export
+   注入的值永远赢过文件；
+3. **不执行任何 shell 语法**：只支持 ``KEY=VALUE`` / ``export KEY=VALUE`` /
    去引号 / ``#`` 注释，不做变量展开，不 source 脚本。
 
-格式不支持时静默跳过该行（配置文件是数据不是代码，坏行不该炸进程）；
-文件本身不存在才是配置错误 → ``E_CONFIG`` 拒跑（显式指路却指空，是笔误）。
+文件里格式不对的行静默跳过（配置是数据不是代码）；显式指路却指空才是配置
+错误 → ``E_CONFIG`` 拒跑。
 """
 
 from __future__ import annotations
@@ -23,6 +25,9 @@ from pathlib import Path
 from secpt.errors import SecptError
 
 ENV_FILE_VAR = "SECPT_ENV_FILE"
+DOTENV_TOGGLE = "SECPT_DOTENV"
+_DEFAULT_DOTENV = Path(".env")
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 _ALLOWED_PREFIX = "SECPT_"
 _ALLOWED_EXACT = frozenset({"LLM_PROVIDER"})
 _QUOTES = ("'", '"')
@@ -94,15 +99,26 @@ def apply_env_file(path: str | Path) -> list[str]:
 
 
 def bootstrap_env() -> list[str]:
-    """按 ``SECPT_ENV_FILE`` 装载 .env；未设置则不读任何文件（返回 []）。
+    """在 ``main()`` 入口调用一次：按"显式 > 当前目录 .env"装载，返回生效键。
 
-    在 ``main()`` 入口调用一次：之后所有 ``os.environ.get`` 都能看到文件里的值，
-    装配层无需感知"值从哪来"。
+    未设置 ``SECPT_ENV_FILE`` 且当前目录没有 ``.env``、或 ``SECPT_DOTENV=0``
+    时什么都不读（返回 []）。
     """
-    path = os.environ.get(ENV_FILE_VAR, "").strip()
-    if not path:
+    explicit = os.environ.get(ENV_FILE_VAR, "").strip()
+    if explicit:
+        return apply_env_file(explicit)
+    if os.environ.get(DOTENV_TOGGLE, "").strip().lower() in _OFF_VALUES:
         return []
-    return apply_env_file(path)
+    if not _DEFAULT_DOTENV.is_file():
+        return []
+    return apply_env_file(_DEFAULT_DOTENV)
 
 
-__all__ = ["ENV_FILE_VAR", "apply_env_file", "bootstrap_env", "load_env_file", "parse_env_text"]
+__all__ = [
+    "DOTENV_TOGGLE",
+    "ENV_FILE_VAR",
+    "apply_env_file",
+    "bootstrap_env",
+    "load_env_file",
+    "parse_env_text",
+]

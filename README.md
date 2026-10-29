@@ -14,23 +14,28 @@
 # 安装（Python 3.12+）
 pip install -e ".[dev]"
 
-# 离线演示：mock provider，零网络、零 API Key
-LLM_PROVIDER=mock secpt run --goal "对内网 10.0.0.1 做端口摸底"
+# 零配置起步：仓库根的 .env 会自动加载（有 key 就用真模型，没有则显式用 mock）
+secpt run "对 10.0.0.1 做端口摸底"     # 主智能体自动判断：任务 → 渗透闭环
+secpt run "什么是 XSS？"               # 自动判断：咨询 → 单轮直答，不落账
+
+# 离线演示（零网络、零 Key）
+LLM_PROVIDER=mock secpt run "扫一下 10.0.0.1"
 
 # 接真模型（OpenAI 兼容协议）
 export LLM_PROVIDER=openai
 export SECPT_LLM_BASE_URL=https://api.example.com/v1
 export SECPT_LLM_API_KEY=sk-xxx
 export SECPT_LLM_MODEL=your-model
-secpt run --goal "对 10.0.0.5 做资产测绘并给出可利用面"
+secpt run "对 10.0.0.5 做资产测绘并给出可利用面"
 ```
 
 ## 八条命令
 
 | 命令 | 说明 |
 |---|---|
-| `secpt run --goal "..."` | 渗透任务模式：进场三问 → 主循环 → 出场六验 → 报告 |
-| `secpt chat "..."` | 对话模式：单轮直答，不进闭环、不落账 |
+| `secpt run "<一句话>"` | **统一入口**：主智能体判断——任务 → 渗透闭环（进场三问 → 主循环 → 出场六验 → 报告）；咨询 → 单轮直答不落账 |
+| `secpt run --goal "..."` | 显式任务（跳过自动判断，脚本/CI 用） |
+| `secpt chat "..."` | 强制对话模式：单轮直答，不进闭环、不落账 |
 | `secpt resume <task_id>` | 断电续跑：只复建不回放，从水位线 +1 继续 |
 | `secpt tools` | 工具货架（manifest + 结构化参数 + tier + sha256） |
 | `secpt evidence <task_id>` | 账本检查窗（小票 / 规划 / 发现 / 审计尾行） |
@@ -90,20 +95,20 @@ secpt run --goal "对 10.0.0.5 做资产测绘并给出可利用面"
 `SECPT_ENV`（经验环境键，默认 lab）、`SECPT_WORKERS`（临时覆盖配置）、
 `SECPT_ASSETS_DIR`、`SECPT_PROBE_BACKEND`、`LLM_PROVIDER`。
 
-### 用 `.env` 配置（可选）
+### 用 `.env` 配置
 
-仓库根有模板 `env.example`，复制为 `.env`（已 gitignore）后填值。两种生效方式：
+仓库根有模板 `env.example`，复制为 `.env`（已 gitignore）后填值。**默认自动加载**
+当前目录的 `.env`：
 
 ```bash
-# A. 让当前 shell 生效
-set -a; . ./.env; set +a
-
-# B. 让 secpt 自己装载（只认显式路径；真实环境变量永远优先）
-SECPT_ENV_FILE=.env secpt run --goal "..."
+secpt run "对 10.0.0.5 做端口摸底"   # 自动读 ./.env
 ```
 
-装载规则：只接受 `SECPT_*` 与 `LLM_PROVIDER` 两类键（写 `PATH` 之类不会被采纳），
-不做变量展开与 shell 求值；`SECPT_ENV_FILE` 指空文件会 `E_CONFIG` 拒跑。
+规则：
+- 显式 `SECPT_ENV_FILE=/path/.env` 优先（指空文件 `E_CONFIG` 拒跑）；
+- 真实环境变量永远优先于文件（容器/CI 注入的值不会被覆盖）；
+- 只接受 `SECPT_*` 与 `LLM_PROVIDER` 两类键（写 `PATH` 之类不会被采纳）；
+- 不做变量展开 / 不 source / 不执行 shell；`SECPT_DOTENV=0` 可关闭自动加载。
 
 ## 目录结构
 

@@ -56,9 +56,45 @@ class TestApply:
 
 
 class TestBootstrap:
-    def test_no_var_means_no_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_var_and_no_file_means_no_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SECPT_ENV_FILE", raising=False)
+        monkeypatch.setenv("SECPT_DOTENV", "0")
         assert bootstrap_env() == []
+
+    def test_auto_loads_cwd_dotenv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """M5-21：未显式指路时自动读当前目录 .env（用户要求）。"""
+        _write(tmp_path, "SECPT_ENV=auto\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SECPT_ENV_FILE", raising=False)
+        monkeypatch.delenv("SECPT_DOTENV", raising=False)
+        monkeypatch.delenv("SECPT_ENV", raising=False)
+        try:
+            assert bootstrap_env() == ["SECPT_ENV"]
+            assert os.environ["SECPT_ENV"] == "auto"
+        finally:
+            os.environ.pop("SECPT_ENV", None)
+
+    def test_toggle_off_disables_auto_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write(tmp_path, "SECPT_ENV=x\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SECPT_ENV_FILE", raising=False)
+        monkeypatch.setenv("SECPT_DOTENV", "0")
+        assert bootstrap_env() == []
+
+    def test_explicit_path_beats_toggle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """显式 SECPT_ENV_FILE 不受开关影响（显式意图优先）。"""
+        path = _write(tmp_path, "SECPT_ENV=explicit\n")
+        monkeypatch.setenv("SECPT_ENV_FILE", str(path))
+        monkeypatch.setenv("SECPT_DOTENV", "0")
+        monkeypatch.delenv("SECPT_ENV", raising=False)
+        try:
+            assert bootstrap_env() == ["SECPT_ENV"]
+        finally:
+            os.environ.pop("SECPT_ENV", None)
 
     def test_cli_bootstraps_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

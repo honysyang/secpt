@@ -44,6 +44,7 @@ from secpt.llms.coach import Coach
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.llms.providers import OpenAICompatProvider
+from secpt.llms.route import Route, Router
 from secpt.llms.worker import Worker
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
@@ -134,13 +135,23 @@ def _worker_provider(index: int) -> LlmProvider:
     return _provider_for(lambda: _worker_mock_script(index))
 
 
+def _route_provider(text: str) -> LlmProvider:
+    """路由专用 provider（M5-22）：mock 直接判为渗透任务（原文当 goal），openai 真判断。
+
+    为什么 mock 一律判任务：离线演示的意图就是"跑通闭环"，让假模型做分类没有
+    信息量；真实分类只在 openai 档发生。
+    """
+    return _provider_for(lambda: FakeLLM([Route(mode="pentest", goal=text)]))
+
+
 def _mock_run_script(goal_text: str) -> FakeLLM:
-    """M1 出厂演示脚本：进场三问 → 一步 nmap 摸扫 → 一步收工（done）→ 报告摘要。
+    """M1 出厂演示脚本：进场三问 → 一步 nmap 摸扫 → 一步收工（done）→ 尾项。
 
     脚本内容与 goal 文本无关——FakeLLM 不真理解输入，target 取输入截断只是
-    让账本可读；nmap 由 env 指向占位二进制必落 E_TOOL_FAIL 回执，整程零网络。
-    尾项是 LLMA 报告的 summary 脚本（run 正常收束后由 _emit_report 消费）；
-    resume 不跑进场（无 goal 项），直接收工 + 摘要。
+    让账本可读。尾项是**双用途** JSON：蒸馏器（_DraftList）取 entries、
+    报告器（_Summary）取 summary；备两份是因为"工具真的成功"时蒸馏会多调一次
+    LLM、先吃掉一格（真 nmap 场景），只备一份会让终场报告降级。
+    resume 不跑进场（无 goal 项），直接收工 + 尾项。
     """
     goal_json = json.dumps(
         {
@@ -155,8 +166,11 @@ def _mock_run_script(goal_text: str) -> FakeLLM:
         tool_calls=[ToolCall(name="nmap", args={"target": _NULL_TARGET, "ports": "22,80"})],
     )
     wrap_up = StepOutput(thought="演示收工", tool_calls=[], done=True)
-    summary = json.dumps(
-        {"summary": "M1 mock 演示：nmap 摸扫一轮（工具回执已落账），出口三验通过。"},
+    tail = json.dumps(
+        {
+            "entries": [],
+            "summary": "M1 mock 演示：nmap 摸扫一轮（工具回执已落账），出口三验通过。",
+        },
         ensure_ascii=False,
     )
     # M3-5 领单演示（env 门控）：SECPT_DEMO_AGENT_RUN=1 时插一步 agent_run，
@@ -177,13 +191,8 @@ def _mock_run_script(goal_text: str) -> FakeLLM:
     )
     mid = [sweep, agent_step] if _demo_agent_run_enabled() else [sweep]
     if goal_text:
-        if _demo_agent_run_enabled():
-            # agent_run 成功小票会成为收尾蒸馏候选（experience.py 的候选口径），
-            # 因此演示脚本多备一条"空草案"应答——蒸馏器真跑一次、如实落 0 条。
-            distill_stub = json.dumps({"entries": []}, ensure_ascii=False)
-            return FakeLLM([goal_json, *mid, wrap_up, distill_stub, summary])
-        return FakeLLM([goal_json, *mid, wrap_up, summary])
-    return FakeLLM([wrap_up, summary])
+        return FakeLLM([goal_json, *mid, wrap_up, tail, tail])
+    return FakeLLM([wrap_up, tail, tail])
 
 
 def _demo_agent_run_enabled() -> bool:
@@ -566,12 +575,41 @@ def _half_report(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """``secpt run --goal ...``：WF1 有 goal → 进场三问 → 主循环 → 终场报告。"""
-    goal = str(args.goal).strip()
-    if not goal:
-        # WF1 失败路径：无 goal → 对话模式兜底，不开闭环（不悬死）。
-        print("goal 为空 → 对话模式兜底（WF1）：不进闭环；需要对话请用 secpt chat。")
+    """统一入口：一句话自然语言 → 主智能体判断"渗透任务"还是"对话"。
+
+    - ``--goal`` 显式给任务：直接进闭环（旧行为，脚本/CI 用）；
+    - 位置参数或 stdin：先路由（``llms.route``）——任务 → 闭环（goal 用判定的
+      任务描述），咨询 → 单轮直答、不落账（需求文档 L2-3："无 goal → 对话模式"）。
+    """
+    explicit = args.goal is not None
+    text = str(args.goal or "").strip() if explicit else " ".join(args.text or []).strip()
+    if not text and not explicit:
+        text = _read_stdin_line().strip()
+    if not text:
+        print('输入为空 → 对话模式兜底（WF1）：不进闭环；用法：secpt run "<任务或问题>"')
         return 0
+    if explicit:
+        return _run_pentest(text)
+    route = Router(LlmClient(_route_provider(text))).decide(text)
+    if route.mode == "chat":
+        print("【模式】自动判断为对话（不落账）")
+        print(f"【AI】{route.reply}")
+        return 0
+    goal = route.goal or text
+    print(f"【模式】自动判断为渗透任务：{goal}")
+    return _run_pentest(goal)
+
+
+def _read_stdin_line() -> str:
+    """读一行 stdin；无 stdin（pytest/管道已关）时返回空串，不让坏 fd 炸 CLI。"""
+    try:
+        return sys.stdin.readline() if sys.stdin is not None else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _run_pentest(goal: str) -> int:
+    """渗透闭环主体：进场三问 → 主循环 → 终场报告（原 _cmd_run 逻辑）。"""
     conn = _open_db()
     board: MissionBoard | None = None
     provider: LlmProvider | None = None
@@ -731,8 +769,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="渗透任务模式（进场三问 → 主循环）")
-    p_run.add_argument("--goal", required=True, help="任务目标描述")
+    p_run = sub.add_parser("run", help="统一入口（主智能体自动判断任务/对话）")
+    p_run.add_argument("--goal", default=None, help="显式任务目标（跳过自动判断）")
+    p_run.add_argument("text", nargs="*", help="自然语言输入；缺省读 stdin")
     p_run.set_defaults(func=_cmd_run)
 
     p_chat = sub.add_parser("chat", help="对话模式（单轮直答，不进闭环）")

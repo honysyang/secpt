@@ -17,6 +17,7 @@ from secpt import main as main_mod
 from secpt.errors import LlmError
 from secpt.llms.client import StepOutput
 from secpt.llms.fake import FakeLLM
+from secpt.llms.route import Route
 from secpt.store import ledger
 from secpt.store.migrate import connect
 
@@ -367,3 +368,59 @@ def test_broker_audit_sink_writes_main_actor_row(cli_env: pathlib.Path) -> None:
     assert [r[0] for r in rows] == ["main", "main"]
     assert "批准" in rows[0][1] and "nmap" in rows[0][1]
     assert "拒绝" in rows[1][1]
+
+
+# ---- run 统一入口（M5-22：主智能体自动判断任务/对话） --------------------------
+
+
+def test_run_auto_routes_to_pentest(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        main_mod,
+        "_route_provider",
+        lambda text: FakeLLM([Route(mode="pentest", goal="对内网 10.0.0.1 做端口摸底")]),
+    )
+    rc = main_mod.main(["run", "帮我看看 10.0.0.1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "【模式】自动判断为渗透任务" in out
+    assert "exit_kind=normal" in out
+
+
+def test_run_auto_routes_to_chat_without_task(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        main_mod,
+        "_route_provider",
+        lambda text: FakeLLM([Route(mode="chat", reply="XSS 是跨站脚本。")]),
+    )
+    rc = main_mod.main(["run", "什么是 XSS"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "【模式】自动判断为对话（不落账）" in out
+    assert "【AI】XSS 是跨站脚本。" in out
+    conn = connect(cli_env)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_mock_run_with_successful_tool_prints_report(
+    cli_env: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """工具真成功时蒸馏会多调一次 LLM：双用途尾项保证终场报告不降级。"""
+    nmap = tmp_path / "fake_nmap.sh"
+    nmap.write_text('#!/bin/sh\necho "22/tcp open ssh"\n', encoding="utf-8")
+    nmap.chmod(0o755)
+    monkeypatch.setenv("SECPT_NMAP_BIN", str(nmap))
+    rc = main_mod.main(["run", "--goal", "对内网 10.0.0.1 做端口摸底"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "report_degraded" not in captured.err
+    assert "# 终场报告" in captured.out
