@@ -142,7 +142,13 @@ class AgentRunTool:
         name="agent_run",
         kind="in-process",
         description="Sub-agent 领单（任务板派单，worker 执行器；未装配板时回占位小票）",
-        params={"mission": "str", "persona": "str", "step_budget": "int", "skills": "str"},
+        params={
+            "mission": "str",
+            "persona": "str",
+            "step_budget": "int",
+            "skills": "str",
+            "coach_after_failures": "int",
+        },
         required=("mission", "persona", "step_budget"),
         # 任务板本身是多线程队列：同一批多张单并发提交即并行领干（M5-12）。
         parallel_safe=True,
@@ -179,6 +185,8 @@ class AgentRunTool:
                 skills=tuple(
                     item.strip() for item in (args.get("skills") or "").split(",") if item.strip()
                 ),
+                # 教练接入门槛（M5-13）：缺省 0 = 不接入，保持 M3-5 老语义。
+                coach_after_failures=int(args.get("coach_after_failures") or 0),
             )
             future = self._board.submit(mission)
             result = self._collect(future)

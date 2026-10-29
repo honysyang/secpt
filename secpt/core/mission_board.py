@@ -36,12 +36,16 @@ class Mission(BaseModel):
 
     ``skills``（M5）：技能库 id 清单——工单把"这单按哪套打法做"显式带上，
     而不是让 worker 自己猜。空元组 = 不挂技能（M3-5 老语义逐字节守恒）。
+
+    ``coach_after_failures``（M5-13，设计文档 L11"何时 LLMC 教练员接入"）：
+    连续工具失败达到该步数时允许 LLMC 介入一次；0 = 不接入（老语义）。
     """
 
     persona: str = "worker"
     goal: str
     step_budget: int = 8
     skills: tuple[str, ...] = ()
+    coach_after_failures: int = 0
     task_id: str | None = None
     mission_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 

@@ -309,7 +309,9 @@ def test_agent_run_parses_comma_separated_skills(
         "persona": "recon",
         "step_budget": "2",
         "skills": "port-recon, web-surface ,",
+        "coach_after_failures": "2",
     }
     out = tool.run(args)
     assert out.exit_code == 0
     assert seen[0].skills == ("port-recon", "web-surface")
+    assert seen[0].coach_after_failures == 2  # M5-13：教练接入门槛随工单进板

@@ -2431,3 +2431,38 @@ DeclareFindingTool 保持 False（写账本类永远串行）。
 ② 并发度上限就是批大小（≤4），未做 `[execute].max_parallel` 配置；③ 探针开启
 时整批串行——若将来要"抓包 + 并发"，需要后端支持多路会话；④ worker 之间共享
 broker 时（HITL prompt）本来就串行，未做并发审批队列。
+
+## §84 M5-13 worker 的"何时 LLMC 接入"（L11 分配面最后一项）
+
+设计文档 L11 的智能体工具分配面至此齐了：角色（persona→角色库）、skills、
+预估步骤（step_budget）、**何时 LLMC 教练员接入**（本卡）。
+
+**拍板①：接入时机是工单参数，不是 worker 自己判。**
+`Mission.coach_after_failures: int = 0`——连续工具失败达到该步数时允许 LLMC
+介入一次；0 = 不接入（M3-5 老语义逐字节守恒）。`agent_run` 同名可选参数
+（int 字符串），派单方显式说"这单卡几次就请教练"。
+
+**拍板②：每单一次、先账后吸收、可降级。**
+worker 内部维护 fail streak（与主循环同口径：denied 不算工具失败——闸门没放行、
+工具没执行，记成"手法失效"会误导教练）。达标 → `Coach.propose` 一次 → 提案文本
+挤进**下一步** user 消息（"教练提示（一次性）"），吸收一次即用掉。教练掉线/
+无话可说 → audit(actor=workerA) 留痕后按原节奏继续，**绝不因教练失败判本单失败**
+（learning 类器官的可降级纪律，与主循环救场一致）。
+
+**拍板③：worker 没有双图，graphs 传工单现状。**
+worker 的视野是工单纵深（goal + 连续失败次数），没有独立探索图；教练 prompt 里
+"双图现状"一栏用这段现状文本代替——共享同一套提案形状（idea/reason），不新造
+第二套话术。
+
+**接线**：main 的 worker builder 把同一个 LlmClient 同时给步循环与 Coach（client
+无状态，共享不串账）；教练是否真被调用只由工单门槛决定。
+
+**测试面（+5 例，全库 505 例）**：test_worker 4（达标接入且提示进下一步 /
+门槛 0 不调用（脚本精确耗尽）/ 教练炸了降级不拖垮 / Mission 默认 0）；
+test_assets 扩展 agent_run 断言 coach_after_failures 随工单进板。ruff 全绿，
+CLI mock 演示（未设门槛）normal 收束。
+
+**遗留**：① 门槛只能配一个（不是"每 N 次救一次"）；② 教练提案后若仍连续失败，
+不会提前收单，而是继续吃满 step_budget（可后续按"教练后仍失败 N 次→提前收单"
+加强）；③ worker 的教练调用与主循环共用同一模型档位（发散档 0.8），未做工单级
+温度覆盖。

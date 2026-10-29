@@ -21,6 +21,7 @@ from typing import Final
 from secpt.core.mission_board import Mission
 from secpt.errors import LlmError
 from secpt.llms.client import LlmClient
+from secpt.llms.coach import Coach, Proposal
 from secpt.llms.fake import FakeLLM
 from secpt.llms.worker import Worker
 from secpt.store import ledger
@@ -58,10 +59,12 @@ def _assemble(
     task = ledger.start_task(conn, input_text="worker 测试进场", goal="摸扫")
     script_items: list[object] = list(script)
     fake = FakeLLM(script_items)
+    client = LlmClient(fake)
     worker = Worker(
-        llm=LlmClient(fake),
+        llm=client,
         dispatcher=ToolRegistry([DeclareFindingTool()]),
         conn=conn,
+        coach=Coach(client),  # 门槛为 0 时不会真调用（老语义守恒）
     )
     kwargs: dict[str, object] = {"task_id": task.id, "goal": "领单干活"}
     kwargs.update(mission_kwargs or {})
@@ -165,3 +168,81 @@ def test_rejected_declaration_writes_no_finding() -> None:
         "SELECT COUNT(*) FROM findings WHERE task_id=?", (mission.task_id,)
     ).fetchone()[0]
     assert count == 0
+
+
+# ---------- M5-13 教练接入（何时 LLMC 教练员接入） ------------------------------
+
+
+def _phantoms() -> dict[str, object]:
+    """必败调用：未登记工具 → 回执 exit_code=None。"""
+    return {"name": "phantom", "args": {}}
+
+
+def test_worker_coach_enters_after_failure_threshold() -> None:
+    """连续失败达门槛 → 教练介入一次，提示进下一步消息，audit 可证。"""
+    script = [
+        _step("老路", calls=[_phantoms()]),
+        Proposal(idea="换打 443", reason="连续失败"),
+        _step("听教练的", done=True),
+    ]
+    worker, mission, fake, conn = _assemble(script, {"coach_after_failures": 1})
+    result = worker.run(mission)
+
+    assert result.ok and result.finished
+    assert fake.call_count == 3  # 两步 + 教练一次
+    assert "教练提示（一次性）：换打 443" in fake.calls[2][1].content
+    whats = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE task_id=? AND actor=?",
+            (mission.task_id, WORKER_ACTOR),
+        ).fetchall()
+    ]
+    assert any("教练接入（只提案不裁决）" in what for what in whats)
+
+
+def test_worker_coach_not_called_when_threshold_zero() -> None:
+    """门槛 0 = 不接入（M3-5 老语义）：脚本按步数精确耗尽，没有额外教练调用。"""
+    script = [
+        _step("老路1", calls=[_phantoms()]),
+        _step("老路2", calls=[_phantoms()]),
+        _step("收工", done=True),
+    ]
+    worker, mission, fake, conn = _assemble(script)
+    worker.run(mission)
+
+    assert fake.remaining == 0 and fake.call_count == 3
+    whats = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE task_id=? AND actor=?",
+            (mission.task_id, WORKER_ACTOR),
+        ).fetchall()
+    ]
+    assert not any("教练接入" in what for what in whats)
+
+
+def test_worker_coach_failure_degrades_without_killing_mission() -> None:
+    """教练掉线/无话可说：audit 留痕，worker 照常走完（降级不改结论）。"""
+    script = [
+        _step("老路", calls=[_phantoms()]),
+        LlmError("教练炸了"),
+        _step("自己收工", done=True),
+    ]
+    worker, mission, fake, conn = _assemble(script, {"coach_after_failures": 1})
+    result = worker.run(mission)
+
+    assert result.ok and result.finished  # 教练失败不拖垮工单
+    assert "教练提示" not in fake.calls[2][1].content
+    whats = [
+        row["what"]
+        for row in conn.execute(
+            "SELECT what FROM audit_log WHERE task_id=? AND actor=?",
+            (mission.task_id, WORKER_ACTOR),
+        ).fetchall()
+    ]
+    assert any("教练接入降级" in what for what in whats)
+
+
+def test_mission_coach_threshold_defaults_to_zero() -> None:
+    assert Mission(goal="g").coach_after_failures == 0

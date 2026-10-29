@@ -32,6 +32,7 @@ from secpt.assets import load_role, load_skill, prompt_text, role_fragments, ski
 from secpt.core.mission_board import Mission, MissionResult
 from secpt.errors import SecptError
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message, StepOutput
+from secpt.llms.coach import Coach
 from secpt.store import ledger
 from secpt.tools.registry import ToolOutput, ToolRegistry
 
@@ -46,12 +47,19 @@ class Worker:
         dispatcher: ToolRegistry,
         conn: sqlite3.Connection,
         audit_actor: str = "workerA",
+        coach: Coach | None = None,
     ) -> None:
-        """llm/dispatcher/conn per-thread 独立装配，worker 不碰共享全局。"""
+        """llm/dispatcher/conn per-thread 独立装配，worker 不碰共享全局。
+
+        ``coach``（M5-13）：可选的 LLMC 救场器。只有工单声明
+        ``coach_after_failures > 0`` 且连续失败达标才会被调用一次；缺省 None
+        = 该 worker 不接教练（M3-5 老语义）。
+        """
         self._llm = llm
         self._dispatcher = dispatcher
         self._conn = conn
         self._actor = audit_actor
+        self._coach = coach
 
     def run(self, mission: Mission) -> MissionResult:
         """领单干活：工单四个人事（goal/persona/skills/step_budget）定节奏，收拢小票交代。"""
@@ -76,7 +84,12 @@ class Worker:
             f"领单：{mission.goal}（persona={mission.persona}{role_note}{skills_note}）",
         )
         findings_count = 0
+        failures_streak = 0
+        coach_used = False
+        hint = ""
         for step_no in range(1, mission.step_budget + 1):
+            hint_note = f"\n教练提示（一次性）：{hint}" if hint else ""
+            hint = ""  # 提案吸收一次即用掉（同主循环口径）
             messages = [
                 Message(role="system", content=system_prompt),
                 Message(
@@ -84,7 +97,7 @@ class Worker:
                     content=(
                         f"工单目标：{mission.goal}\n"
                         f"步预算 {mission.step_budget}（当前第 {step_no} 步）。\n"
-                        f"已合法申报 findings {findings_count} 条。真做完就 done。"
+                        f"已合法申报 findings {findings_count} 条。真做完就 done。{hint_note}"
                     ),
                 ),
             ]
@@ -100,6 +113,20 @@ class Worker:
                 )
                 self._audit_hitl(task_id, receipt)
                 findings_count += self._claim_finding(task_id, call.name, receipt)
+                # 失败连败计（denied 不算工具失败：闸门没放行，工具没执行）。
+                if not receipt.denied:
+                    failures_streak = 0 if receipt.exit_code == 0 else failures_streak + 1
+            # M5-13 教练接入（每单一次）：连续失败达工单门槛才请 LLMC 给一句换法。
+            if (
+                self._coach is not None
+                and not coach_used
+                and mission.coach_after_failures > 0
+                and failures_streak >= mission.coach_after_failures
+            ):
+                coach_used = True
+                hint = self._coach_hint(mission, task_id, failures_streak)
+                if hint:
+                    failures_streak = 0  # 换打法后重新起算（只影响是否再触发，名额已用）
             if output.done:
                 summary = output.thought.strip() or "worker 收工（无 thought）"
                 ledger.audit(
@@ -174,6 +201,35 @@ class Worker:
             parts.append(f"## 挂载技能：{skill.name}\n{skill.description}\n{skill.body}".strip())
             parts.extend(fragments)
         return "\n\n".join(parts), (role.name if role is not None else None)
+
+    def _coach_hint(self, mission: Mission, task_id: str, streak: int) -> str:
+        """M5-13 教练接入：一次 LLMC 调用换一句可执行的换法。
+
+        可降级纪律：任何异常/无话可说都只 audit(actor=workerA) 留痕并返回空串——
+        worker 继续按自己的节奏干，绝不因为教练掉线而判本单失败。
+        ``graphs`` 传工单现状（worker 没有独立双图）：LLMC 看到的是"在打什么 +
+        连续失败几次"，与主循环救场共用同一套提案形状（idea/reason）。
+        """
+        if self._coach is None:
+            return ""
+        try:
+            proposal = self._coach.propose(
+                graphs=f"工单：{mission.goal}\n连续 {streak} 次工具调用失败",
+                plan=mission.goal,
+            )
+        except Exception as exc:  # noqa: BLE001  可降级器官兜底（见 docstring）
+            ledger.audit(self._conn, task_id, self._actor, f"教练接入降级：{exc}")
+            return ""
+        if proposal is None:
+            ledger.audit(self._conn, task_id, self._actor, "教练接入：LLM 无话说（不改变本单节奏）")
+            return ""
+        ledger.audit(
+            self._conn,
+            task_id,
+            self._actor,
+            f"教练接入（只提案不裁决）：{proposal.idea}——{proposal.reason}",
+        )
+        return f"{proposal.idea}（原因：{proposal.reason}）"
 
     def _audit_hitl(self, task_id: str, receipt: ToolOutput) -> None:
         """M4-4 发起侧落账：HIGH 审批批/拒两路各有 audit 痕（actor=workerA）。

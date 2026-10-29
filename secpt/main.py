@@ -239,8 +239,11 @@ def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Wor
     mcp = _mcp_adapters()
 
     def build(index: int) -> Worker:
+        # 同一个 LlmClient 既供 worker 步循环、也供教练接入（M5-13）——client 无状态、
+        # 每次调用独立，共享不会串账；教练是否真被调用由工单门槛决定。
+        client = LlmClient(_worker_provider(index))
         return Worker(
-            llm=LlmClient(_worker_provider(index)),
+            llm=client,
             dispatcher=ToolRegistry(
                 [
                     NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
@@ -252,6 +255,7 @@ def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Wor
                 probe=probe,
             ),
             conn=connect(db_path),
+            coach=Coach(client),
         )
 
     return build
