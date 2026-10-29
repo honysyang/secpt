@@ -2099,3 +2099,45 @@ worker 的 HIGH 维持 M3-5 fail-closed，不借 M4-4 扩权）。
 main 装配级（prompt 档出代理、off/缺段 None、sink 落账 actor=main 两行）。
 遗留：CLI prompt 档人工审批的"等人"时长与 broker timeout（60s）的交互——
 人想太久 worker 会拿到拒绝继续走，语义如实但操作侧需知悉（可调构造参数）。
+
+## §76 M4-5 容器加固与执行面收口（commit 118b9fd）
+
+任务书口径：build_docker_argv 扩 flags（默认四连、[execute] 段可配、顺序稳定
+可测）；容器内无网络需可证；每步 tool_calls 超上限（默认 4，可配）截断且超限
+部分落账（不进失速计、不静默丢弃）；旧配置/旧脚本行为守恒。
+
+**拍板①：加固四连 = DEFAULT_DOCKER_FLAGS 常量，flags 垫在 --rm 与 image 之间。**
+`[docker, run, --rm, *flags, image, *argv]`——加固 flags 永不挤进容器 argv，
+原始命令一字不差垫底（M3-5 纪律延续）；flags 序 = 配置序（[execute].docker_flags
+整体覆盖），"顺序稳定可测"落为 flags 与 image 的相对位置恒定。默认值
+--network=none / --memory=512m / --read-only / --cap-drop=ALL：最小权限原则，
+渗透工具箱的副作用面压到容器本体内（512m 为编排值，配置可改）。
+
+**拍板②：每步工具上限是两层限流的内层防线，LLM 契约层不动。**
+StepOutput.tool_calls 的 pydantic max_length=4 是 M1 命根（LLM 源头限流），
+本卡不改；主循环截断面（step_tool_limit，构造期 >0 校验）防的是"契约层失效/
+未来放宽"的场景——测试用 StepOutput.model_construct（官方跳过校验 API）造
+6 连步打到它，另留一条 FakeLLM JSON 真实路径（limit=2 截 4 连）证两层协同。
+截断在 dispatch 之前：超限调用连执行器都见不到，小票（执行结果的记录）天然
+不存在；audit(actor=main) 逐个点名（"未执行 N 个：t5, t6"）满足不静默丢弃；
+不进失速计是截断的结构属性而非额外逻辑——无回执即无收数资格。
+
+**拍板③：容器无网用"三段证据链"证明，对照组防虚绿。**
+真镜像集成测试（docker/镜像缺位诚实 skip）：① 经 DockerRunner（默认加固）
+容器内 curl 宿主网关 → 非零 rc；② 宿主靶服务 hits==0（宿主 shim 未跑的对应
+铁证——请求从未落到宿主）；③ 对照组（同镜像、flags 摘除走 bridge）curl 成功
+且 hits==1——证明失败确实是 --network=none 掐的，不是回路残废的虚绿。环境
+连不通网关则 pytest.skip，不产假证据。
+
+**守恒面**：LocalRunner 路径零改动（旧 shell 档逐字节守恒）；旧 docker 配置
+自动获得加固默认（本卡目的非破坏）；step_tool_limit 缺省 4 与 schema 层重合
++ mock 脚本单调用，旧脚本零触发截断。CLI mock 冒烟 normal 收束无截断账。
+E_PROFILE 校验：docker_flags 非字符串列表 / step_tool_limit 非正整数（bool
+显式排除，防 step_tool_limit=true 混过 int isinstance）拒跑不静默。
+
+**测试面（5 + 10 例）**：test_step_limit.py（截断+落账点名/默认 4 守恒/
+limit=2 JSON 路径/失速计隔离反事实/构造期校验）；test_execute_isolation.py
+（argv 序翻新含 flags、flags 覆盖序、DockerRunner 注入面、加固配置 3 例、
+真镜像无网集成）。遗留：--memory 默认 512m 是编排值非任务书指定值，部署侧
+按需调；真镜像集成测试依赖 docker0 网关 172.17.0.1 的环境假设（对照失败即
+skip，诚实不虚红）。
