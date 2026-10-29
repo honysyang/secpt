@@ -130,7 +130,7 @@ class AgentRunTool:
     manifest = ToolManifest(
         name="agent_run",
         kind="in-process",
-        description="Sub-agent 领单（M1 登记占位，执行器 M2 接线）",
+        description="Sub-agent 领单（任务板派单，worker 执行器；未装配板时回占位小票）",
         params={"mission": "str", "persona": "str", "step_budget": "int"},
         required=("mission", "persona", "step_budget"),
     )
