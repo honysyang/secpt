@@ -2466,3 +2466,24 @@ CLI mock 演示（未设门槛）normal 收束。
 不会提前收单，而是继续吃满 step_budget（可后续按"教练后仍失败 N 次→提前收单"
 加强）；③ worker 的教练调用与主循环共用同一模型档位（发散档 0.8），未做工单级
 温度覆盖。
+
+## §85 M5-14 `secpt assets`：六库清单可查
+
+六库到齐后运维仍缺一个"包里到底有什么"的入口：四个文件资产库只能靠翻目录，
+判错时无法先核对资产面。新增第八条命令 `secpt assets`：逐族列 id
+（prompts / skills / roles / knowledge），经验库与工具库给指引
+（`secpt metrics` / `secpt tools`）——数据型与进程型已有专门入口，不重复实现。
+
+输出实证（出厂资产）：
+```
+prompts（8 条） coach.propose / coach.review / distiller / main.entrance /
+  main.system / reporter / skills.evidence / worker.system
+skills（2 条） port-recon / web-surface
+roles（1 条） recon
+knowledge（2 条） http-probe / port-scan
+```
+
+测试：test_main +1（六族齐全 + 数据/进程型指引）。全库 506 例、ruff 全绿。
+
+**遗留**：① 只列 id 不显示 content/版本，资产内容仍要 cat 文件；② 未做
+"资产被谁引用"的反向索引（角色→技能→prompt 可手工追，尚无命令输出）。

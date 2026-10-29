@@ -267,6 +267,20 @@ def test_tools_lists_hashed_manifests(
     assert _SHA256.search(out) is not None  # manifest+hash 必须露出
 
 
+def test_assets_lists_six_libraries(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """六库可查（M5-14）：文件资产型逐条枚举；数据/进程型给指引不重复实现。"""
+    rc = main_mod.main(["assets"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "prompts（" in out and "coach.review" in out
+    assert "skills（" in out and "port-recon" in out
+    assert "roles（" in out and "recon" in out
+    assert "knowledge（" in out and "port-scan" in out
+    assert "`secpt metrics`" in out and "`secpt tools`" in out
+
+
 def test_evidence_prints_landing_window(
     cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -21,6 +21,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 
+from secpt.assets import list_knowledge, list_prompts, list_roles, list_skills
 from secpt.core.limits import LimitsConfig, load_limits_config
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
@@ -687,6 +688,28 @@ def _cmd_metrics(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_assets(_args: argparse.Namespace) -> int:
+    """``secpt assets``：六库清单（文件资产型可枚举 + 数据/进程型指引）。
+
+    为什么需要这条命令：六库拍板里四个是文件资产（prompts/skills/roles/knowledge），
+    但运维此前只能猜"包里到底带了哪些"，出问题无法先核对资产面。这里逐族列 id；
+    经验库与工具库各有专门入口（metrics / tools），只给指引不重复实现。
+    """
+    families = (
+        ("prompts", list_prompts()),
+        ("skills", list_skills()),
+        ("roles", list_roles()),
+        ("knowledge", list_knowledge()),
+    )
+    for name, ids in families:
+        print(f"{name}（{len(ids)} 条）")
+        for asset_id in ids:
+            print(f"  - {asset_id}")
+    print("experience：见 `secpt metrics`（sqlite 型，唯一跨 run 记忆体）")
+    print("tools：见 `secpt tools`（进程型，manifest+hash）")
+    return 0
+
+
 def _print_result(result: LoopResult) -> None:
     """收束摘要：身份 + 步数 + 出口类型（CLI 面板的最后一行）。"""
     print(f"== run 收束 == task_id={result.task_id} run_id={result.run_id}")
@@ -728,6 +751,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_metrics = sub.add_parser("metrics", help="两根验收杆（M4-6 只读统计：精度杆/复利杆）")
     p_metrics.set_defaults(func=_cmd_metrics)
+
+    p_assets = sub.add_parser("assets", help="六库清单（文件资产型逐条可枚举）")
+    p_assets.set_defaults(func=_cmd_assets)
     return parser
 
 
