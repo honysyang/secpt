@@ -26,6 +26,7 @@ from secpt.core.limits import LimitsConfig, load_limits_config
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
 from secpt.core.plan_watch import PlanWatcher, load_plan_config
+from secpt.env_file import bootstrap_env
 from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import AcceptanceRule, ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
@@ -766,6 +767,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI 兜底出口：库层不吞错统一上抛到这里，转结构化错误 + 非零退出。"""
     configure_logging()
     try:
+        # M5-20：可选 .env（只认 SECPT_ENV_FILE 显式指路，真实环境变量优先）。
+        bootstrap_env()
         args = _build_parser().parse_args(argv)
         rc = int(args.func(args))
     except SecptError as exc:

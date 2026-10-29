@@ -90,6 +90,21 @@ secpt run --goal "对 10.0.0.5 做资产测绘并给出可利用面"
 `SECPT_ENV`（经验环境键，默认 lab）、`SECPT_WORKERS`（临时覆盖配置）、
 `SECPT_ASSETS_DIR`、`SECPT_PROBE_BACKEND`、`LLM_PROVIDER`。
 
+### 用 `.env` 配置（可选）
+
+仓库根有模板 `env.example`，复制为 `.env`（已 gitignore）后填值。两种生效方式：
+
+```bash
+# A. 让当前 shell 生效
+set -a; . ./.env; set +a
+
+# B. 让 secpt 自己装载（只认显式路径；真实环境变量永远优先）
+SECPT_ENV_FILE=.env secpt run --goal "..."
+```
+
+装载规则：只接受 `SECPT_*` 与 `LLM_PROVIDER` 两类键（写 `PATH` 之类不会被采纳），
+不做变量展开与 shell 求值；`SECPT_ENV_FILE` 指空文件会 `E_CONFIG` 拒跑。
+
 ## 目录结构
 
 ```

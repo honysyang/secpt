@@ -2615,3 +2615,33 @@ execute.docker_flags。遗留：per-task 覆盖（本次 run 单独放宽步数�
 
 **至此出场清单六验齐**：① 账本交齐（孤儿小票）+ 小票/双图一致；② findings 全终态；
 ③ 进场三问齐全；④ 交付对目标（acceptance）；⑤ 规划全收口；⑥ 步骤全 ok。
+
+## §92 M5-20 可选 .env 装载（SECPT_ENV_FILE）+ 标准模板
+
+用户侧痛点：仓库根有旧通用 harness 留下的 `.env`，但 secpt 只读 `os.environ`，
+"改了文件不生效"。本卡给两个交付：标准模板（`env.example` + 重写 `.env`）与
+显式装载入口。
+
+**拍板①：不做"自动读 ./.env"。** 隐式读 cwd 意味着"在哪个目录运行就吃哪份
+配置"，对握着 API key 与执行隔离开关的渗透工具，目录本身就是攻击面。只认
+`SECPT_ENV_FILE` 显式指路；未设置 = 不读任何文件。
+
+**拍板②：真实环境变量永远优先。** 容器/CI/临时 `export` 注入的值不会被文件
+覆盖（`apply_env_file` 逐键判 `os.environ.get`）。配套：`SECPT_ENV_FILE` 指空
+文件 → `E_CONFIG` 拒跑（显式指路却指空是笔误）。
+
+**拍板③：键白名单 + 零 shell 求值。** 只接受 `SECPT_*` 与 `LLM_PROVIDER`；
+`PATH`/`HOME` 之类写进去也不会被采纳。解析只支持 `KEY=VALUE` / `export` 前缀 /
+去引号 / `#` 注释，不做变量展开、不 source、不支持多行——配置文件是数据不是代码，
+坏行静默跳过。键名须 `[A-Za-z_][A-Za-z0-9_]*`。
+
+**交付**：`env.example`（模板，可提交）；根 `.env` 重写为当前系统的键（移除
+旧 harness 的 APP_ENV/LOG_LEVEL/MEMORY_BACKEND/VECTOR_BACKEND，保留用户既有
+key/model）；README 增加"用 .env 配置"小节；`secpt/env_file.py` 为唯一实现，
+`main()` 入口调用一次 `bootstrap_env()`。
+
+**实测**：`SECPT_ENV_FILE=.env secpt chat "..."` → `【AI】通了`（真实 DeepSeek
+档案走通，证明加载与 provider 链路同一条）。
+
+**测试面（+8 例，全库 525 例）**：test_env_file（解析四形态/非法键/白名单/
+缺失 E_CONFIG/真实环境优先/未设置不读/CLI 入口装载/坏路径 rc=1）。ruff 全绿。
