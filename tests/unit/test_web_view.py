@@ -15,7 +15,7 @@ import pytest
 from flask.testing import FlaskClient
 
 from secpt.ob.web_view import create_app
-from secpt.store import graph, ledger, migrate
+from secpt.store import graph, ledger, migrate, plan
 
 
 @pytest.fixture()
@@ -58,6 +58,7 @@ def seeded(tmp_path: Path) -> tuple[Path, str]:
     ledger.audit(c, task.id, "llmc", "教练提案（只提案不裁决）：换打 443")
     graph.put_node(c, task.id, "asset", "10.0.0.5", {"port": "443"})
     graph.put_edge(c, task.id, "10.0.0.5", "443 端口 Apache 漏洞", "finding")
+    plan.add(c, task.id, 1, ["A：端口摸底", "B：web 初筛"])
     ledger.end_run(c, run.id)
     ledger.end_task(c, task.id, "normal")
     c.close()
@@ -117,6 +118,14 @@ def test_task_page_shows_graph(seeded: tuple[Path, str]) -> None:
     html = _client(db).get(f"/task/{task_id}").data.decode()
     assert "节点 1" in html  # graph_summary 文案
     assert "10.0.0.5" in html
+
+
+def test_task_page_shows_plans(seeded: tuple[Path, str]) -> None:
+    """M5-17：规划是账本事实，面板要能看见（此前只有 audit 行里的 plan=+n）。"""
+    db, task_id = seeded
+    html = _client(db).get(f"/task/{task_id}").data.decode()
+    assert "规划（plans 只读）" in html
+    assert "A：端口摸底" in html and "active" in html
 
 
 def test_task_page_shows_audit(seeded: tuple[Path, str]) -> None:

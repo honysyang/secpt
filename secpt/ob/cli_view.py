@@ -148,6 +148,16 @@ def evidence_report(conn: sqlite3.Connection, task_id: str) -> list[str]:
     ).fetchall():
         lines.append(f"step {step['step_no']} status={step['status']} run={step['run_id']}")
 
+    lines.append("-- plans --")
+    plans = conn.execute(
+        "SELECT version, step_no, status, content FROM plans WHERE task_id = ? ORDER BY rowid",
+        (task_id,),
+    ).fetchall()
+    if not plans:
+        lines.append("(尚无规划)")
+    for row in plans:
+        lines.append(f"v{row['version']} step={row['step_no']} [{row['status']}] {row['content']}")
+
     lines.append("-- 小票（含锚点 raw_ref）--")
     tickets = conn.execute(
         "SELECT tool_name, exit_code, summary, raw_ref FROM tickets"

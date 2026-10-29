@@ -294,6 +294,7 @@ def test_evidence_prints_landing_window(
     out = capsys.readouterr().out
     assert rc == 0
     assert "== evidence · task" in out
+    assert "-- plans --" in out  # M5-17：规划段进证据检查窗
     assert "nmap | exit=" in out  # 小票行（工具失败回执也算小票）
     assert "findings" in out
 

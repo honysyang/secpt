@@ -2566,3 +2566,19 @@ instruction 是"派单后 worker 才需要"的打法正文，放进主 LLM 的�
 
 **遗留**：① 清单不含角色"适用场景"的结构化标签（如 recon 适合只读/exploit 适合写操作），
 主 LLM 只能靠描述文字判断；② 用户覆盖目录里的角色会自动出现，无启用开关。
+
+## §89 M5-17 规划可见：面板规划段 + evidence 检查窗
+
+plans 自 M5-5 起是账本事实，但一直只有 audit 行里的 `plan=+n` 痕迹——"规划状态
+实时更新"落账了却没人看得见。本卡补两条只读投影：
+
+- **web 任务页**：任务概要下方新增"规划（plans 只读）"表格（v / step / status /
+  content），空表渲染"（暂无规划）"；仍走 ro 连接 + GET-only，无脚本。
+- **`secpt evidence <task>`**：steps 段之后新增 `-- plans --`，逐条
+  `v{version} step={n} [status] content`，无规划打印 `(尚无规划)`。
+
+两处都直接 SELECT plans 表，不经过 store/plan 的渲染函数（面板要的是全量含终态，
+不是注意力包那种"只 active + 截断"的口径——同表不同投影，刻意分开）。
+
+**测试面（+2 例，全库 515 例）**：test_web_view fixture 预置两条规划 + 新断言；
+test_main evidence 断言 `-- plans --` 段存在。ruff 全绿。

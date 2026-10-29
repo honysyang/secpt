@@ -61,6 +61,11 @@ section{margin:1.2rem 0}h2{font-size:1.1rem;border-bottom:1px solid #ddd}
 <tr><th>input</th><td>{{ task.input_text }}</td></tr>
 <tr><th>exit_kind</th><td>{{ task.exit_kind or "-" }}</td></tr>
 <tr><th>run</th><td>{{ run.status }} · step_count={{ run.step_count }}</td></tr></table></section>
+<section><h2>规划（plans 只读）</h2>
+<table><tr><th>v</th><th>step</th><th>status</th><th>content</th></tr>
+{% for p in plans %}<tr><td>{{ p.version }}</td><td>{{ p.step_no }}</td>
+<td>{{ p.status }}</td><td>{{ p.content }}</td></tr>
+{% else %}<tr><td colspan="4">（暂无规划）</td></tr>{% endfor %}</table></section>
 <section><h2>小票（最近 {{ tickets|length }} 条）</h2>
 <table><tr><th>step</th><th>tool</th><th>exit_code</th><th>summary</th><th>raw_ref</th></tr>
 {% for t in tickets %}<tr><td>{{ t.step_id[:12] }}</td><td>{{ t.tool_name }}</td>
@@ -228,6 +233,14 @@ def create_app(db_path: str | Path) -> Flask:
                 ).fetchall()
             ]
             verified = [f for f in findings if f["verify_state"] == "verified"]
+            plans = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT version, step_no, status, content FROM plans"
+                    " WHERE task_id = ? ORDER BY version, step_no, rowid",
+                    (task_id,),
+                ).fetchall()
+            ]
             graph_rows = conn.execute(
                 "SELECT key, kind, version FROM graph_nodes WHERE task_id = ?"
                 " ORDER BY updated_at DESC",
@@ -256,6 +269,7 @@ def create_app(db_path: str | Path) -> Flask:
             tickets=tickets,
             findings=findings,
             verified=verified,
+            plans=plans,
             graph_note=graph_note,
             edges=edges,
             audit_log=audit_log,
