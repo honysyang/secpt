@@ -137,15 +137,12 @@ class TestProbeConfig:
 # ---------- 后端（拍板③：注入式 CaptureBackend + 图纸位） ----------------------------
 
 
-def test_build_backend_mock_and_failfast(tmp_path: Path) -> None:
-    """mock 档 = ScriptedCapture；mitmproxy 档 M4 才接线，装配期 fail-fast 不装假。"""
+def test_build_backend_mock_and_unknown(tmp_path: Path) -> None:
+    """mock 档 = ScriptedCapture；未知后端 E_PROBE 拒装（真装配契约见 test_probe_mitm）。"""
     assert isinstance(build_backend("mock", tmp_path), ScriptedCapture)
     with pytest.raises(SecptError) as excinfo:
-        build_backend("mitmproxy", tmp_path)
-    assert excinfo.value.code == "E_PROBE"
-    assert "M4" in str(excinfo.value)
-    with pytest.raises(SecptError):
         build_backend("tcpdump-ghost", tmp_path)
+    assert excinfo.value.code == "E_PROBE"
 
 
 def test_scripted_capture_emits_mock_events(tmp_path: Path) -> None:
@@ -372,6 +369,11 @@ def test_observations_rejects_empty_channel() -> None:
 
 
 def test_note_for_honesty() -> None:
-    """装配注记一句话说真话：关闭/开启两态可读。"""
+    """装配注记一句话说真话：关闭/开启两态可读，真抓包与伪事件源可分辨。"""
     assert note_for(ProbeConfig()) == "探针关闭（enable_http_probe=false，零开销）"
     assert "开启" in note_for(ProbeConfig(enabled=True, source="configs/profile.toml"))
+    assert "后端 mock=ScriptedCapture" in note_for(
+        ProbeConfig(enabled=True, source="p.toml"), backend="mock"
+    )
+    mitm_note = note_for(ProbeConfig(enabled=True, source="p.toml"), backend="mitmproxy")
+    assert "mitmproxy" in mitm_note and "真抓包" in mitm_note

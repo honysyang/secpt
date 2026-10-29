@@ -4,8 +4,9 @@
 - 配置：profile.toml ``[probes]`` 段的 enable_http_probe 开关（R6：独立开关
   默认关，关=registry 不开窗零开销）；
 - 后端：注入式 CaptureBackend 协议——默认 mock = ScriptedCapture（伪 HTTP
-  事件源，meta 诚实标 mock:true、snapshot 落真文件）；mitmproxy 后端 M4 才
-  接线，装配期 fail-fast 绝不假装在抓；
+  事件源，meta 诚实标 mock:true、snapshot 落真文件）；M4-3 起 mitmproxy =
+  MitmCapture 真抓包（装配期 pre-flight fail-closed，运行窗内可降级，
+  见 probe_mitm.py）；
 - 执行窗：wrap_execution 把"一次工具执行"包进起抓/收抓之间——动作发生时
   才有流量，取证窗口跟着执行走（denied/递归拒绝不在窗内 = 没执行没流量）。
 
@@ -78,11 +79,17 @@ def load_probe_config(path: str | None) -> ProbeConfig:
     return ProbeConfig(enabled=True, source=str(file))
 
 
-def note_for(cfg: ProbeConfig) -> str:
-    """装配注记一句话（loop enter() 烙 audit，同 judge.note_for 手式）。"""
+def note_for(cfg: ProbeConfig, backend: str = "mock") -> str:
+    """装配注记一句话（loop enter() 烙 audit，同 judge.note_for 手式）。
+
+    backend 显式入参（M4-3）：真抓包与伪事件源在账面上必须可分辨——读账的
+    人要知道流量是抓来的还是脚本演的。默认 "mock" 保持 M3 老口径逐字节一致。
+    """
     if not cfg.enabled:
         return "探针关闭（enable_http_probe=false，零开销）"
     src = cfg.source or "?"
+    if backend == "mitmproxy":
+        return f"探针开启（http 通道，profile={src}，后端 mitmproxy=MitmCapture 真抓包）"
     return f"探针开启（http 通道，profile={src}，后端 mock=ScriptedCapture）"
 
 
@@ -159,15 +166,21 @@ class ScriptedCapture:
 
 
 def build_backend(name: str, raw_dir: Path | str) -> CaptureBackend:
-    """按 SECPT_PROBE_BACKEND 装配后端：mock 默认；mitmproxy 是 M4 图纸位。"""
+    """按 SECPT_PROBE_BACKEND 装配后端：mock 默认；mitmproxy=M4-3 真抓包接线。
+
+    mitmproxy 档装配期 pre-flight（fail-closed）：mitmdump 未装/不可执行 →
+    E_PROBE 拒跑，绝不静默换 mock 假装在抓；运行窗内的瞬时故障才降级
+    （wrap_execution 契约）。函数级 import 破循环：probe_mitm 顶层依赖本
+    模块的 CaptureEvent，probe 不在顶层反向依赖 probe_mitm。
+    """
     if name == "mock":
         return ScriptedCapture(raw_dir=raw_dir)
     if name == "mitmproxy":
-        raise SecptError(
-            "mitmproxy 抓包后端 M4 接线，当前版本不装也不假装",
-            code="E_PROBE",
-            context={"backend": name},
-        )
+        from secpt.tools.probe_mitm import MitmCapture, default_mitmdump_bin, preflight_mitmdump
+
+        mitmdump_bin = default_mitmdump_bin()
+        preflight_mitmdump(mitmdump_bin)
+        return MitmCapture(raw_dir=raw_dir, mitmdump_bin=mitmdump_bin)
     raise SecptError(
         "未知探针后端", code="E_PROBE", context={"backend": name, "known": ("mock", "mitmproxy")}
     )

@@ -335,18 +335,26 @@ def _registry(
     )
 
 
+def _probe_backend_name() -> str:
+    """探针后端选型键（M4-3）：SECPT_PROBE_BACKEND，默认 mock。
+
+    note_for 与 build_backend 各取一次但同源同值（纯读 env），装配注记与
+    实际后端永不串账——账面说 mitmproxy 就真是 mitmproxy。
+    """
+    return os.environ.get("SECPT_PROBE_BACKEND", "mock").strip() or "mock"
+
+
 def _probe_backend() -> CaptureBackend | None:
     """M3-3 探针后端装配：开档选型（默认 mock），关档 None = 零开销。
 
     load_probe_config 对同一份 profile.toml 幂等（纯读、无状态），装配注记
     （probe_note，_assemble 里另行取）与后端虽各读一次，口径恒一致不串账。
+    M4-3 起 mitmproxy 档 = 真抓包（装配期 pre-flight fail-closed，见 probe.py）。
     """
     cfg = load_probe_config(_profile_path())
     if not cfg.enabled:
         return None
-    return build_backend(
-        os.environ.get("SECPT_PROBE_BACKEND", "mock"), os.environ.get("SECPT_RAW_DIR", "raw")
-    )
+    return build_backend(_probe_backend_name(), os.environ.get("SECPT_RAW_DIR", "raw"))
 
 
 def _mcp_adapters() -> list[ToolAdapter]:
@@ -411,7 +419,7 @@ def _assemble(
         ),
         judge_note=note_for(prof),
         coach=Coach(client),
-        probe_note=probe_note_for(probe_cfg),
+        probe_note=probe_note_for(probe_cfg, _probe_backend_name()),
     )
 
 
