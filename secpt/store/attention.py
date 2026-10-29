@@ -1,7 +1,7 @@
 """注意力包（§2.3：store/attention.py，纯函数，现打包即弃）。
 
-包内容按 WF2 时序：goal / 最近小票 / 规划概要 / 步号 / 双图摘要（W2-2 已接线，
-graph.graph_summary 投影，空图返回空串时不渲染该节）/ 经验回放位（W3-1 激活）。
+包内容按 WF2 时序：goal / 最近小票 / 规划概要 / 步号 / 双图摘要 / 经验回放位 /
+知识参考位（M5：文件资产库按关键词命中的只读方法论——背景读物，不含本任务事实）。
 
 经验三态规则（W3-1 拍板，§63 续记）：
 - 经验回放三态（W3-1 激活）：verified=正典进包、命令原样带出；claimed=仅当线索、
@@ -9,6 +9,10 @@ graph.graph_summary 投影，空图返回空串时不渲染该节）/ 经验回�
   再挡一次——双闸互为备份，谁独立失效包里也不能出现已死经验。
 - 打包即弃：包是一步一现的临时物，不落库、不缓存——黑板里只有事实（小票/双图/经验），
   包只是把事实投影给主 LLM 的一次性视图。
+
+知识参考与原船纪律相同：来源是文件资产（可 diff/可评审），选择是纯关键词命中
+（同一输入同一输出），正文截断后进包——"事实"框（小票/findings）与"参考"框
+（知识）在渲染上分开，LLM 不能把读物当证据。
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ class AttentionPack(BaseModel):
     graph_summary: str = ""  # 空串 = 双图尚无事实，render() 省略该节
     recent_tickets: list[PackTicket] = Field(default_factory=list)
     experience_snapshot: list[str] = Field(default_factory=list)  # M2：三态规则接线位
+    knowledge_snapshot: list[str] = Field(default_factory=list)  # M5：知识库只读参考
 
     def render(self) -> str:
         """渲染纯文本包。字段缺失显式标占位，不给模型留"看到空字符串"的歧义。"""
@@ -61,6 +66,11 @@ class AttentionPack(BaseModel):
         lines.append(f"## 最近小票\n{tickets}")
         if self.experience_snapshot:
             lines.append("## 可用经验\n" + "\n".join(f"- {e}" for e in self.experience_snapshot))
+        if self.knowledge_snapshot:
+            lines.append(
+                "## 知识参考（只读方法论，不是本任务事实）\n"
+                + "\n".join(f"- {item}" for item in self.knowledge_snapshot)
+            )
         return "\n".join(lines)
 
 
@@ -92,8 +102,13 @@ def build(
     recent: list[TicketRow],
     graph_summary: str = "",
     experiences: Sequence[ExperienceRow] = (),
+    knowledge: Sequence[str] = (),
 ) -> AttentionPack:
-    """从账本事实装配注意力包（纯函数现打包即弃；经验经三态投影进包）。"""
+    """从账本事实装配注意力包（纯函数现打包即弃；经验经三态投影进包）。
+
+    ``knowledge`` 是已渲染好的知识参考行（选择与截断在 assets 层做），本层
+    只负责章节渲染——store 不 import 文件资产库，分层保持单向。
+    """
     return AttentionPack(
         goal=goal,
         step_no=step_no,
@@ -104,6 +119,7 @@ def build(
             for t in recent
         ],
         experience_snapshot=_project_experience(experiences),
+        knowledge_snapshot=list(knowledge),
     )
 
 

@@ -2328,3 +2328,39 @@ run/resume 生效，尚未做"超限后半场报告里的预算余量"展示。
 **遗留**：① plans.status 的 `failed` 值仍未使用（规划"做失败了"与"废弃"目前
 都走 cancelled）；② 规划条目不能重新激活（done 后同名可重开，但没有"撤销完成"
 通道）；③ 短 id 引用依赖模型正确复述 8 位前缀，若模型改写则只能回落到原文匹配。
+
+## §81 M5-10 知识库（六库齐活）
+
+设计文档 L43 的最后一块：知识库 = 方法论/查询手册，只读参考。此前一直按
+"M1 不单建"挂着，但 prompts/skills/角色三库已就位，"主 LLM 读经验、知识库、
+角色库"（L8）里的知识库是唯一缺口。本卡补上，六库到齐：
+工具库（registry+MCP）/ prompts / skills / 角色 / 知识 = 文件资产型，
+经验库 = sqlite 型。
+
+**拍板①：知识选择必须是纯关键词命中，不用语义检索。**
+注意力包是"同一输入同一输出"的可复算投影（重放/测试依赖它），语义相似度是
+LLM 的活，放进打包路径会让每步输入不可复现。选择函数
+`select_knowledge(text)`：命中的 keyword 数降序、同分按 id 稳定；`limit=2`
+封顶；正文 `render_knowledge(max_chars=600)` 截断后进包。
+
+**拍板②：知识在包里单独成节，标题写明"只读方法论，不是本任务事实"。**
+渲染上把"事实框"（小票/双图/经验）与"参考框"（知识）分开——LLM 不能把读物
+当证据；知识章节为空时整节省略（不塞无关读物）。
+
+**拍板③：读者是主 LLM，不进 worker。**
+worker 的包是工单纵深（goal/persona/skills/step_budget），知识属于"这类问题
+一般怎么想"的战役层背景，只挂在主循环注意力包（设计文档 L8 的"主 LLM 读取"）。
+
+**接线**：`loop._one_step` 用 `target + objective + success_criteria + 当前规划`
+做查询文本 → `render_knowledge(select_knowledge(...))` → `attention.build(knowledge=...)`
+→ 渲染"## 知识参考（只读方法论，不是本任务事实）"。store/attention 只收已渲染
+行，不 import 资产库（分层单向）。出厂两条：port-scan / http-probe。
+
+**测试面（+10 例，全库 487 例）**：test_knowledge 10（出厂枚举/头解析/缺失 None/
+关键词选择/计分与 limit/同分稳定/无命中空/截断渲染/包内独立章节/主循环接线
+命中与不命中两例）。CLI mock 冒烟 normal 不变（知识只进 prompt，不进账本）。
+
+**遗留**：① 知识条目没有"被采用/被证伪"的度量（不像经验有 useful_count），
+后续若要做"哪些方法论真有用"需要新的观测位；② 分族目录固定为
+``prompts/skills/roles/knowledge``，未做多根合并优先级之外的命名空间；
+③ 文档提到的"MCP resource 读方向"未接（当前知识只从文件资产来）。

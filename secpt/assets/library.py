@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -63,6 +64,21 @@ class Role(BaseModel):
     skills: tuple[str, ...] = ()
     prompts: tuple[str, ...] = ()
     instruction: str = ""
+
+
+class KnowledgeDoc(BaseModel):
+    """知识库条目（设计文档 L43）：方法论/查询手册，只读参考。
+
+    与 skills 的区别：skill 是"这单按什么动作序列做"（被角色/工单挂载），
+    knowledge 是"这类问题一般怎么想"（按关键词命中出现在注意力包里，不改变
+    任何执行路径）——前者是打法，后者是背景读物。
+    """
+
+    id: str
+    title: str
+    description: str = ""
+    keywords: tuple[str, ...] = ()
+    body: str = ""
 
 
 def asset_roots() -> tuple[Path, ...]:
@@ -190,6 +206,18 @@ def _parse_role(path: Path) -> Role:
     )
 
 
+def _parse_knowledge(path: Path) -> KnowledgeDoc:
+    """解析知识条目：YAML 头（id/title/keywords）+ 正文（方法论）。"""
+    meta, body = _load_document(path)
+    return KnowledgeDoc(
+        id=str(meta.get("id") or path.stem),
+        title=str(meta.get("title") or path.stem),
+        description=str(meta.get("description") or ""),
+        keywords=_str_tuple(meta.get("keywords")),
+        body=body,
+    )
+
+
 def load_skill(skill_id: str) -> Skill | None:
     """按 id 读技能；不存在返回 None（工单挂载侧降级留痕，不静默假装挂上）。"""
     path = _find("skills", skill_id)
@@ -216,6 +244,53 @@ def list_roles() -> list[str]:
     return _list_ids("roles")
 
 
+def load_knowledge(doc_id: str) -> KnowledgeDoc | None:
+    """按 id 读知识条目；不存在返回 None。"""
+    path = _find("knowledge", doc_id)
+    if path is None:
+        return None
+    return _parse_knowledge(path)
+
+
+def list_knowledge() -> list[str]:
+    """列知识条目 id。"""
+    return _list_ids("knowledge")
+
+
+def select_knowledge(text: str, *, limit: int = 2) -> list[KnowledgeDoc]:
+    """按关键词命中挑知识条目（纯函数、零 LLM）：命中数降序、同分按 id 稳定。
+
+    为什么是关键词而不是语义检索：注意力包必须是"同一输入同一输出"的可复算
+    投影（重放/测试都依赖这一点）；语义相似度是 LLM 的活，放进打包路径会让
+    每一步的输入不可复现。关键词够用——知识库的读者是主 LLM，标题与关键词
+    已经写清了"这条适用于哪类问题"。
+    """
+    haystack = text.casefold()
+    if not haystack.strip():
+        return []
+    scored: list[tuple[int, str, KnowledgeDoc]] = []
+    for doc_id in list_knowledge():
+        doc = load_knowledge(doc_id)
+        if doc is None:
+            continue
+        score = sum(1 for keyword in doc.keywords if keyword.casefold() in haystack)
+        if score > 0:
+            scored.append((score, doc.id, doc))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [doc for _, _, doc in scored[:limit]]
+
+
+def render_knowledge(docs: Sequence[KnowledgeDoc], *, max_chars: int = 600) -> list[str]:
+    """把知识条目压成注意力包里的短行：标题 + 正文截断（防撑爆上下文）。"""
+    lines: list[str] = []
+    for doc in docs:
+        body = doc.body.strip()
+        if len(body) > max_chars:
+            body = body[:max_chars].rstrip() + "…"
+        lines.append(f"[{doc.title}] {body}")
+    return lines
+
+
 def _fragments(prompt_ids: tuple[str, ...]) -> list[str]:
     """展开 prompt 引用（角色/技能共用的引用链实现点）。
 
@@ -236,16 +311,21 @@ def role_fragments(role: Role) -> list[str]:
 
 
 __all__ = [
+    "KnowledgeDoc",
     "Role",
     "Skill",
     "asset_roots",
+    "list_knowledge",
     "list_prompts",
     "list_roles",
     "list_skills",
+    "load_knowledge",
     "load_role",
     "load_skill",
     "prompt_text",
+    "render_knowledge",
     "render_prompt",
     "role_fragments",
+    "select_knowledge",
     "skill_fragments",
 ]

@@ -36,6 +36,7 @@ from typing import Protocol
 import structlog
 from pydantic import BaseModel, Field
 
+from secpt.assets import render_knowledge, select_knowledge
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.core.plan_watch import PlanWatcher
 from secpt.errors import LlmError, SecptError
@@ -358,16 +359,25 @@ class PentestLoop:
         """
         if self._bus is not None:
             self._bus.emit("run_step_started", task_id=task.id, run_id=run.id, step_no=step_no)
+        goal = self._goal_projection(task, run)
         plan_summary = plan.render(self._conn, task.id)
         if plan_note:
             plan_summary = f"{plan_summary}\n{plan_note}"
+        # M5-10 知识参考：按目标+当前规划的关键词命中挑只读方法论（纯算术零 LLM，
+        # 同一输入同一输出）；正文截断后进包，与"事实"章节分开渲染。
+        knowledge = render_knowledge(
+            select_knowledge(
+                " ".join([goal.target, goal.objective, goal.success_criteria, plan_summary])
+            )
+        )
         pkg = attention.build(
-            goal=self._goal_projection(task, run),
+            goal=goal,
             step_no=step_no,
             plan_summary=plan_summary,
             recent=ledger.recent_tickets(self._conn, task.id),
             graph_summary=graph.graph_summary(self._conn, task.id),
             experiences=experience.fetch_replay(self._conn, self._experience_env),
+            knowledge=knowledge,
         )
         try:
             output = self._llm.step(pkg)
