@@ -2141,3 +2141,40 @@ limit=2 JSON 路径/失速计隔离反事实/构造期校验）；test_execute_i
 真镜像无网集成）。遗留：--memory 默认 512m 是编排值非任务书指定值，部署侧
 按需调；真镜像集成测试依赖 docker0 网关 172.17.0.1 的环境假设（对照失败即
 skip，诚实不虚红）。
+
+## §77 M4-6 双图事件线 + 两杆度量（commit 80b7821）
+
+任务书口径：双图写入后 emit graph_changed（事件线只报告不接管，R3 红线不破），
+面板 SSE 可见；verified 阳性率（精度杆）+ 经验命中率（复利杆）只读统计，
+纯度量不自动调参，CLI/面板可查，口径写进 docstring。
+
+**拍板①：写图点接主循环每步事务（蓝本 L340"同一事务写双图"的欠账补齐）。**
+M2 pilot 只立了 put_node/put_edge 写口、零业务调用（grep 证实）——事件线若不
+先接写图就是死线。落地：step_transaction 内 put_node("step", key=step-{n},
+props=thought 截断 80) + put_edge(prev→cur, kind=sequence)。key 稳定 → resume
+重跑同键走 version 线（幂等，重放痕迹如实）。图与小票/水位线同事务，账不撕裂。
+voided 步（LLM schema 炸）无 output 不写图不 emit——e2e 异常出口断言零改动。
+
+**拍板②：graph_changed 双通道可见，机制路径不新增。**
+- 进程内：EventBus.emit（事务提交后，同 ticket_appended 手式）；EventBus.emit
+  无返回值、无订阅者能改变执行流——R3"只报告不接管"是总线语义的结构属性。
+- 面板 SSE：SSE 数据帧本来就是 audit_log 增量轮询——step audit 行追加
+  `graph=+1n+{0|1}e` 写痕后，/task/<id>/stream 的轮询增量自动带出，零新端点。
+- CLI：【图】step N 双图更新 +1n+1e（cli_view._HANDLERS 加映射）。
+- 事件序翻新 8 处（test_loop 2 / test_coach 3 / test_e2e 3）：graph_changed
+  插在每步 ticket_appended 之后、exit_*/stall_alarm 之前（写图→提交→报告→
+  出口判定/失速收数的时序即真实结构）。e2e 图空断言 0 → 2（step-1/step-2）。
+
+**拍板③：两杆口径钉死（docstring + 测试双锚），None 而非编数。**
+- 精度杆 = verified / (verified + rejected)：findings 终态判真比。claimed 不
+  进分母（未裁决计入会虚低——分母宁小勿假）；分母 0 → None。
+- 复利杆 = SUM(useful_count) / COUNT(*)：经验平均净票（+1 命中/-1 失配地板 0
+  都在账），均值 > 0 即复利为正；空库 → None。
+- 纯度量纪律：store/metrics.py 只有 SELECT 无写口；CLI `secpt metrics` 子命令
+  （第七命令）+ 面板总览页两杆段共用 render_metrics；"暂无数据"如实不编数。
+
+**测试面（8 新 + 8 翻新）**：test_metrics.py 8 例（口径锁定/终态分母/空库
+None/渲染/CLI）；test_loop 3 新例（节点+边/事件序+payload/audit 写痕）；
+test_web_view 总览两杆。CLI mock 冒烟：【图】行、normal 收束、metrics 暂无。
+遗留：两杆是全库口径（跨 task 累计），单 task 杆可后续按需加参数；experience
+"曾命中过但被打回"的条目在净票口径下记 0（MAX 痕迹未留，如需"曾命中率"需加列）。
