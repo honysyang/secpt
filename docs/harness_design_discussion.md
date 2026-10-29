@@ -1929,3 +1929,45 @@ worker 线程读 stdin），本卡不做；③worker finding 进 R1 票盒仍需
 worker 不产 finding，端到端由 e2e 测试覆盖）；④Docker 资源限制（--network/
 --memory/--read-only）尚未收紧，蓝本 §7 安全表的最小权限还需在 M4 补
 build_docker_argv 的 flags 扩展点。
+
+---
+
+## 72. M4-1 施工结论：真 LLM provider 接线——openai 兼容档、密钥卫生、装配二选一
+
+**拍板①：provider 装配从"只许 mock"放宽为"mock/openai 显式二选一"。**
+`_require_mock()`（M1 诚实边界）拆除，收敛为 `_provider_for(mock_factory)` 一处分发：
+`LLM_PROVIDER=mock` 出厂脚本（行为逐字节不变），`openai` 档走 env 装配，
+未知档名 E_CONFIG。旧契约"openai 拒跑"（test_main 原断言）正式翻转，
+缺 `SECPT_LLM_BASE_URL/API_KEY/MODEL` 任一 → 装配期 E_CONFIG（context 列缺哪些），
+**绝不静默降 mock**——假聪明比真失败更危险，诚实边界是放宽不是取消。
+
+**拍板②：provider 只实现 complete 原语，纪律全归协议层。**
+`OpenAICompatProvider`（`llms/providers/openai_compat.py`）非流式 MVP（`stream=false`，
+消费方是协议层 pydantic 解析器，流式分片零收益）；schema 带错重试/超时指数退避
+仍是 `LlmClient` 的职责——provider 超时只抛 `TimeoutError`，HTTP 错误 fail-fast
+不重试（重试语义只属协议层退避）。传输用标准库 urllib，零新增依赖。
+
+**拍板③：HTTP 错误分层落到 LlmError 细分 code。**
+401/403→`E_LLM_AUTH`、429→`E_LLM_RATE_LIMIT`、其余 4xx/5xx→`E_LLM_HTTP`、
+连接失败→`E_LLM_CONNECT`、响应体不合法→`E_LLM_RESPONSE`；全部带 status/body 片段
+（≤200 字符）进 context，落 audit 可查。`E_TIMEOUT_LLM` 口径不变（协议层退避耗尽）。
+
+**拍板④：密钥卫生三道闸。**
+①密钥只从环境变量读，不落配置文件；②Authorization 只进请求头，provider 层不 log；
+③异常 context 携带的响应体片段过 `_redact`（密钥出现即替换 `***`）——
+E_LLM_* 会落 audit/log，凡进 context 的必先脱敏。
+
+**测试面（19 例，本地假 HTTP server 零联网）**：请求体形状逐字段断言
+（model/messages/temperature/stream=false + Bearer 头）；超时两路（provider 抛
+TimeoutError / 协议层退避耗尽 E_TIMEOUT_LLM，server 拖延脚本）；4xx/5xx 分层
+parametrize + fail-fast 不重试断言；坏响应 4 形态；密钥泄漏体脱敏；连接拒绝
+E_LLM_CONNECT；**openai 档完整 run 离线 e2e**（脚本与 mock 出厂脚本同构：
+进场→nmap E_TOOL_FAIL→收工→报告摘要，恰 4 调用，蒸馏器无候选不烧）+ chat 直答。
+
+**装配期细节两笔**：①`_cmd_run` 先开库再装配 provider（E_CONFIG 不留半场烂账，
+`_half_report` 新增 provider 参数，装配失败时退出厂脚本如实标注 mock）；
+②`_worker_builder` 装配期先试装 worker-0 的 provider——缺 env 的 E_CONFIG 必须
+在主线程炸，不能等 worker 线程上岗才成哑弹（§66 builder 装配期职责口径延续）。
+
+**遗留**：真模型（DeepSeek 等）联网冒烟不进 CI，留给手工验证；流式输出、
+429 限流重试策略（当前 fail-fast）待 M5+ 按需补。
