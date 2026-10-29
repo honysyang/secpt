@@ -70,12 +70,12 @@ class CliView:
             handler(self, payload)
 
     def _on_step_started(self, payload: Mapping[str, object]) -> None:
-        self._print(f"【Orchestrator】step {payload.get('step_no', '?')} 开包")
+        self._print(f"【主LLM】step {payload.get('step_no', '?')} 开包")
 
     def _on_ticket(self, payload: Mapping[str, object]) -> None:
-        """小票摘要行（§8"一行 summary，工具名/状态"）：失败回执同样上屏。"""
+        """小票摘要行（§8"一行 summary"）：标明是哪个智能体调了哪个工具。"""
         self._print(
-            f"【小票】{payload.get('tool_name', '?')} | exit={payload.get('exit_code')}"
+            f"【主LLM → {payload.get('tool_name', '?')}】exit={payload.get('exit_code')}"
             f" | {payload.get('summary', '')}"
         )
 
@@ -88,14 +88,14 @@ class CliView:
     def _on_graph_changed(self, payload: Mapping[str, object]) -> None:
         """M4-6 图变化行（事件线只报告不接管）：双图每步落账后广播写痕。"""
         self._print(
-            f"【图】step {payload.get('step_no', '?')} 双图更新"
+            f"【双图】step {payload.get('step_no', '?')} 更新"
             f" +{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e"
         )
 
     def _on_plan_reviewed(self, payload: Mapping[str, object]) -> None:
         """M5 规划重估行（角色气泡：LLMC）：提案经下一包吸收，本行只报告不裁决。"""
         self._print(
-            f"【LLMC】step {payload.get('step_no', '?')} 规划重估：{payload.get('idea', '')}"
+            f"【LLMC·教练】step {payload.get('step_no', '?')} 规划重估：{payload.get('idea', '')}"
         )
 
 

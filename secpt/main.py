@@ -593,7 +593,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     route = Router(LlmClient(_route_provider(text))).decide(text)
     if route.mode == "chat":
         print("【模式】自动判断为对话（不落账）")
-        print(f"【AI】{_chat_reply(text)}")  # 与 secpt chat 共用同一人格与提示
+        print(f"【你】{text}")
+        print(f"【secpt·对话】{_chat_reply(text)}")  # 与 secpt chat 共用同一人格与提示
         return 0
     goal = route.goal or text
     print(f"【模式】自动判断为渗透任务：{goal}")
@@ -613,6 +614,7 @@ def _run_pentest(goal: str) -> int:
     conn = _open_db()
     board: MissionBoard | None = None
     provider: LlmProvider | None = None
+    print(f"【任务】{goal}")  # 本轮在干什么：CLI 第一行固定可见
     try:
         provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
@@ -686,7 +688,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     if not text.strip():
         print('（chat）空输入。用法：secpt chat "你好"（或管道喂入）。')
         return 0
-    print(f"【AI】{_chat_reply(text)}")
+    print(f"【你】{text}")
+    print(f"【secpt·对话】{_chat_reply(text)}")
     return 0
 
 

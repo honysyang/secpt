@@ -287,7 +287,7 @@ class TestOfflineE2E:
 
         assert rc == 0
         out = capsys.readouterr().out
-        assert "【小票】nmap" in out
+        assert "【主LLM → nmap】" in out
         assert "exit_kind=normal" in out
         assert len(fake_server.requests) == 4
         assert all(h == f"Bearer {_API_KEY}" for h in fake_server.auth_headers)

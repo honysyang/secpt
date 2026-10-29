@@ -58,8 +58,8 @@ def test_run_mock_flow_bubbles_and_normal_exit(
     assert rc == 0
     assert task is not None and task["exit_kind"] == "normal"
     out = capsys.readouterr().out
-    assert "【Orchestrator】step 1 开包" in out
-    assert "【小票】nmap" in out  # 工具失败也落回执 → 小票摘要行
+    assert "【主LLM】step 1 开包" in out
+    assert "【主LLM → nmap】" in out  # 工具失败也落回执 → 小票摘要行
     assert "【出口】exit_kind=normal" in out
     assert "task_id=" in out and "run_id=" in out
 
@@ -314,7 +314,7 @@ def test_chat_single_turn_mock_answer(
     rc = main_mod.main(["chat", "你好"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "【AI】" in out  # 单轮直答，不进闭环
+    assert "【secpt·对话】" in out and "【你】你好" in out  # 角色标签 + 用户回显
 
 
 def test_chat_empty_input_no_op(
@@ -399,7 +399,7 @@ def test_run_auto_routes_to_chat_without_task(
     out = capsys.readouterr().out
     assert rc == 0
     assert "【模式】自动判断为对话（不落账）" in out
-    assert "【AI】我是 secpt，这套渗透测试系统的助手。" in out
+    assert "【secpt·对话】我是 secpt，这套渗透测试系统的助手。" in out
     conn = connect(cli_env)
     try:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0

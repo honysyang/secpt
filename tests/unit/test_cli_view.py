@@ -30,8 +30,8 @@ def test_cli_view_renders_three_m1_events(capsys: pytest.CaptureFixture[str]) ->
     )
     bus.emit("run_ended", task_id="t1", run_id="r1", steps=2, finished=True, exit_kind="normal")
     out = capsys.readouterr().out
-    assert "【Orchestrator】step 3 开包" in out
-    assert "【小票】nmap | exit=0 | 22/tcp open  ssh" in out
+    assert "【主LLM】step 3 开包" in out
+    assert "【主LLM → nmap】exit=0 | 22/tcp open  ssh" in out
     assert "【出口】exit_kind=normal" in out
     assert "steps=2" in out
 
@@ -45,8 +45,8 @@ def test_cli_view_tolerates_missing_payload_keys(
     view("ticket_appended", {})
     view("run_ended", {})
     out = capsys.readouterr().out
-    assert "【Orchestrator】step ?" in out
-    assert "【小票】?" in out
+    assert "【主LLM】step ?" in out
+    assert "【主LLM → ?】" in out
     assert "【出口】exit_kind=?" in out
 
 

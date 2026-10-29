@@ -213,7 +213,7 @@ def test_review_limit_must_be_positive() -> None:
 
 
 def test_cli_view_renders_plan_review_bubble() -> None:
-    """CLI 角色气泡：plan_reviewed 事件渲染成【LLMC】行（可读性面）。"""
+    """CLI 角色气泡：plan_reviewed 事件渲染成【LLMC·教练】行（可读性面）。"""
     out = io.StringIO()
     CliView(out=out)("plan_reviewed", {"step_no": 5, "idea": "换打 443"})
-    assert "【LLMC】step 5 规划重估：换打 443" in out.getvalue()
+    assert "【LLMC·教练】step 5 规划重估：换打 443" in out.getvalue()
