@@ -1,8 +1,9 @@
-"""R1-R3 重放裁判（蓝本 WF4 判4）：R1 主力，R2/R3 是 M5 图纸位。
+"""R1 重放裁判（蓝本 WF4 判4）：只读复跑比对；写操作直接悬置交 R2/R3。
 
 为什么 judge 只认注入式执行器（拍板①）：分层红线是 judge 单向、不 import
 tools——重放怎么跑（registry 只读门、Guard 同权过闸）是装配期的事，本层只见
 一个 callable：给工具名+参数换一份新回执，``None`` = 写操作/未知（零执行）。
+写操作与无票面锚的悬案由 :mod:`secpt.judge.r23` 的 R2 双路径 / R3 反证接手。
 
 锚点判同（拍板）：R1 不比对"经验条目 command 与 args_json 是否逐字相同"——
 command 是 LLM 自由文本，无法确定性对齐；改判"证据链同源"：经验条目 raw_ref
@@ -59,7 +60,7 @@ def r1(
 
     分支（对账拍板）：
     - 无票面证据源（锚没落在任何小票上，如 obs 锚/手铺证明）→ 悬置不裁决；
-    - 写操作/未知工具（执行器返 None）→ R2/R3 图纸位悬置（M5 接线，claimed 保持）；
+    - 写操作/未知工具（执行器返 None）→ 悬置（claimed 保持，交 R2/R3 接手）；
     - 重放失败（exit_code 空/非零、raw_ref 空、产物文件缺失）→ 悬置不裁决；
     - 新旧证据全文一致 → verified(method="rerun") + 经验升 verified 且 +1 票；
     - 不一致 → 经验降票（地板 0）且 claim 保持 claimed（减票不动判）。
@@ -82,7 +83,7 @@ def r1(
         (anchor, finding.task_id),
     ).fetchone()
     if ticket is None:
-        _suspend(conn, finding, "无票面证据源（锚未落在任何小票上），R2/R3 待 M5 接线")
+        _suspend(conn, finding, "无票面证据源（锚未落在任何小票上），交 R2/R3 接手")
         return None
     try:
         parsed: object = json.loads(str(ticket["args_json"]))
@@ -98,8 +99,8 @@ def r1(
             conn,
             finding.task_id,
             "judge",
-            f"裁决 {finding.id[:8]}: 悬置（R2/R3 图纸位：{ticket['tool_name']}"
-            " 非只读，永不 rerun 写操作；M5 接双路径/反证）",
+            f"裁决 {finding.id[:8]}: 悬置（R2/R3 接手：{ticket['tool_name']}"
+            " 非只读，永不 rerun 写操作）",
         )
         return None
     original = Path(anchor)

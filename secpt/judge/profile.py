@@ -92,7 +92,7 @@ def note_for(prof: JudgeProfile) -> str:
         return "裁判关闭（无 profile 或 judge.enabled=false）"
     n = len(prof.ground_truth)
     src = prof.source or "?"
-    return f"裁判开启 R0/R4（profile={src}，ground_truth {n} 条）"
+    return f"裁判开启 R0→R4→R1/R2/R3（profile={src}，ground_truth {n} 条）"
 
 
 __all__ = [
