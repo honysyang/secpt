@@ -8,6 +8,7 @@
    逐条被 verified finding 命中——"完成≠可出场"，只判 claimed 不算交付。
 5. **规划全部收口（M5，设计文档 L16）**：plans 表无 active 行——"每一条规划是否
    都完成"要能机器判定，由主 LLM 用 ``plan_done``/``plan_cancel`` 收口。
+6. **步骤全部完成（M5-19，设计文档 L21）**：steps 无 voided/aborted 等非 ok 行。
 
 为什么第 4 条由 profile 驱动而不是猜 criteria 文本：criteria 是自然语言
 （"拿到 flag"），机器判据必须是可一键复算的清单；没配验收条目 = 不判（如实
@@ -109,6 +110,20 @@ def run_checklist(
             f"规划未收口 {open_plans} 条（active）——用 plan_done 标记完成 / plan_cancel 标记废弃"
         )
 
+    # 条 6：步骤全部完成（M5-19，设计文档 L21"步骤是否都完成了"）。
+    # 正常路径不会出现非 ok 步（voided 只发生在 schema 炸了并走异常出口时），
+    # 这条是机制兜底：账上留着 voided/aborted 步就说明本 run 不完整，不许正常出场。
+    bad_steps = conn.execute(
+        "SELECT step_no, status FROM steps WHERE task_id = ? AND status <> 'ok'"
+        " ORDER BY step_no LIMIT 5",
+        (task_id,),
+    ).fetchall()
+    if bad_steps:
+        failures.append(
+            f"步骤未全部完成：{len(bad_steps)} 步非 ok"
+            f"（如 step {bad_steps[0]['step_no']} status={bad_steps[0]['status']}）"
+        )
+
     return ExitVerdict(passed=not failures, failures=failures)
 
 
@@ -156,7 +171,7 @@ def _graph_gaps(conn: sqlite3.Connection, task_id: str) -> list[str]:
 
 
 class ExitChecklist:
-    """ExitChecker 协议的实现体（M1 三条 + M5 交付验收/规划收口/双图一致）。"""
+    """ExitChecker 协议的实现体（M1 三条 + M5 交付/规划/双图/步骤完成六验）。"""
 
     def __init__(self, acceptance: Sequence[AcceptanceRule] = ()) -> None:
         """acceptance 由装配层从 profile 映射（finalize 不 import judge：分层单向）。"""

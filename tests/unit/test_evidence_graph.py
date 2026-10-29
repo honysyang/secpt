@@ -152,3 +152,14 @@ class TestExitGraphConsistency:
             conn, task_id, "历史 verified", "d", "raw/a.txt", verify_state="verified"
         )
         assert run_checklist(conn, task_id).passed is True
+
+
+def test_voided_step_blocks_exit() -> None:
+    """步骤未全部完成（M5-19）：账上留 voided 步 = 本 run 不完整，不许正常出场。"""
+    conn = migrate_store.connect(":memory:")
+    task_id, run = _task_with_run(conn)
+    ledger.record_step(conn, task_id, run.id, 1, "{}", status="voided")
+
+    verdict = run_checklist(conn, task_id)
+    assert verdict.passed is False
+    assert any("步骤未全部完成" in f for f in verdict.failures)

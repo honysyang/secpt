@@ -2599,3 +2599,19 @@ ruff 全绿；`secpt evidence` 冒烟可见 `-- plans --` 段（mock 任务无�
 **至此 L66"关键参数通过配置文件配置"全部落地**：max_steps / workers /
 stall.failures / stall.repeat_plans / plan.review_* / execute.step_tool_limit /
 execute.docker_flags。遗留：per-task 覆盖（本次 run 单独放宽步数）未做。
+
+## §91 M5-19 出场第 6 验：步骤全部完成（L21"步骤是否都完成了"）
+
+文档 L21 要求出场前确认"每一条规划或任务是否都完成，步骤是否都完成了"。规划侧
+已由第 5 验收口，步骤侧此前无人检查：`steps.status` 里躺着 `voided`（schema 三连
+失败）或 `aborted` 的 run 与正常 run 在出场判定上无差别。
+
+**落地**：exit_checklist 条 6——`steps WHERE status <> 'ok'` 必须为空，否则
+"步骤未全部完成：N 步非 ok（如 step 1 status=voided）"。正常路径不会命中（voided
+只在 schema 炸了并走异常出口时落账），这是机制兜底：账不完整就不许正常出场。
+
+**测试面**：test_evidence_graph +1（voided 步阻断出场）；test_e2e 半场报告计数
+由 1 → 2（claimed 悬置 + voided 步各一条，如实上数）。全库 517 例、ruff 全绿。
+
+**至此出场清单六验齐**：① 账本交齐（孤儿小票）+ 小票/双图一致；② findings 全终态；
+③ 进场三问齐全；④ 交付对目标（acceptance）；⑤ 规划全收口；⑥ 步骤全 ok。

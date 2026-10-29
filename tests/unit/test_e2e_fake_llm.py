@@ -192,15 +192,16 @@ def test_abnormal_direction_schema_retry_exhausted_then_half_report(tmp_path: Pa
     assert ledger.get_task(conn, task.id).exit_kind == "abnormal"
     assert [name for name, _ in events] == ["run_step_started", "run_ended"]
 
-    # 半场报告（main.py 兜底同款手式）：claimed 悬置如实上数。
+    # 半场报告（main.py 兜底同款手式）：claimed 悬置 + voided 步如实上数
+    # （M5-19 起"步骤是否都完成"也是一条出场验，voided 步因此计 2 条）。
     reporter = Reporter(LlmClient(FakeLLM([_summary_json("坏 JSON 三连，半场收束。")])))
     rep = reporter.generate(conn, task.id, half_court=True)
     md = render_markdown(rep)
     assert rep.half_court is True and rep.exit_kind == "abnormal"
     assert rep.findings == []  # claimed ≠ verified：claims 进不了报告
-    assert rep.failing_counts == {"exit_checklist": 1, "abnormal": 1}
+    assert rep.failing_counts == {"exit_checklist": 2, "abnormal": 1}
     assert md.startswith("# 半场报告") and "（无 verified findings，如实照录）" in md
-    assert "failing_counts={'exit_checklist': 1, 'abnormal': 1}" in md
+    assert "failing_counts={'exit_checklist': 2, 'abnormal': 1}" in md
     assert "半场收束" in md
 
 
