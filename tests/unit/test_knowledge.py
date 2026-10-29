@@ -117,3 +117,30 @@ def test_loop_pack_omits_knowledge_when_no_hit() -> None:
     loop.run("整理材料")
 
     assert "知识参考" not in fake.calls[1][1].content
+
+
+# ---------- M5-16 可派角色清单 --------------------------------------------------
+
+
+def test_role_catalog_lists_roles_for_dispatch() -> None:
+    from secpt.assets import role_catalog
+
+    lines = role_catalog()
+    assert any(line.startswith("recon（侦察员）") for line in lines)
+    assert any("port-recon" in line for line in lines)  # 技能名随清单可见
+    assert all("你是侦察员" not in line for line in lines)  # instruction 正文不进清单
+
+
+def test_loop_pack_carries_role_catalog() -> None:
+    goal = json.dumps(
+        {"target": "10.0.0.5", "objective": "整理材料", "success_criteria": "写一份说明"},
+        ensure_ascii=False,
+    )
+    done = json.dumps({"thought": "收工", "tool_calls": [], "done": True})
+    fake = FakeLLM([goal, done])
+    loop, _conn = _loop(fake)
+    loop.run("整理材料")
+
+    pack = fake.calls[1][1].content
+    assert "## 可派角色（agent_run 的 persona 取 id）" in pack
+    assert "recon（侦察员）" in pack

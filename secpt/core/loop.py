@@ -37,7 +37,7 @@ from typing import Protocol
 import structlog
 from pydantic import BaseModel, Field
 
-from secpt.assets import render_knowledge, select_knowledge
+from secpt.assets import render_knowledge, role_catalog, select_knowledge
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.core.plan_watch import PlanWatcher
 from secpt.errors import LlmError, SecptError
@@ -388,6 +388,8 @@ class PentestLoop:
             graph_summary=graph.graph_summary(self._conn, task.id),
             experiences=experience.fetch_replay(self._conn, self._experience_env),
             knowledge=knowledge,
+            # M5-16 可派角色：主 LLM 读角色库（设计文档 L8），persona 才有取值域。
+            roles=role_catalog(),
         )
         try:
             output = self._llm.step(pkg)

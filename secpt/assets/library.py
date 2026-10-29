@@ -291,6 +291,24 @@ def render_knowledge(docs: Sequence[KnowledgeDoc], *, max_chars: int = 600) -> l
     return lines
 
 
+def role_catalog() -> list[str]:
+    """渲染"可派角色"清单（M5-16）：主 LLM 的 ``agent_run.persona`` 取值域。
+
+    设计文档 L8 要求主 LLM"读取角色库"——没有这份清单，persona 只能是自由文本，
+    主 LLM 不知道系统里到底有哪些角色可派。清单只带 id/名称/一句描述/技能名，
+    不带 instruction 正文（那是派单后 worker 才需要的东西），防注意力包膨胀。
+    """
+    lines: list[str] = []
+    for role_id in list_roles():
+        role = load_role(role_id)
+        if role is None:
+            continue
+        desc = f"：{role.description}" if role.description else ""
+        skills = f"；技能 {','.join(role.skills)}" if role.skills else ""
+        lines.append(f"{role.id}（{role.name}）{desc}{skills}")
+    return lines
+
+
 def _fragments(prompt_ids: tuple[str, ...]) -> list[str]:
     """展开 prompt 引用（角色/技能共用的引用链实现点）。
 
@@ -325,6 +343,7 @@ __all__ = [
     "prompt_text",
     "render_knowledge",
     "render_prompt",
+    "role_catalog",
     "role_fragments",
     "select_knowledge",
     "skill_fragments",
