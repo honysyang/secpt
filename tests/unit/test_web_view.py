@@ -163,6 +163,23 @@ def test_stream_first_chunk_carries_snapshot(seeded: tuple[Path, str]) -> None:
     assert "教练提案" in text  # 快照含最新 audit
 
 
+def test_stream_carries_graph_write_traces(seeded: tuple[Path, str]) -> None:
+    """M4 验收 6：graph_changed 面板可见——step 行的 graph 写痕随 SSE 快照流出。
+
+    机制路径：主循环每步 audit 行带 graph=+1n+{e}e 写痕 → SSE 轮询 audit 增量
+    自动带出，零新端点。本例手工补一条主循环同款 step 行证明流真的带它。
+    """
+    db, task_id = seeded
+    conn = migrate.connect(str(db))
+    try:
+        ledger.audit(conn, task_id, "main", "step 2: 扫 80, tool_calls=1, graph=+1n+1e")
+    finally:
+        conn.close()
+    resp = _client(db).get(f"/task/{task_id}/stream")
+    first = next(iter(resp.response)).decode()
+    assert "graph=+1n+1e" in first
+
+
 def test_stream_only_get(seeded: tuple[Path, str]) -> None:
     db, task_id = seeded
     assert _client(db).post(f"/task/{task_id}/stream").status_code == 405

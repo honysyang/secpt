@@ -116,6 +116,57 @@ def test_openai_provider_missing_env_rejected_assembly_time(
     assert "SECPT_LLM_MODEL" in err
 
 
+def test_openai_full_run_against_local_fake_server(
+    cli_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M4 验收 1：openai 兼容档可跑完整 run——本地假 server 演示，零联网。
+
+    与 FakeLLM 演示同一条流水线（进场三问 → nmap 摸扫回执 → 收工 → 报告摘要），
+    唯一差别是聪明来自 HTTP（openai 协议）而非出厂脚本——密钥只进请求头
+    （Authorization: Bearer …），请求逐单留痕可核。
+    """
+    from tests.unit.test_openai_provider import _API_KEY, _MODEL, _FakeOpenAIServer
+
+    server = _FakeOpenAIServer()
+    server.start()
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SECPT_LLM_BASE_URL", server.base_url)
+    monkeypatch.setenv("SECPT_LLM_API_KEY", _API_KEY)
+    monkeypatch.setenv("SECPT_LLM_MODEL", _MODEL)
+    try:
+        # 与 _mock_run_script 同序：goal JSON → 扫描步 → 收工 → 报告摘要
+        goal_json = json.dumps(
+            {
+                "target": "对内网 10.0.0.9 做端口摸底"[:60],
+                "objective": "o",
+                "success_criteria": "s",
+            },
+            ensure_ascii=False,
+        )
+        server.queue(goal_json)
+        server.queue(
+            json.dumps(
+                {
+                    "thought": "摸扫一圈端口（openai 档演示步）",
+                    "tool_calls": [
+                        {"name": "nmap", "args": {"target": "(demo)", "ports": "22,80"}}
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+        server.queue(json.dumps({"thought": "收工", "tool_calls": [], "done": True}))
+        server.queue(json.dumps({"summary": "openai 假 server 演示收束。"}, ensure_ascii=False))
+        rc = main_mod.main(["run", "--goal", "对内网 10.0.0.9 做端口摸底"])
+    finally:
+        server.stop()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "【出口】exit_kind=normal" in out
+    assert server.requests, "openai 档竟零请求——聪明没走 HTTP"
+    assert f"Bearer {_API_KEY}" in server.auth_headers[0]  # 密钥只进请求头
+
+
 def test_unknown_provider_rejected_assembly_time(
     cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
