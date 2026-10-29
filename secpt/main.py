@@ -49,6 +49,7 @@ from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
 from secpt.tools.executors import ArgvRunner, DockerRunner, load_isolation_config
 from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
+from secpt.tools.mcp_client import build_mcp_adapters, load_mcp_config
 from secpt.tools.probe import (
     CaptureBackend,
     build_backend,
@@ -57,7 +58,7 @@ from secpt.tools.probe import (
 from secpt.tools.probe import (
     note_for as probe_note_for,
 )
-from secpt.tools.registry import ToolRegistry
+from secpt.tools.registry import ToolAdapter, ToolRegistry
 
 _NULL_TARGET = "(demo)"
 _DEFAULT_WORKERS = 3
@@ -228,12 +229,19 @@ def _worker_builder() -> Callable[[int], Worker]:
     runner = _runner()
     guard = load_guard_config(_profile_path())
     probe = _probe_backend()
+    # MCP adapter 装配期一次、各 worker 线程共享：McpTool 无状态（一发一会话），
+    # registry 对 adapter 只读 manifest + 调 run，跨线程安全。
+    mcp = _mcp_adapters()
 
     def build(index: int) -> Worker:
         return Worker(
             llm=LlmClient(_worker_provider(index)),
             dispatcher=ToolRegistry(
-                [NmapTool(binary=binary, raw_dir=raw_dir, runner=runner), DeclareFindingTool()],
+                [
+                    NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
+                    DeclareFindingTool(),
+                    *mcp,
+                ],
                 guard=guard,
                 approver=None,
                 probe=probe,
@@ -319,6 +327,7 @@ def _registry(
             NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
             AgentRunTool(board=board),
             DeclareFindingTool(),
+            *_mcp_adapters(),
         ],
         guard=guard,
         approver=approver,
@@ -337,6 +346,17 @@ def _probe_backend() -> CaptureBackend | None:
         return None
     return build_backend(
         os.environ.get("SECPT_PROBE_BACKEND", "mock"), os.environ.get("SECPT_RAW_DIR", "raw")
+    )
+
+
+def _mcp_adapters() -> list[ToolAdapter]:
+    """MCP 管道装配（M4-2）：profile [mcp] 段 → adapter 列表。
+
+    掉线只告警不注册（build_mcp_adapters 捕 McpError 转 structlog warning），
+    装配绝不被坏 server 炸；未配置 [mcp] 段 = 空列表，零行为变化。
+    """
+    return build_mcp_adapters(
+        load_mcp_config(_profile_path()), os.environ.get("SECPT_RAW_DIR", "raw")
     )
 
 
