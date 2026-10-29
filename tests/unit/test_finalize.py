@@ -82,6 +82,80 @@ def test_exit_checklist_implements_core_protocol(conn: sqlite3.Connection) -> No
     assert isinstance(verdict, ExitVerdict)
 
 
+# ---- 出场清单③ 交付对目标（M5）------------------------------------------------
+
+
+def _acceptance(*pairs: tuple[str, str]) -> list[exit_checklist.AcceptanceRule]:
+    return [exit_checklist.AcceptanceRule(id=key, pattern=pattern) for key, pattern in pairs]
+
+
+def test_acceptance_passes_when_verified_finding_matches(conn: sqlite3.Connection) -> None:
+    task = _task_with_run(conn)
+    ledger.append_finding(
+        conn, task.id, "拿到 flag{abc}", "首页回显", "raw/flag.txt", verify_state="verified"
+    )
+    verdict = exit_checklist.run_checklist(
+        conn, task.id, acceptance=_acceptance(("AC-flag", "FLAG{"))
+    )
+    assert verdict.passed is True  # 子串匹配不分大小写
+
+
+def test_acceptance_fails_when_only_claimed_matches(conn: sqlite3.Connection) -> None:
+    """claimed 不算交付：没经裁判确认的"我拿到了"不能过出场。"""
+    task = _task_with_run(conn)
+    ledger.append_finding(conn, task.id, "拿到 flag{abc}", "d", "raw/flag.txt")
+    verdict = exit_checklist.run_checklist(
+        conn, task.id, acceptance=_acceptance(("AC-flag", "flag{"))
+    )
+    assert verdict.passed is False
+    assert any("交付对目标" in f and "AC-flag" in f for f in verdict.failures)
+
+
+def test_acceptance_fails_when_missing(conn: sqlite3.Connection) -> None:
+    task = _task_with_run(conn)
+    ledger.append_finding(
+        conn, task.id, "22/tcp open ssh", "ssh 服务", "raw/a.txt", verify_state="verified"
+    )
+    verdict = exit_checklist.run_checklist(
+        conn, task.id, acceptance=_acceptance(("AC-flag", "flag{"), ("AC-22", "22/tcp"))
+    )
+    assert verdict.passed is False
+    assert any("AC-flag" in f for f in verdict.failures)
+    assert not any("AC-22" in f for f in verdict.failures)  # 命中的条目不报
+
+
+def test_no_acceptance_keeps_old_semantics(conn: sqlite3.Connection) -> None:
+    """未配验收 = 不判（mock/探索型任务不因"没交付物"虚红）。"""
+    task = _task_with_run(conn)
+    assert exit_checklist.ExitChecklist().check(conn, task.id).passed is True
+
+
+def test_unmet_acceptance_bounces_done_until_wall() -> None:
+    """接线证明：验收未过时 done 被弹回，连败 3 轮按 E_WALL 走异常出口。"""
+    from secpt.core.loop import PentestLoop
+    from secpt.errors import SecptError
+    from secpt.llms.main_llm import MainLlm
+    from secpt.tools.registry import ToolRegistry
+
+    conn = migrate.connect(":memory:")
+    goal = json.dumps(
+        {"target": "10.0.0.5", "objective": "o", "success_criteria": "s"}, ensure_ascii=False
+    )
+    done = json.dumps({"thought": "收工", "plan_updates": [], "tool_calls": [], "done": True})
+    fake = FakeLLM([goal, done, done, done])
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        ToolRegistry([]),
+        exit_checker=exit_checklist.ExitChecklist(acceptance=_acceptance(("AC-flag", "flag{"))),
+    )
+    with pytest.raises(SecptError) as info:
+        loop.run("交付演示 10.0.0.5")
+    assert info.value.code == "E_WALL"
+    assert ledger.latest_task(conn).exit_kind == "stalled"
+    conn.close()
+
+
 # ---- LLMA 报告（WF9）===========================================================
 
 

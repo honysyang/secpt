@@ -1,26 +1,48 @@
-"""出场清单三验（WF6）：done 先过验再放行，验不过弹回继续走步。
+"""出场清单四验（WF6 + M5 第③条）：done 先过验再放行，验不过弹回继续走步。
 
-三条核对（开发文档 WF6 原文）：
+四条核对：
 1. 账本交齐：有小票无对应 step = 账目缺口（孤儿小票）；
-2. findings 全部有终态：无 claimed 悬置（M1 裁判未实现，claimed 必须先收口）；
-3. 进场三问齐全：goal/objective/success_criteria 三样从账本还原不缺项。
+2. findings 全部有终态：无 claimed 悬置；
+3. 进场三问齐全：goal/objective/success_criteria 三样从账本还原不缺项；
+4. **交付对目标（M5，设计文档 L24-28）**：profile 声明的验收条目（``[[acceptance]]``）
+   逐条被 verified finding 命中——"完成≠可出场"，只判 claimed 不算交付。
 
-为什么核对规则落在最外层（finalize）而非 core：分层红线单向（core → llms →
-tools/store），core/loop.py 只约定 ExitVerdict 形状与 ExitChecker 协议，
-本模块实现之，由 main.py / 测试装配方注入。
+为什么第 4 条由 profile 驱动而不是猜 criteria 文本：criteria 是自然语言
+（"拿到 flag"），机器判据必须是可一键复算的清单；没配验收条目 = 不判（如实
+不虚红：mock 演示/探索型任务本来就没有硬性交付物）。判据口径与 R4 一致：
+title+detail 子串、不分大小写，只是把来源限定在 verified 行。
+
+为什么核对规则落在最外层（finalize）而非 core：分层红线单向，core/loop.py
+只约定 ExitVerdict 形状与 ExitChecker 协议，本模块实现之，由 main.py / 测试
+装配方注入。
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
+
+from pydantic import BaseModel
 
 from secpt.core.loop import ExitVerdict
 from secpt.store import ledger
 
 
-def run_checklist(conn: sqlite3.Connection, task_id: str) -> ExitVerdict:
-    """按 WF6 三条逐条核对账本，failures 逐条列出（LLM 弹回后要看得懂堵在哪）。"""
+class AcceptanceRule(BaseModel):
+    """验收条目：id 只用于报错点名，pattern 是 verified finding 的子串判据。"""
+
+    id: str
+    pattern: str
+
+
+def run_checklist(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    acceptance: Sequence[AcceptanceRule] = (),
+) -> ExitVerdict:
+    """按四条逐条核对账本，failures 逐条列出（LLM 弹回后要看得懂堵在哪）。"""
     failures: list[str] = []
 
     # 条 1：孤儿小票——tickets 有 step_id 但 steps 无对应行 = 账本交不齐。
@@ -57,12 +79,31 @@ def run_checklist(conn: sqlite3.Connection, task_id: str) -> ExitVerdict:
     if missing:
         failures.append(f"进场三问缺失：{'、'.join(missing)}（criteria 原文应如实转录）")
 
+    # 条 4：交付对目标（M5）——验收条目逐条须被 verified finding 命中。
+    if acceptance:
+        haystack = "\n".join(
+            f"{row.title}\n{row.detail}"
+            for row in ledger.task_findings(conn, task_id, verify_state="verified")
+        ).lower()
+        missed = [rule.id for rule in acceptance if rule.pattern.lower() not in haystack]
+        if missed:
+            failures.append(
+                f"交付对目标：验收条目未命中 {missed}（需 verified finding 命中；claimed 不算交付）"
+            )
+
     return ExitVerdict(passed=not failures, failures=failures)
 
 
 class ExitChecklist:
-    """ExitChecker 协议的实现体（W2-1 M1 版：三条核对，不做 criteria 命中判定）。"""
+    """ExitChecker 协议的实现体（M1 三条 + M5 交付验收）。"""
+
+    def __init__(self, acceptance: Sequence[AcceptanceRule] = ()) -> None:
+        """acceptance 由装配层从 profile 映射（finalize 不 import judge：分层单向）。"""
+        self._acceptance = tuple(acceptance)
 
     def check(self, conn: sqlite3.Connection, task_id: str) -> ExitVerdict:
         """委托纯函数 run_checklist（同类无状态，纯函数便于单测直调）。"""
-        return run_checklist(conn, task_id)
+        return run_checklist(conn, task_id, acceptance=self._acceptance)
+
+
+__all__ = ["AcceptanceRule", "ExitChecklist", "run_checklist"]

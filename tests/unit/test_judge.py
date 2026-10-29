@@ -95,6 +95,42 @@ class TestProfile:
         assert info.value.code == "E_PROFILE"
 
 
+# ---------- 验收清单装配（M5 出场③） ------------------------------------------------
+
+
+class TestAcceptanceProfile:
+    """profile 的 [[acceptance]] 是"交付对目标"的机器判据（缺省=不判）。"""
+
+    def test_parses_acceptance_items(self, tmp_path: Path) -> None:
+        path = tmp_path / "profile.toml"
+        path.write_text(
+            '[[acceptance]]\nid = "AC-flag"\npattern = "flag{"\ndescription = "拿到靶场 flag"\n',
+            encoding="utf-8",
+        )
+        prof = load_profile(str(path))
+        assert [(a.id, a.pattern) for a in prof.acceptance] == [("AC-flag", "flag{")]
+        assert prof.acceptance[0].description == "拿到靶场 flag"
+
+    def test_default_empty(self, tmp_path: Path) -> None:
+        prof = load_profile(str(_cfg(tmp_path)))
+        assert prof.acceptance == ()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "acceptance = 5\n",
+            '[[acceptance]]\nid = "AC"\n',
+            '[[acceptance]]\npattern = "x"\n',
+        ],
+    )
+    def test_bad_acceptance_rejects(self, tmp_path: Path, body: str) -> None:
+        path = tmp_path / "profile.toml"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(SecptError) as info:
+            load_profile(str(path))
+        assert info.value.code == "E_PROFILE"
+
+
 # ---------- R0 判零：锚点文件存在且非空（拍板②） --------------------------------------
 
 

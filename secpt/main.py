@@ -25,7 +25,7 @@ from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
 from secpt.core.plan_watch import PlanWatcher, load_plan_config
 from secpt.errors import SecptError
-from secpt.finalize.exit_checklist import ExitChecklist
+from secpt.finalize.exit_checklist import AcceptanceRule, ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
 from secpt.finalize.reporter import Reporter, render_markdown
 from secpt.judge import load_profile, note_for, sweep
@@ -462,7 +462,13 @@ def _assemble(
         MainLlm(client),
         reg,
         bus=bus,
-        exit_checker=ExitChecklist(),
+        exit_checker=ExitChecklist(
+            # M5 出场清单③"交付对目标"：profile 的 [[acceptance]] → finalize 的判据模型
+            # （finalize 不 import judge，映射在装配层做）。
+            acceptance=[
+                AcceptanceRule(id=item.id, pattern=item.pattern) for item in prof.acceptance
+            ]
+        ),
         distiller=ExperienceDistiller(client),
         experience_env=_experience_env(),
         judge_sweep=partial(

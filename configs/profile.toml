@@ -17,3 +17,11 @@ pattern = "22/tcp open"
 [plan]
 review_every_steps = 5
 review_limit = 3
+
+# 出场验收（M5 清单③"交付对目标"）：每条 acceptance 必须被一条 verified finding
+# 的 title/detail 子串命中（不分大小写），否则 done 过不了出场三验、弹回继续走。
+# 未配置 = 不判（探索型任务/mock 演示本来没有硬性交付物）。示例：
+# [[acceptance]]
+# id = "AC-flag"
+# pattern = "flag{"
+# description = "拿到靶场 flag"
