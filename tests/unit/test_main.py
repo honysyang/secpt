@@ -58,7 +58,7 @@ def test_run_mock_flow_bubbles_and_normal_exit(
     assert rc == 0
     assert task is not None and task["exit_kind"] == "normal"
     out = capsys.readouterr().out
-    assert "【主LLM】step 1 开包" in out
+    assert "【主LLM】第 1/" in out and "开始决策" in out
     assert "【主LLM → nmap】" in out  # 工具失败也落回执 → 小票摘要行
     assert "【出口】exit_kind=normal" in out
     assert "task_id=" in out and "run_id=" in out
@@ -221,7 +221,7 @@ def test_resume_reuses_run_and_walks_on(
     rc = main_mod.main(["resume", task_id])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "step 2" in out
+    assert "第 2/200 步" in out
     conn = connect(cli_env)
     try:
         runs = conn.execute("SELECT id, status, step_count FROM runs").fetchall()
@@ -460,3 +460,12 @@ def test_posture_warns_when_judge_off(
     out = capsys.readouterr().out
     assert "裁判=关" in out
     assert "注意：裁判关闭" in out
+
+
+def test_mock_run_prints_step_decision(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M5-26：CLI 要展示每步的思考与所用工具，而不是只报"开始"。"""
+    main_mod.main(["run", "--goal", "对内网 10.0.0.1 做端口摸底"])
+    out = capsys.readouterr().out
+    assert "步决策：摸扫一圈端口（演示步）（工具：nmap）" in out

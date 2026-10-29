@@ -30,7 +30,7 @@ def test_cli_view_renders_three_m1_events(capsys: pytest.CaptureFixture[str]) ->
     )
     bus.emit("run_ended", task_id="t1", run_id="r1", steps=2, finished=True, exit_kind="normal")
     out = capsys.readouterr().out
-    assert "【主LLM】step 3 开包" in out
+    assert "【主LLM】第 3/? 步 · 开始决策" in out
     assert "【主LLM → nmap】exit=0 | 22/tcp open  ssh" in out
     assert "【出口】exit_kind=normal" in out
     assert "steps=2" in out
@@ -45,7 +45,7 @@ def test_cli_view_tolerates_missing_payload_keys(
     view("ticket_appended", {})
     view("run_ended", {})
     out = capsys.readouterr().out
-    assert "【主LLM】step ?" in out
+    assert "【主LLM】第 ?/? 步 · 开始决策" in out
     assert "【主LLM → ?】" in out
     assert "【出口】exit_kind=?" in out
 
@@ -114,3 +114,18 @@ def test_evidence_unknown_task_raises() -> None:
     with pytest.raises(LedgerError):
         # 查无此行必须显式炸（LedgerError），main.py 兜底转非零出口
         evidence_report(conn, "no-such-task")
+
+
+def test_cli_view_renders_step_decision_and_exit_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M5-26：每步要讲"想了什么/用了哪个工具"；出场未过要给失败明细。"""
+    view = CliView()
+    view(
+        "graph_changed", {"step_no": 2, "thought": "扫 22", "tools": "nmap", "nodes": 1, "edges": 0}
+    )
+    view("exit_failed", {"streak": 1, "failures": ["claimed 悬置 1 条未收口"]})
+    out = capsys.readouterr().out
+    assert "【主LLM】第 2 步决策：扫 22（工具：nmap）" in out
+    assert "【双图】+1n+0e" in out
+    assert "【出场】第 1 轮未过：claimed 悬置 1 条未收口" in out

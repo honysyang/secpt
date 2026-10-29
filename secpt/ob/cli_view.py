@@ -58,11 +58,22 @@ class CliView:
     """
 
     def __init__(self, out: TextIO | None = None) -> None:
-        """``out`` 仅供测试注入；默认写 :data:`sys.stdout`（动态取，兼容 capsys）。"""
+        """``out`` 仅供测试注入；默认写 :data:`sys.stdout`（动态取，兼容 capsys）。
+
+        ``_pending_tickets`` 是**显示层缓冲**（M5-26）：事件顺序是"先落票、后广播
+        图变化"，但人读日志的自然顺序是"先看这步想干什么、再看干了什么"。小票行
+        先暂存，等本步决策行出现时一起冲刷——只改输出顺序，不改事件语义。
+        """
         self._out = out
+        self._pending_tickets: list[str] = []
 
     def _print(self, line: str) -> None:
         print(line, file=self._out or sys.stdout)
+
+    def _flush_tickets(self) -> None:
+        for line in self._pending_tickets:
+            self._print(line)
+        self._pending_tickets.clear()
 
     def __call__(self, event: str, payload: Mapping[str, object]) -> None:
         handler = _HANDLERS.get(event)
@@ -70,27 +81,45 @@ class CliView:
             handler(self, payload)
 
     def _on_step_started(self, payload: Mapping[str, object]) -> None:
-        self._print(f"【主LLM】step {payload.get('step_no', '?')} 开包")
+        self._flush_tickets()  # 兜底：上一步缺 graph_changed 时也别把回执吞掉
+        self._print(
+            f"【主LLM】第 {payload.get('step_no', '?')}/{payload.get('max_steps', '?')} 步"
+            " · 开始决策"
+        )
 
     def _on_ticket(self, payload: Mapping[str, object]) -> None:
-        """小票摘要行（§8"一行 summary"）：标明是哪个智能体调了哪个工具。"""
-        self._print(
+        """工具回执行（§8"一行 summary"）：标明是哪个智能体调了哪个工具。"""
+        self._pending_tickets.append(
             f"【主LLM → {payload.get('tool_name', '?')}】exit={payload.get('exit_code')}"
             f" | {payload.get('summary', '')}"
         )
 
     def _on_run_ended(self, payload: Mapping[str, object]) -> None:
+        self._flush_tickets()
         self._print(
             f"【出口】exit_kind={payload.get('exit_kind', '?')} steps={payload.get('steps', '?')}"
             f" task_id={payload.get('task_id', '?')}"
         )
 
     def _on_graph_changed(self, payload: Mapping[str, object]) -> None:
-        """M4-6 图变化行（事件线只报告不接管）：双图每步落账后广播写痕。"""
+        """本步决策行（M5-26）：先讲"想了什么/用了哪些工具"，再放工具回执。
+
+        事件名是 graph_changed（写图后广播），但载荷里带 thought/tools——CLI 借它
+        把决策过程上屏；EventBus 只报告不接管，多带字段不改变任何执行语义。
+        """
+        tools = str(payload.get("tools") or "")
+        tail = f"（工具：{tools}）" if tools else "（无工具）"
         self._print(
-            f"【双图】step {payload.get('step_no', '?')} 更新"
-            f" +{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e"
+            f"【主LLM】第 {payload.get('step_no', '?')} 步决策：{payload.get('thought', '')}{tail}"
         )
+        self._flush_tickets()  # 决策在前、回执在后：人读日志的自然顺序
+        self._print(f"【双图】+{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e")
+
+    def _on_exit_failed(self, payload: Mapping[str, object]) -> None:
+        """出场未过（M5-26）：把失败明细讲清楚，别让人只看到一个计数。"""
+        failures = payload.get("failures") or []
+        detail = "；".join(str(item) for item in failures) if failures else "（无明细）"
+        self._print(f"【出场】第 {payload.get('streak', '?')} 轮未过：{detail}")
 
     def _on_plan_reviewed(self, payload: Mapping[str, object]) -> None:
         """M5 规划重估行（角色气泡：LLMC）：提案经下一包吸收，本行只报告不裁决。"""
@@ -108,6 +137,7 @@ _HANDLERS: dict[str, Callable[[CliView, Mapping[str, object]], None]] = {
     "ticket_appended": CliView._on_ticket,
     "graph_changed": CliView._on_graph_changed,
     "plan_reviewed": CliView._on_plan_reviewed,
+    "exit_failed": CliView._on_exit_failed,
     "run_ended": CliView._on_run_ended,
 }
 

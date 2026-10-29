@@ -265,7 +265,9 @@ class PentestLoop:
             for step_no in range(start, max_steps + 1):
                 if not budget.try_spend(max_steps, step_no):
                     break  # 撞步线：停执行（§39：非降级收尾，走异常出口落账）
-                outcome, done, ring = self._one_step(task, run, step_no, counter, plan_note)
+                outcome, done, ring = self._one_step(
+                    task, run, step_no, counter, plan_note, max_steps
+                )
                 outcomes.append(outcome)
                 plan_note = _NO_HINT  # 提案吸收一次即用掉：下一步还原
                 # M5 事件线消费：graph_changed 订阅者已在步界置旗；此处才动 LLMC
@@ -366,6 +368,7 @@ class PentestLoop:
         step_no: int,
         counter: stall.StallCounter,
         plan_note: str,
+        max_steps: int,
     ) -> tuple[StepOutcome, bool, bool]:
         """WF2 单步：打包 → step → dispatch（批外）→ 收尾事务落账 → 失速计 → 判 done。
 
@@ -376,7 +379,13 @@ class PentestLoop:
         拉铃段裁决，本方法不再自带 E_STALL 出口。
         """
         if self._bus is not None:
-            self._bus.emit("run_step_started", task_id=task.id, run_id=run.id, step_no=step_no)
+            self._bus.emit(
+                "run_step_started",
+                task_id=task.id,
+                run_id=run.id,
+                step_no=step_no,
+                max_steps=max_steps,
+            )
         goal = self._goal_projection(task, run)
         plan_summary = plan.render(self._conn, task.id)
         if plan_note:
@@ -557,6 +566,9 @@ class PentestLoop:
                 task_id=task.id,
                 run_id=run.id,
                 step_no=step_no,
+                max_steps=max_steps,
+                thought=output.thought[:120],
+                tools="、".join(ticket.tool_name for ticket in tickets),
                 nodes=1 + len(finding_rows),
                 edges=edge_writes,
             )
