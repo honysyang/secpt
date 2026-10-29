@@ -21,7 +21,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 
-from secpt.assets import list_knowledge, list_prompts, list_roles, list_skills
+from secpt.assets import list_knowledge, list_prompts, list_roles, list_skills, prompt_text
 from secpt.core.limits import LimitsConfig, load_limits_config
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
@@ -593,7 +593,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     route = Router(LlmClient(_route_provider(text))).decide(text)
     if route.mode == "chat":
         print("【模式】自动判断为对话（不落账）")
-        print(f"【AI】{route.reply}")
+        print(f"【AI】{_chat_reply(text)}")  # 与 secpt chat 共用同一人格与提示
         return 0
     goal = route.goal or text
     print(f"【模式】自动判断为渗透任务：{goal}")
@@ -664,16 +664,29 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _chat_reply(text: str) -> str:
+    """单轮直答（带身份系统提示）：`secpt chat` 与 `run` 的对话分支共用。
+
+    为什么两条入口必须共用：同一条咨询从哪进都该得到同一个人格（secpt 助手）
+    与同一套边界（只谈授权目标、不编结论）——否则 `run` 的回答会像通用聊天机器人。
+    """
+    return _chat_provider().complete(
+        [
+            Message(role="system", content=prompt_text("chat.system")),
+            Message(role="user", content=text),
+        ],
+        temperature=TEMPERATURE_FREESTYLE,
+        timeout_s=60.0,
+    )
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     """``secpt chat [text]``：对话模式单轮直答（§8 可观测流起点）。"""
     text = str(args.text) if args.text else sys.stdin.readline().rstrip("\n")
     if not text.strip():
         print('（chat）空输入。用法：secpt chat "你好"（或管道喂入）。')
         return 0
-    reply = _chat_provider().complete(
-        [Message(role="user", content=text)], temperature=TEMPERATURE_FREESTYLE, timeout_s=60.0
-    )
-    print(f"【AI】{reply}")
+    print(f"【AI】{_chat_reply(text)}")
     return 0
 
 
@@ -765,7 +778,8 @@ def _print_result(result: LoopResult) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="secpt", description="渗透测试智能体 harness（M1：LLM 聪明、骨架不犯低级错误）"
+        prog="secpt",
+        description="AI 驱动的渗透测试智能体（规划 → 工具执行 → 裁判验真 → 出场六验）",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

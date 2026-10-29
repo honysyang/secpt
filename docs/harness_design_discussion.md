@@ -2680,3 +2680,31 @@ mock 档一律判 pentest（离线演示意图就是跑通闭环，假模型分�
 显式优先于开关）+ conftest 护栏；test_route 5（goal 兜底 / 答复兜底 / prompt 携带
 输入 / 错误上抛 / 正常 chat）；test_main 3（自动判任务 / 自动判对话且零任务 /
 工具成功时报告不降级）。ruff 全绿。
+
+## §94 M5-23 对话人格：chat.system 身份提示 + 路由只分类不作答
+
+现象：`secpt chat "你好"` 回复"我是 DeepSeek，一个由深度求索公司开发的 AI 助手"
+——对话模式此前只发一条 user 消息，模型只能按厂商默认人格自我介绍，与"AI 驱动
+渗透系统"的定位不符。
+
+**拍板①：对话模式带身份系统提示**（`assets/prompts/chat.system.md`）。
+写明三件事：本系统能做什么（run 统一入口/闭环六验/resume/panel/evidence/metrics/
+assets）、系统纪律（事实必须锚 raw/流量、R0-R4 验真、经验只收 verified）、边界
+（只谈授权目标、不编结论、危险操作同时给风险与回退）。风格要求：中文、结论先行。
+
+**拍板②：路由只分类，回答统一交给对话器官。**
+第一版让 Router 在 chat 时直接产出 `reply`，实测同一问题从 `secpt run` 进来的
+答案明显比 `secpt chat` 差（路由 prompt 没有身份上下文）——同一条咨询两种人格，
+不可接受。改为：`Route` 只保留 `mode/goal`；判 chat 时由 `_chat_reply()` 走
+`chat.system`（与 `secpt chat` 共用同一函数、同一温度档），路由不再作答。
+代价：auto 模式的咨询多一次 LLM 调用；换来的是人格与边界单一真源。
+
+**实测**：
+- `secpt chat "你是谁？"` → "我是 **secpt**，本机这套渗透测试系统的对话助手…
+  我只围绕这套系统和你说话"；
+- `secpt run "你能做什么？"` → `【模式】自动判断为对话` + 同一人格的三段能力说明。
+
+**测试面（+2 例，翻新 3 处，全库 538 例）**：test_main 新增"chat 必须带身份
+系统提示"（system 消息含 secpt 与授权边界）；test_route 改为"只分类"口径
+（chat 不带 reply）；test_main auto-chat 用例改为双 provider 注入；test_assets
+的出厂 prompt 清单加入 `chat.system`。ruff 全绿。

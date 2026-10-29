@@ -39,6 +39,7 @@ from secpt.tools.adapters import AgentRunTool
 from secpt.tools.registry import ToolRegistry
 
 _BUNDLED_PROMPTS = (
+    "chat.system",
     "main.system",
     "main.entrance",
     "worker.system",

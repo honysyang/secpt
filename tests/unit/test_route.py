@@ -1,4 +1,7 @@
-"""M5-22 路由器官测试：任务/对话判定、goal 兜底、答复兜底、错误上抛。"""
+"""M5-22 路由器官测试：任务/对话判定、goal 兜底、prompt 携带输入、错误上抛。
+
+路由只负责分类：判 chat 时**不在这里作答**（回答交给带身份的对话器官）。
+"""
 
 from __future__ import annotations
 
@@ -18,20 +21,14 @@ def test_pentest_route_falls_back_to_raw_text() -> None:
     assert route.goal == "扫一下 10.0.0.5 的端口"
 
 
-def test_chat_route_keeps_model_reply() -> None:
-    route = Router(LlmClient(FakeLLM([Route(mode="chat", reply="XSS 是跨站脚本。")]))).decide(
-        "什么是 XSS"
-    )
-    assert route.mode == "chat" and route.reply == "XSS 是跨站脚本。"
-
-
-def test_chat_route_blank_reply_uses_honest_placeholder() -> None:
-    route = Router(LlmClient(FakeLLM([Route(mode="chat", reply="   ")]))).decide("在吗")
-    assert "模型未给出答复" in route.reply
+def test_chat_route_carries_no_goal_and_no_answer() -> None:
+    """判对话：只给模式，不作答（goal 字段被忽略）。"""
+    route = Router(LlmClient(FakeLLM([Route(mode="chat", goal="忽略我")]))).decide("什么是 XSS")
+    assert route.mode == "chat"
 
 
 def test_prompt_carries_user_input() -> None:
-    fake = FakeLLM([Route(mode="chat", reply="ok")])
+    fake = FakeLLM([Route(mode="chat")])
     Router(LlmClient(fake)).decide("请介绍一下这个系统")
     assert "请介绍一下这个系统" in fake.calls[0][0].content
 

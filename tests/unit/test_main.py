@@ -391,16 +391,15 @@ def test_run_auto_routes_to_pentest(
 def test_run_auto_routes_to_chat_without_task(
     cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(main_mod, "_route_provider", lambda text: FakeLLM([Route(mode="chat")]))
     monkeypatch.setattr(
-        main_mod,
-        "_route_provider",
-        lambda text: FakeLLM([Route(mode="chat", reply="XSS 是跨站脚本。")]),
+        main_mod, "_chat_provider", lambda: FakeLLM(["我是 secpt，这套渗透测试系统的助手。"])
     )
     rc = main_mod.main(["run", "什么是 XSS"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "【模式】自动判断为对话（不落账）" in out
-    assert "【AI】XSS 是跨站脚本。" in out
+    assert "【AI】我是 secpt，这套渗透测试系统的助手。" in out
     conn = connect(cli_env)
     try:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
@@ -424,3 +423,17 @@ def test_mock_run_with_successful_tool_prints_report(
     assert rc == 0
     assert "report_degraded" not in captured.err
     assert "# 终场报告" in captured.out
+
+
+def test_chat_sends_pentest_identity_prompt(
+    cli_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M5-23：对话模式必须带身份系统提示，不能自我介绍成通用助手。"""
+    fake = FakeLLM(["好的，我来帮你"])
+    monkeypatch.setattr(main_mod, "_chat_provider", lambda: fake)
+    assert main_mod.main(["chat", "你好"]) == 0
+    messages = fake.calls[0]
+    assert messages[0].role == "system"
+    assert "secpt" in messages[0].content
+    assert "授权" in messages[0].content  # 边界纪律也在系统提示里
+    assert messages[1].role == "user" and messages[1].content == "你好"
