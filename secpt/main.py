@@ -66,7 +66,6 @@ from secpt.tools.probe import (
 from secpt.tools.registry import ToolAdapter, ToolRegistry
 
 _NULL_TARGET = "(demo)"
-_DEFAULT_WORKERS = 3
 _DEFAULT_WORKER_TIMEOUT_S = 300.0
 
 
@@ -314,9 +313,16 @@ def _approval_broker() -> ApprovalBroker | None:
     return ApprovalBroker(CliApprover(), on_decision=_broker_audit_sink)
 
 
-def _board(conn: sqlite3.Connection, *, broker: ApprovalBroker | None = None) -> MissionBoard:
-    """领单任务板装配：默认 3 worker（SECPT_WORKERS 可调），锚点走最近 task。
+def _board(
+    conn: sqlite3.Connection,
+    *,
+    broker: ApprovalBroker | None = None,
+    limits: LimitsConfig | None = None,
+) -> MissionBoard:
+    """领单任务板装配：worker 数取 ``[budget].workers``（默认 3），锚点走最近 task。
 
+    行宽口径（M5-18）：配置是主口径，``SECPT_WORKERS`` 作为临时覆盖保留——
+    多实例部署时按机器改线程数不必动仓库里的 profile.toml。
     为什么锚点用 ledger.latest_task：agent_run 是主循环里的同步派单，此刻
     必然已有当前 task；解析失败（空库）由 submit 包成 ValueError，经
     AgentRunTool 转 E_TOOL_FAIL 小票——不造空锚把 worker 的 findings 写飞。
@@ -328,9 +334,8 @@ def _board(conn: sqlite3.Connection, *, broker: ApprovalBroker | None = None) ->
             code="E_CONFIG",
             context={"db": db_path},
         )
-    size_raw = os.environ.get("SECPT_WORKERS", str(_DEFAULT_WORKERS)).strip() or str(
-        _DEFAULT_WORKERS
-    )
+    cfg = limits or LimitsConfig()
+    size_raw = os.environ.get("SECPT_WORKERS", str(cfg.workers)).strip() or str(cfg.workers)
     try:
         size = int(size_raw)
     except ValueError as exc:
@@ -574,7 +579,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
         limits = load_limits_config(_profile_path())  # 步数线/失速阈值（[budget]/[stall]）
         broker = _approval_broker()
-        board = _board(conn, broker=broker)
+        board = _board(conn, broker=broker, limits=limits)
         result = _assemble(
             conn, client, board=board, runner=_runner(), broker=broker, limits=limits
         ).run(goal, max_steps=limits.max_steps)
@@ -599,7 +604,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         provider = _main_provider("")
         limits = load_limits_config(_profile_path())
         broker = _approval_broker()
-        board = _board(conn, broker=broker)
+        board = _board(conn, broker=broker, limits=limits)
         result = _assemble(
             conn,
             client=LlmClient(provider),

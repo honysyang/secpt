@@ -2582,3 +2582,20 @@ plans 自 M5-5 起是账本事实，但一直只有 audit 行里的 `plan=+n` �
 
 **测试面（+2 例，全库 515 例）**：test_web_view fixture 预置两条规划 + 新断言；
 test_main evidence 断言 `-- plans --` 段存在。ruff 全绿。
+
+## §90 M5-18 worker 数进配置（[budget].workers）
+
+"关键参数通过配置文件配置"（L66）的最后一条漏网：worker 线程数此前只认
+`SECPT_WORKERS` 环境变量，仓库里的 profile.toml 管不到。
+
+**拍板：配置为主口径，env 保留为临时覆盖。** `[budget].workers`（默认 3）进
+`LimitsConfig`（同样正整数校验，坏值 E_PROFILE）；`_board()` 优先读
+`SECPT_WORKERS`（多实例部署按机器调参不必改仓库配置），缺省回落配置值。
+`main._DEFAULT_WORKERS` 随之删除（唯一真源在 limits.py）。
+
+**测试面**：test_limits 增加 workers 默认/覆盖/坏值三处断言。全库 516 例、
+ruff 全绿；`secpt evidence` 冒烟可见 `-- plans --` 段（mock 任务无规划如实打印）。
+
+**至此 L66"关键参数通过配置文件配置"全部落地**：max_steps / workers /
+stall.failures / stall.repeat_plans / plan.review_* / execute.step_tool_limit /
+execute.docker_flags。遗留：per-task 覆盖（本次 run 单独放宽步数）未做。

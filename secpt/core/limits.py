@@ -6,6 +6,8 @@
 会静默改变"撞限/拉铃"的时机，属于必须报出来的配置笔误。
 
 - ``[budget].max_steps``：主 LLM 步数线（默认 200，文档 L23）；
+- ``[budget].workers``：任务板 worker 线程数（默认 3；``SECPT_WORKERS`` 仍可覆盖，
+  保留给多实例部署的临时调参）；
 - ``[stall].failures``：连续工具失败阈值（默认 5，M1 失速计语义）；
 - ``[stall].repeat_plans``：连续提出同一规划的阈值（默认 2，文档 L84 重复抑制）。
 """
@@ -20,14 +22,16 @@ from pydantic import BaseModel
 from secpt.errors import SecptError
 
 _DEFAULT_MAX_STEPS = 200
+_DEFAULT_WORKERS = 3
 _DEFAULT_STALL_FAILURES = 5
 _DEFAULT_STALL_REPEAT_PLANS = 2
 
 
 class LimitsConfig(BaseModel):
-    """步数线与失速阈值快照（三个值都必须为正整数）。"""
+    """步数线、worker 数与失速阈值快照（所有值都必须为正整数）。"""
 
     max_steps: int = _DEFAULT_MAX_STEPS
+    workers: int = _DEFAULT_WORKERS
     stall_failures: int = _DEFAULT_STALL_FAILURES
     stall_repeat_plans: int = _DEFAULT_STALL_REPEAT_PLANS
 
@@ -53,6 +57,7 @@ def load_limits_config(path: str | None) -> LimitsConfig:
     stall_sec = _section(data.get("stall"), "stall", file)
     return LimitsConfig(
         max_steps=_positive(budget.get("max_steps"), _DEFAULT_MAX_STEPS, "budget.max_steps"),
+        workers=_positive(budget.get("workers"), _DEFAULT_WORKERS, "budget.workers"),
         stall_failures=_positive(
             stall_sec.get("failures"), _DEFAULT_STALL_FAILURES, "stall.failures"
         ),

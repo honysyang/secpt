@@ -29,6 +29,7 @@ review_limit = 3
 # 关键参数（设计文档 L66）：步数线（主 LLM 循环预算）与失速阈值。
 [budget]
 max_steps = 200
+workers = 3        # 任务板 worker 线程数（SECPT_WORKERS 可临时覆盖）
 
 [stall]
 failures = 5        # 连续工具失败 N 步 → 拉铃（救场或 E_STALL）

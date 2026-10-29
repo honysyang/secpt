@@ -41,15 +41,18 @@ class TestLimitsConfig:
     def test_defaults(self, tmp_path: Path) -> None:
         cfg = load_limits_config(None)
         assert (cfg.max_steps, cfg.stall_failures, cfg.stall_repeat_plans) == (200, 5, 2)
+        assert cfg.workers == 3  # M5-18：worker 数进配置（SECPT_WORKERS 仍可覆盖）
         assert load_limits_config(str(tmp_path / "absent.toml")).max_steps == 200
         assert load_limits_config(self._write(tmp_path, "target = 'x'\n")).stall_failures == 5
 
     def test_reads_sections(self, tmp_path: Path) -> None:
         path = self._write(
-            tmp_path, "[budget]\nmax_steps = 7\n[stall]\nfailures = 3\nrepeat_plans = 4\n"
+            tmp_path,
+            "[budget]\nmax_steps = 7\nworkers = 4\n[stall]\nfailures = 3\nrepeat_plans = 4\n",
         )
         cfg = load_limits_config(path)
-        assert (cfg.max_steps, cfg.stall_failures, cfg.stall_repeat_plans) == (7, 3, 4)
+        assert (cfg.max_steps, cfg.workers) == (7, 4)
+        assert (cfg.stall_failures, cfg.stall_repeat_plans) == (3, 4)
 
     @pytest.mark.parametrize(
         "body",
@@ -57,6 +60,7 @@ class TestLimitsConfig:
             "[budget]\nmax_steps = 0\n",
             "[budget]\nmax_steps = -1\n",
             "[budget]\nmax_steps = true\n",
+            "[budget]\nworkers = 0\n",
             "[stall]\nfailures = '5'\n",
             "[stall]\nrepeat_plans = 0\n",
             "budget = 200\n",
