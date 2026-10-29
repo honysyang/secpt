@@ -11,6 +11,10 @@
 黑板页布局（§8 可观测性表 M1 行的网页化）：
   任务概要 → 小票卡 → findings 状态机明细（如实）→ 报告块（verified-only）
   → 双图（graph_summary + 节点边明细）→ audit 流（倒序）。
+
+对话过程页（M5，设计文档 L91）：``/task/<id>/chat`` 把 audit 流与 ticket 流
+按时间合并成"角色气泡（主LLM/workerA/LLMC…）+ 小票摘要卡"——同一份账本的
+另一种投影，不新增任何写路径。
 """
 
 from __future__ import annotations
@@ -81,7 +85,63 @@ section{margin:1.2rem 0}h2{font-size:1.1rem;border-bottom:1px solid #ddd}
 {% for a in audit_log %}<tr><td>{{ a.created_at }}</td><td>{{ a.actor }}</td>
 <td>{{ a.what }}</td></tr>
 {% endfor %}</table></section>
-<p><a href="/task/{{ task.id }}/stream">SSE 事件流</a></p></body></html>"""
+<p><a href="/task/{{ task.id }}/stream">SSE 事件流</a> ·
+<a href="/task/{{ task.id }}/chat">对话过程（角色气泡）</a></p></body></html>"""
+
+_CHAT_TPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<title>secpt 面板 · 对话过程 {{ task.id[:12] }}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:880px;margin:2rem auto;padding:0 1rem}
+h2{font-size:1.1rem;border-bottom:1px solid #ddd}
+.chat{display:flex;flex-direction:column;gap:.5rem}
+.bubble{padding:.5rem .8rem;border-radius:.7rem;max-width:80%;line-height:1.5}
+.chip{display:inline-block;font-size:.75rem;padding:.05rem .45rem;border-radius:.6rem;
+background:#eee;margin-right:.5rem;color:#333}
+.main{align-self:flex-start;background:#eef4ff}
+.worker{align-self:flex-end;background:#f3f7ee}
+.llmc{align-self:flex-start;background:#fff6e6}
+.other{align-self:flex-start;background:#f7f7f7}
+.card{align-self:flex-start;border:1px solid #d9d9d9;border-left:4px solid #999;
+padding:.35rem .7rem;border-radius:.4rem;font-size:.9rem;background:#fff}
+.exit{color:#666;margin:0 .4rem}</style></head><body>
+<p><a href="/">← 总览</a> · <a href="/task/{{ task.id }}">← 黑板</a></p>
+<h1>对话过程 · {{ task.id[:12] }}（只读）</h1>
+<p>goal：{{ task.goal or "-" }} · exit_kind：{{ task.exit_kind or "-" }}</p>
+<section><h2>角色气泡 + 小票摘要卡（{{ items|length }} 条）</h2>
+<div class="chat">
+{% for it in items %}{% if it.kind == "ticket" %}
+<div class="card"><span class="chip">小票</span><b>{{ it.tool }}</b>
+<span class="exit">exit={{ it.exit }}</span>{{ it.text }}</div>
+{% else %}
+<div class="bubble {{ it.css }}"><span class="chip">{{ it.actor }}</span>{{ it.text }}</div>
+{% endif %}{% endfor %}
+{% if not items %}<p>（暂无对话记录）</p>{% endif %}
+</div></section></body></html>"""
+
+# 角色标签（设计文档 L91：主LLM/workerA/LLMC 各自标签）与气泡样式族。
+_ROLE_LABELS: dict[str, str] = {
+    "main": "主LLM",
+    "workerA": "workerA",
+    "workerB": "workerB",
+    "llmc": "LLMC 教练",
+    "llma": "LLMA 报告",
+    "llmb": "LLMB 蒸馏",
+    "judge": "裁判",
+    "human": "人工",
+}
+_ROLE_CSS: dict[str, str] = {
+    "main": "main",
+    "workerA": "worker",
+    "workerB": "worker",
+    "llmc": "llmc",
+}
+
+
+def _role_label(actor: str) -> str:
+    return _ROLE_LABELS.get(actor, actor)
+
+
+def _role_css(actor: str) -> str:
+    return _ROLE_CSS.get(actor, "other")
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -200,6 +260,63 @@ def create_app(db_path: str | Path) -> Flask:
             edges=edges,
             audit_log=audit_log,
         )
+
+    @app.get("/task/<task_id>/chat")
+    def chat_page(task_id: str) -> str | Response:
+        """对话过程页（M5，设计文档 L91）：audit 流 + 小票流按时间合并成角色气泡。
+
+        投影口径：audit 行 = 某角色的"发言"（气泡），ticket 行 = 小票摘要卡；
+        同秒并列时按"谁先发生谁在前"（audit 先于 ticket —— 小票总是某步动作的
+        结果）。仍是只读：同一 ro 连接 + GET-only 路由。
+        """
+        conn = _open_and_guard(path, task_id)
+        assert conn is not None  # _open_and_guard 缺库/缺任务已 abort
+        try:
+            task = dict(
+                conn.execute(
+                    "SELECT id, input_text, goal, exit_kind, created_at FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            )
+            says = conn.execute(
+                "SELECT actor, what, created_at, rowid AS rid FROM audit_log"
+                " WHERE task_id = ? ORDER BY rowid",
+                (task_id,),
+            ).fetchall()
+            tickets = conn.execute(
+                "SELECT tool_name, exit_code, summary, created_at, rowid AS rid FROM tickets"
+                " WHERE task_id = ? ORDER BY rowid",
+                (task_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        items: list[dict[str, Any]] = []
+        for row in says:
+            actor = str(row["actor"])
+            items.append(
+                {
+                    "created_at": int(row["created_at"]),
+                    "seq": int(row["rid"]),
+                    "kind": "say",
+                    "actor": _role_label(actor),
+                    "css": _role_css(actor),
+                    "text": str(row["what"]),
+                }
+            )
+        for row in tickets:
+            exit_code = row["exit_code"]
+            items.append(
+                {
+                    "created_at": int(row["created_at"]),
+                    "seq": int(row["rid"]),
+                    "kind": "ticket",
+                    "tool": str(row["tool_name"]),
+                    "exit": "-" if exit_code is None else exit_code,
+                    "text": str(row["summary"]),
+                }
+            )
+        items.sort(key=lambda item: (item["created_at"], item["kind"] != "say", item["seq"]))
+        return render_template_string(_CHAT_TPL, task=task, items=items)
 
     @app.get("/task/<task_id>/stream")
     def stream(task_id: str) -> Response:

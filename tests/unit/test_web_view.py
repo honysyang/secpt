@@ -131,6 +131,36 @@ def test_unknown_task_404(seeded: tuple[Path, str]) -> None:
     assert _client(db).get("/task/deadbeef").status_code == 404
 
 
+# ---- 对话过程页（M5 角色气泡） ---------------------------------------------------
+
+
+def test_chat_page_renders_role_bubbles_and_ticket_cards(seeded: tuple[Path, str]) -> None:
+    """设计文档 L91：一个对话面板 = 角色气泡（主LLM/LLMC 各自标签）+ 小票摘要卡。"""
+    db, task_id = seeded
+    html = _client(db).get(f"/task/{task_id}/chat").data.decode()
+    assert "主LLM" in html  # actor=main 的角色标签
+    assert "LLMC 教练" in html  # actor=llmc 的角色标签
+    assert "教练提案（只提案不裁决）：换打 443" in html  # 气泡正文
+    assert "小票" in html and "nmap 摸扫回执" in html  # 小票摘要卡
+    assert "<script" not in html.lower()  # 只读投影不带任何可写脚本
+
+
+def test_chat_page_links_from_blackboard(seeded: tuple[Path, str]) -> None:
+    db, task_id = seeded
+    html = _client(db).get(f"/task/{task_id}").data.decode()
+    assert f"/task/{task_id}/chat" in html
+
+
+def test_chat_page_post_is_405(seeded: tuple[Path, str]) -> None:
+    db, task_id = seeded
+    assert _client(db).post(f"/task/{task_id}/chat").status_code == 405
+
+
+def test_chat_page_unknown_task_404(seeded: tuple[Path, str]) -> None:
+    db, _ = seeded
+    assert _client(db).get("/task/deadbeef/chat").status_code == 404
+
+
 # ---- 只读红线 ------------------------------------------------------------------
 
 
