@@ -23,7 +23,7 @@ from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
 from secpt.store import migrate as migrate_store
 from secpt.tools.adapters import AgentRunTool
-from secpt.tools.guard import GuardConfig, load_guard_config
+from secpt.tools.guard import CliApprover, GuardConfig, load_guard_config
 from secpt.tools.registry import ToolManifest, ToolOutput, ToolRegistry
 
 # ---------- 测试用工具替身（记账型：执行器是否被触碰可证） ---------------------------
@@ -207,3 +207,15 @@ def test_e2e_deny_lands_in_ledger() -> None:
     assert tickets[0][0] is None
     assert tickets[0][1] == ""
     assert tickets[0][2].startswith("E_GUARD_DENY")
+
+
+def test_cli_approver_eof_denies_instead_of_crashing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M5-34：stdin 关闭（管道/后台）时 EOF 按拒绝处理——prompt 档"等不到人 = 不动"，
+    绝不让 EOFError 炸穿主循环。"""
+    import builtins
+
+    def _closed_stdin(*_args: object) -> str:
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", _closed_stdin)
+    assert CliApprover().decide("agent_run") is False

@@ -434,6 +434,7 @@ def _registry(
     board: MissionBoard | None = None,
     runner: ArgvRunner | None = None,
     broker: ApprovalBroker | None = None,
+    mission_timeout_s: float = 600.0,
 ) -> ToolRegistry:
     """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）；
     M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
@@ -454,7 +455,7 @@ def _registry(
     return ToolRegistry(
         [
             NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
-            AgentRunTool(board=board, broker=broker),
+            AgentRunTool(board=board, broker=broker, mission_timeout_s=mission_timeout_s),
             DeclareFindingTool(),
             *_passive_tools(raw_dir),
             *_workspace_tools(raw_dir, runner),
@@ -556,7 +557,12 @@ def _assemble(
     # M5 关键参数（设计文档 L66）：步数线 / 失速阈值从 profile [budget]/[stall] 来。
     limits = limits or LimitsConfig()
     guard_cfg = load_guard_config(_profile_path())
-    reg = _registry(board=board, runner=runner, broker=broker)
+    reg = _registry(
+        board=board,
+        runner=runner,
+        broker=broker,
+        mission_timeout_s=float(limits.mission_timeout_s),
+    )
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
     return PentestLoop(
@@ -966,6 +972,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("中断：未收尾的 run 可用 secpt resume <task_id> 续跑", file=sys.stderr)
         return 130
+    except Exception as exc:  # BLE001  M5-34：裸异常也走结构化出口，不带 traceback
+        # SecptError 家族上面已接走；到这里的是装配层/呈现层的意外——如实打一行
+        # 结构化 JSON（类型+信息+堆栈摘录），绝不静默吞掉，也绝不裸 traceback。
+        import traceback
+
+        print(
+            json.dumps(
+                {
+                    "event": "abnormal_exit",
+                    "code": "E_UNHANDLED",
+                    "message": f"未归类异常 {type(exc).__name__}: {exc}",
+                    "context": {"trace": traceback.format_exc(limit=8)},
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     return rc
 
 

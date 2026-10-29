@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -42,7 +43,7 @@ from secpt.assets import render_knowledge, role_catalog, select_knowledge
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.core.dispatch import dispatch_batch
 from secpt.core.plan_watch import PlanWatcher
-from secpt.errors import LlmError, SecptError
+from secpt.errors import LedgerError, LlmError, SecptError
 from secpt.llms.client import Goal, StepOutput, ToolCall
 from secpt.llms.coach import Coach
 from secpt.llms.main_llm import MainLlm
@@ -355,6 +356,17 @@ class PentestLoop:
         except SecptError as exc:
             exit_kind = "stalled" if exc.code in _STALLED_CODES else "abnormal"
             crashed = exc
+        except Exception as exc:  # BLE001  M5-34 健壮性兜底（见 docstring）
+            # 非 Secpt 异常（证据文件解码失败 / 账本脏数据 / 任何器官的裸 OSError…）
+            # 旧口径会穿透到 main 触发裸 traceback，且 end_run/end_task 不落、
+            # run 以"永远 running"烂尾、半场报告不出。包装成 E_INTERNAL 走同一条
+            # 异常出口：账照收、报告照出，堆栈进 context 可审计。
+            crashed = SecptError(
+                f"内部异常 {type(exc).__name__}: {exc}",
+                code="E_INTERNAL",
+                context={"trace": traceback.format_exc(limit=8)},
+            )
+            exit_kind = "abnormal"
         # 收束（WF7）：done / 步线耗尽 / 工序异常 三条来路统一走到这里——先账后出。
         ledger.end_run(self._conn, run.id)
         ledger.end_task(self._conn, task.id, exit_kind)
@@ -883,8 +895,21 @@ class PentestLoop:
         return [f"{row.title} [{row.verify_state}/{row.method or '-'}]" for row in rows]
 
     def _goal_projection(self, task: TaskRow, run: RunRow) -> Goal:
-        """从账本还原进场三问（不依赖任何内存态，resume 路径同一个函数）。"""
-        cfg = json.loads(run.config_json)
+        """从账本还原进场三问（不依赖任何内存态，resume 路径同一个函数）。
+
+        M5-34：脏 config_json（半截写/手改库）不再裸炸 JSONDecodeError——
+        包装成 LedgerError 走异常出口，账上可查。
+        """
+        try:
+            cfg = json.loads(run.config_json)
+        except json.JSONDecodeError as exc:
+            raise LedgerError(
+                "runs.config_json 不是合法 JSON（账本脏数据）", context={"run_id": run.id}
+            ) from exc
+        if not isinstance(cfg, dict):
+            raise LedgerError(
+                "runs.config_json 不是对象", context={"run_id": run.id, "got": type(cfg).__name__}
+            )
         return Goal(
             target=task.goal or "",
             objective=str(cfg.get("objective", "")),

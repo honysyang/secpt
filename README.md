@@ -108,7 +108,7 @@ web 面板同一份账本的投影：`/task/<id>` 黑板页、`/task/<id>/chat` 
 | `[judge]` | `enabled` | 裁判开关；`[[ground_truth]]` 为 R4 oracle 清单 |
 | `[[acceptance]]` | `id` / `pattern` | 出场③"交付对目标"的机器判据（verified finding 命中） |
 | `[plan]` | `review_every_steps` / `review_limit` | 规划重估节拍与每 run 名额 |
-| `[budget]` | `max_steps` / `workers` | 步数线 / worker 线程数 |
+| `[budget]` | `max_steps` / `workers` / `mission_timeout_s` | 步数线 / worker 线程数 / agent_run 收拢硬上限 |
 | `[stall]` | `failures` / `repeat_plans` / `repeat_calls` | 工具连败 / 重复规划 / 同参数重复调用拉铃阈值 |
 | `[guard]` | `tiers` / `hitl_mode` | 可选：分级审批；缺段 = 闸常开，写错 tier 值 `E_PROFILE` |
 | `[execute]` | `isolation` / `step_tool_limit` / `docker_flags` | 可选：执行隔离（默认本机 shell）与每步工具上限（默认 4） |
@@ -144,20 +144,37 @@ secpt/
 ├── finalize/    # 出场六验、LLMA 报告、LLMB 经验蒸馏
 ├── store/       # sqlite 账本、迁移、双图、经验、观测流、规划、注意力包、度量
 ├── tools/       # 注册表/Guard/审批代理/执行隔离/探针/MCP/适配器
-├── ob/          # CLI 气泡视图、web 只读面板、事件总线
+├── ob/          # CLI 气泡视图、web 只读面板、事件总线、日志装配
 ├── assets/      # 六库中的文件资产：prompts / skills / roles / knowledge
 ├── main.py      # CLI 八命令与装配
 └── errors.py    # 分层错误码（E_CONFIG/E_PROFILE/E_LEDGER/E_STALL/...）
 configs/profile.toml    # 关键参数与裁判弹药
 docs/                   # 需求、开发蓝本、施工记档
-tests/unit/             # 605 例离线单测（FakeLLM，零网络）
+tests/unit/             # 629 例离线单测（FakeLLM，零网络）
 ```
+
+## 日志与审计
+
+```bash
+# 结构化 JSON 事件走 stderr（机器审计），角色气泡走 stdout（人读过程）；
+# 两流均行缓冲，`2>&1 | tee` 合流不再粘行。
+secpt run --goal "..." 2>&1 | tee logs/run.log
+
+# 或让 secpt 自己落审计文件（每条 JSON 事件双写，行缓冲追加）：
+SECPT_LOG_FILE=logs/audit.jsonl secpt run --goal "..."
+```
+
+审计口径：`logs/audit.jsonl`（或 tee 文件）是机器回放的全量事件流；
+`secpt evidence <task_id>` 是落地检查窗（runs 水位线 / steps / plans /
+小票含锚点 / **findings 状态机明细**（判态·方法·sweep 轮数·申报者）/
+observations 客观流 / audit 尾行）；sqlite `audit_log` 是权威审计账。
+`SECPT_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` 控制事件级别。
 
 ## 质量与测试
 
 ```bash
 ruff format --check . && ruff check .   # line-length 100 / py312
-pytest -q                               # 605 passed，全部离线
+pytest -q                               # 629 passed，全部离线
 ```
 
 测试纪律：任何强依赖真实 LLM / 网络 / 靶场的路径都不进单测；真镜像无网、真模型

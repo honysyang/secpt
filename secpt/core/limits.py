@@ -13,6 +13,8 @@
 - ``[stall].repeat_calls``：同一 (工具, 参数) 调用累计阈值（默认 4，M5-31）——
   同 URL 反复 GET / 同文件反复读 / 同参数反复扫描的"原地打转"在调用层，
   前两个口径都探不到。
+- ``[budget].mission_timeout_s``：agent_run 收拢硬上限（默认 600s，M5-34）——
+  worker 炸死/LLM 悬挂时主循环不能陪葬。
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ _DEFAULT_WORKERS = 3
 _DEFAULT_STALL_FAILURES = 5
 _DEFAULT_STALL_REPEAT_PLANS = 2
 _DEFAULT_STALL_REPEAT_CALLS = 4
+_DEFAULT_MISSION_TIMEOUT_S = 600
 
 
 class LimitsConfig(BaseModel):
@@ -39,6 +42,7 @@ class LimitsConfig(BaseModel):
     stall_failures: int = _DEFAULT_STALL_FAILURES
     stall_repeat_plans: int = _DEFAULT_STALL_REPEAT_PLANS
     stall_repeat_calls: int = _DEFAULT_STALL_REPEAT_CALLS
+    mission_timeout_s: int = _DEFAULT_MISSION_TIMEOUT_S
 
 
 def load_limits_config(path: str | None) -> LimitsConfig:
@@ -71,6 +75,9 @@ def load_limits_config(path: str | None) -> LimitsConfig:
         ),
         stall_repeat_calls=_positive(
             stall_sec.get("repeat_calls"), _DEFAULT_STALL_REPEAT_CALLS, "stall.repeat_calls"
+        ),
+        mission_timeout_s=_positive(
+            budget.get("mission_timeout_s"), _DEFAULT_MISSION_TIMEOUT_S, "budget.mission_timeout_s"
         ),
     )
 

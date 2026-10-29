@@ -497,3 +497,76 @@ def test_e2e_agent_run_board_pipeline(tmp_path: Path) -> None:
     assert worker_audits >= 1
     worker_llms = assembly.worker_llms
     assert any(llm.call_count >= 1 for llm in worker_llms)
+
+
+# ---- M5-34 健壮性：builder 失败不悬挂 / 收板宽限 ------------------------------------
+
+
+class _NoopWorker:
+    def run(self, mission):
+        from secpt.core.mission_board import MissionResult
+
+        return MissionResult(
+            mission_id=mission.mission_id,
+            ok=True,
+            finished=True,
+            steps_taken=1,
+            findings_count=0,
+            summary="ok",
+        )
+
+
+def test_builder_failure_rejects_submit_instead_of_hanging() -> None:
+    """builder 炸了：线程死亡有痕、新单当面拒（AgentRunTool 转 E_TOOL_FAIL）、
+    已入队的单立即置异常——没有任何 future 会永远等不到结果（旧口径 = 主循环
+    永久卡死）。"""
+    conn = migrate_store.connect(":memory:")
+    task = ledger.start_task(conn, "t", "g")
+
+    def _broken_builder(_index: int):
+        raise OSError("docker 不可用")
+
+    board = MissionBoard(conn, _broken_builder, size=1, task_resolver=lambda _c: task.id)
+    try:
+        import time as _time
+
+        with pytest.raises(RuntimeError, match="无法上岗"):
+            board.submit(Mission(goal="会失败的单"))
+        # 稍等线程把失败落定（builder 在线程内执行）
+        for _ in range(50):
+            if board._build_error is not None:
+                break
+            _time.sleep(0.01)
+        with pytest.raises(RuntimeError, match="无法上岗"):
+            board.submit(Mission(goal="后续单同样当面拒"))
+    finally:
+        board.shutdown()
+    conn.close()
+
+
+def test_shutdown_joins_with_grace_not_forever() -> None:
+    """收板 join 有宽限上限：残留工单超过宽限即放弃等待（daemon 线程随进程退出），
+    shutdown 自身必然返回。"""
+    import time as _time
+
+    conn = migrate_store.connect(":memory:")
+    task = ledger.start_task(conn, "t", "g")
+
+    class _StuckWorker:
+        def run(self, mission):
+            _time.sleep(10)  # 故意久于宽限
+            return _NoopWorker().run(mission)
+
+    board = MissionBoard(
+        conn,
+        lambda _i: _StuckWorker(),
+        size=1,
+        task_resolver=lambda _c: task.id,
+        shutdown_grace_s=0.2,
+    )
+    board.submit(Mission(goal="卡住的单"))
+    _time.sleep(0.3)  # 让 worker 领到单进入 sleep
+    started = _time.monotonic()
+    board.shutdown()
+    assert _time.monotonic() - started < 5  # 不会陪葬 10s
+    conn.close()

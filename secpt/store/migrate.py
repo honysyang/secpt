@@ -24,6 +24,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (4, "0004_observations_table.sql"),
     (5, "0005_findings_actor.sql"),
     (6, "0006_findings_sweep_count.sql"),
+    (7, "0007_query_indexes.sql"),
 )
 
 _STORE_DIR = "store"
@@ -45,6 +46,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA foreign_keys = ON")
+        # M5-34 busy_timeout：多 worker 线程 + 主循环 + 裁判并发写同一文件库，
+        # sqlite 默认 0（锁被占立即抛 "database is locked"）——实测场景下任何
+        # 一次锁冲突都会把整步打成 E_TOOL_FAIL/worker 降级。给 30s 有界等待，
+        # WAL 模式下写锁冲突在这窗口内几乎必然化解。
+        conn.execute("PRAGMA busy_timeout = 30000")
         if path != ":memory:":  # WAL 只对文件库有意义；内存库加不减都无所谓
             conn.execute("PRAGMA journal_mode = WAL")
         ensure_schema(conn)

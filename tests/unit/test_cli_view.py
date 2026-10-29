@@ -195,3 +195,29 @@ def test_cli_view_renders_step_decision_and_exit_failed(
     assert "【主LLM】第 2 步决策：扫 22（工具：nmap）" in out
     assert "【双图】+1n+0e" in out
     assert "【出场】第 1 轮未过：claimed 悬置 1 条未收口" in out
+
+
+# ---- M5-34 审计窗翻新：findings 状态机明细 / observations / 去掉陈旧文案 ----------
+
+
+def test_evidence_report_shows_finding_states_and_observations() -> None:
+    """审计窗要能判断问题：每条 finding 的判态/方法/锚点 + observations 客观流。"""
+    from secpt.store import ledger, observations
+    from secpt.store import migrate as migrate_store
+
+    conn = migrate_store.connect(":memory:")
+    task = ledger.start_task(conn, "审计演示", goal="10.0.0.5")
+    ledger.append_finding(conn, task.id, "22 开放", "banner 在档", "raw/a.txt")
+    conn.execute("UPDATE findings SET verify_state='verified', method='oracle'")
+    conn.commit()
+    observations.append(conn, task.id, "r1", "http", {"mock": True}, "raw/obs_1.txt")
+
+    lines = evidence_report(conn, task.id)
+    blob = "\n".join(lines)
+
+    assert "-- findings --" in blob
+    assert "[verified|oracle|sweep=0] main: 22 开放 → raw/a.txt" in blob
+    assert "detail: banner 在档" in blob
+    assert "M1 无裁判" not in blob  # 陈旧文案退场
+    assert "-- observations -- 1 条" in blob
+    conn.close()

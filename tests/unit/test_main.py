@@ -509,3 +509,35 @@ def test_mock_run_prints_step_decision(
     assert "摸扫一圈端口（演示步）（工具：nmap）" in out
     assert "【主LLM → nmap】" in out
     assert "【出口】exit_kind=normal" in out
+
+
+def test_unhandled_exception_exits_structured_no_traceback(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M5-34：SecptError 家族之外的裸异常也走结构化出口——JSON 一行 + 非零退出，
+    绝不裸 traceback（审计可解析，问题可定位）。"""
+    monkeypatch.setattr(
+        main_mod,
+        "_cmd_assets",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("磁盘满")),
+    )
+    rc = main_mod.main(["assets"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    # stderr 整体是一行可解析的结构化 JSON（trace 进 context 供审计），
+    # 而不是裸 traceback 甩给终端。
+    payload = json.loads(err.strip())
+    assert payload["code"] == "E_UNHANDLED"
+    assert "RuntimeError" in payload["message"]
+    assert "Traceback" in payload["context"]["trace"]
+
+
+def test_connect_sets_busy_timeout(tmp_path: pathlib.Path) -> None:
+    """M5-34：多线程写库前先给 busy_timeout（默认 0 = 锁冲突立即炸）。"""
+    db = tmp_path / "busy.db"
+    conn = connect(db)
+    try:
+        timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == 30000
+    finally:
+        conn.close()

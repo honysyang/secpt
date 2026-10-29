@@ -8,6 +8,8 @@
 - 对话面板（角色气泡/小票摘要行）走 stdout，人读；
 - 结构化日志（structlog JSON）走 stderr，机器读——两个通道不互污，M2 web
   面板可以直接复用 stderr 之上的事件流契约（:class:`CliView` 同一订阅接口）。
+  日志装配（级别/文件双写/行缓冲）在 :mod:`secpt.ob.logging_setup`，此处再导出
+  ``configure_logging`` 保持旧 import 面不破。
 """
 
 from __future__ import annotations
@@ -18,9 +20,8 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import TextIO
 
-import structlog
-
 from secpt.errors import LedgerError
+from secpt.ob.logging_setup import configure_logging
 
 # 审计尾行展示量：检查窗是"够解决问题的最小回放"，不是全库 dump。
 _AUDIT_TAIL = 10
@@ -42,31 +43,6 @@ def _fmt_ms(raw: object) -> str:
         return f"{ms / 1000:.1f}s"
     seconds = ms // 1000
     return f"{seconds // 60}m{seconds % 60:02d}s"
-
-
-class _StderrFactory:
-    """每次实例化 logger 都现取 :data:`sys.stderr`。
-
-    为什么不用 ``PrintLoggerFactory(file=sys.stderr)``：后者在 configure 时捕获
-    stderr 的对象引用，而 pytest 等环境会整块替换 ``sys.stderr``，旧引用一旦
-    闭合再写入就抛 ``ValueError: I/O operation on closed file``。动态解析把
-    "哪个流是 stderr" 的裁决权推迟到每次写日志的那一刻。
-    """
-
-    def __call__(self, *args: object) -> structlog.PrintLogger:
-        return structlog.PrintLogger(file=sys.stderr)
-
-
-def configure_logging() -> None:
-    """structlog 全量 JSON 落 stderr（§8：结构化日志全步数进频道，机器读）。"""
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(ensure_ascii=False),
-        ],
-        logger_factory=_StderrFactory(),
-    )
 
 
 class CliView:
@@ -294,10 +270,36 @@ def evidence_report(conn: sqlite3.Connection, task_id: str) -> list[str]:
             f" → {tick['raw_ref']}"
         )
 
+    # M5-34 findings 状态机明细：审计窗要看的是"谁申报的、判到哪一步、依据什么
+    # 方法、锚在哪"，一行数量加陈旧文案（"M1 无裁判"）什么问题也判断不了。
     findings = conn.execute(
-        "SELECT COUNT(*) FROM findings WHERE task_id = ?", (task_id,)
-    ).fetchone()[0]
-    lines.append(f"-- findings -- {findings} 条（M1 无裁判，findings 留待 M2）")
+        "SELECT title, detail, verify_state, method, evidence_ref, actor, sweep_count"
+        " FROM findings WHERE task_id = ? ORDER BY created_at, rowid",
+        (task_id,),
+    ).fetchall()
+    lines.append(f"-- findings -- {len(findings)} 条（claimed→verified/rejected）--")
+    if not findings:
+        lines.append("(无申报)")
+    for row in findings:
+        lines.append(
+            f"[{row['verify_state']}|{row['method'] or '-'}|sweep={row['sweep_count']}]"
+            f" {row['actor']}: {row['title']} → {row['evidence_ref']}"
+        )
+        detail = " ".join(str(row["detail"]).split())
+        if detail:
+            lines.append(f"    detail: {detail[:200]}")
+
+    # M5-34 observations 客观事件流：LLM 小票之外的流量真相，判真伪的第二通道。
+    observations = conn.execute(
+        "SELECT channel, meta_json, snapshot_ref, ts FROM observations"
+        " WHERE task_id = ? ORDER BY ts, rowid",
+        (task_id,),
+    ).fetchall()
+    lines.append(f"-- observations -- {len(observations)} 条（LLM 小票之外的客观流）--")
+    if not observations:
+        lines.append("(探针未开启或无抓包)")
+    for row in observations:
+        lines.append(f"[{row['channel']}] ts={row['ts']} → {row['snapshot_ref']}")
 
     lines.append(f"-- audit（尾 {_AUDIT_TAIL} 行，新→旧）--")
     audits = conn.execute(

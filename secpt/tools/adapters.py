@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Mapping
 from concurrent.futures import Future
@@ -25,6 +26,9 @@ from secpt.tools.registry import ToolManifest, ToolOutput
 
 # 主循环收拢 worker 小票的轮询步长：等待窗内顺手 serve 审批代理队列。
 _SERVE_POLL_S = 0.2
+# 收拢默认超时（M5-34）：worker 炸死/LLM 悬挂时主循环不能陪葬——超时转
+# E_TOOL_FAIL 小票返回，worker 侧工单继续自生自灭（audit 有痕）。
+_DEFAULT_MISSION_TIMEOUT_S = 600.0
 
 
 def _single_line(text: str, limit: int = 160) -> str:
@@ -179,10 +183,18 @@ class AgentRunTool:
         self,
         board: MissionBoard | None = None,
         broker: ApprovalBroker | None = None,
+        *,
+        mission_timeout_s: float = _DEFAULT_MISSION_TIMEOUT_S,
     ) -> None:
-        """board 是 M3-5 接线点、broker 是 M4-4 接线点：None=占位/无代问守恒。"""
+        """board 是 M3-5 接线点、broker 是 M4-4 接线点：None=占位/无代问守恒。
+
+        ``mission_timeout_s``（M5-34）：收拢等待的硬上限——worker 线程炸死/
+        LLM 悬挂时主循环不能陪葬；超时转 E_TOOL_FAIL 小票，worker 侧继续
+        自生自灭（其 audit/findings 由它自己的 conn 落账，账不丢）。
+        """
         self._board = board
         self._broker = broker
+        self._mission_timeout_s = mission_timeout_s
 
     def _placeholder(self, args: Mapping[str, str]) -> ToolOutput:
         return ToolOutput(
@@ -219,6 +231,19 @@ class AgentRunTool:
                 summary=f"E_TOOL_FAIL: agent_run 派单失败 {type(exc).__name__}: {exc}",
                 raw_ref="",
             )
+        if result is None:
+            # M5-34 收拢超时：worker 可能仍在执行（其 audit/findings 由它自己的
+            # 连接落账，账不丢），主循环拿到诚实的小票继续走，绝不陪葬悬挂。
+            return ToolOutput(
+                tool_name=self.manifest.name,
+                args=dict(args),
+                exit_code=None,
+                summary=(
+                    f"E_TOOL_FAIL: agent_run 收拢超时（{self._mission_timeout_s:g}s）——"
+                    "worker 可能仍在执行，其 audit/findings 照常落账"
+                ),
+                raw_ref="",
+            )
         finished = result.ok and result.finished
         summary = f"agent_run 收拢：{result.summary}"
         if result.ok and not result.finished:
@@ -236,21 +261,25 @@ class AgentRunTool:
             made_progress=finished,
         )
 
-    def _collect(self, future: Future[object]) -> MissionResult:
+    def _collect(self, future: Future[object]) -> MissionResult | None:
         """收单：有代理时在等待窗内代问（M4-4——CLI prompt 档由主循环代问）。
 
         为什么代问挂在收拢等待里：worker 只经 agent_run 派生，主线程此刻
         必然阻塞在本 future 上——0.2s 轮询窗里顺手 serve 代理队列，单线程
-        通道就够，不需要专职服务员线程；无代理走原路 future.result() 逐字节
-        守恒（M3-5 行为）。
+        通道就够，不需要专职服务员线程。
+        M5-34：等待有硬上限（``mission_timeout_s``）——worker 炸死/LLM 悬挂
+        时主循环不能陪葬，超时返回 None 由 run() 转 E_TOOL_FAIL 小票。
         """
-        if self._broker is None:
-            return cast("MissionResult", future.result())
+        deadline = time.monotonic() + self._mission_timeout_s
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
             try:
-                return cast("MissionResult", future.result(timeout=_SERVE_POLL_S))
+                return cast("MissionResult", future.result(timeout=min(_SERVE_POLL_S, remaining)))
             except TimeoutError:  # concurrent.futures 超时（3.11+ 即内建本尊）
-                self._broker.serve_once()
+                if self._broker is not None:
+                    self._broker.serve_once()
 
 
 class DeclareFindingTool:

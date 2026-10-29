@@ -20,6 +20,7 @@ Guard 保持纯函数不碰 I/O——"人"以注入 Approver 给 registry，裁�
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -71,7 +72,13 @@ class CliApprover:
     kind: str = "human"
 
     def decide(self, name: str) -> bool:
-        answer = input(f"[HITL] HIGH 级动作 {name!r} 待审批——批准? [y/N] ")
+        # M5-34：stdin 关闭/不可读（管道喂入、后台运行）按拒绝处理——prompt 档
+        # 的语义是"等人点头"，等不到人 = 不动，绝不让 EOFError 炸穿主循环。
+        try:
+            answer = input(f"[HITL] HIGH 级动作 {name!r} 待审批——批准? [y/N] ")
+        except (EOFError, OSError):
+            print("[HITL] 无可用输入（stdin 已关闭），按拒绝处理", file=sys.stderr)
+            return False
         return answer.strip().lower() in ("y", "yes")
 
 

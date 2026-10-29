@@ -713,3 +713,64 @@ def test_run_ended_carries_duration_split() -> None:
     ended = dict(events[-1][1])
     assert "llm_ms" in ended and "tools_ms" in ended
     conn.close()
+
+
+# ---- M5-34 健壮性：裸异常收账 / 脏 config_json 守卫 --------------------------------
+
+
+def test_non_secpt_exception_still_closes_ledger() -> None:
+    """裸异常（解码失败/器官 OSError…）包装成 E_INTERNAL：账照收、半场报告照出，
+    run 不再以"永远 running"烂尾（旧口径直接穿透到 main 裸 traceback）。"""
+
+    class ExplodingDispatcher(FakeDispatcher):
+        def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
+            if name == "boom":
+                raise RuntimeError("磁盘满")
+            return super().dispatch(name, args)
+
+    fake = FakeLLM(
+        [
+            GOAL_JSON,
+            _step_json("点火", calls=[{"name": "boom", "args": {}}], done=False),
+        ]
+    )
+    bus = EventBus()
+    events: list[tuple[str, Mapping[str, object]]] = []
+    bus.subscribe(lambda name, payload: events.append((name, payload)))
+    conn = migrate.connect(":memory:")
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        ExplodingDispatcher(),
+        bus=bus,
+        exit_checker=ExitChecklist(),
+    )
+    with pytest.raises(SecptError) as info:
+        loop.run("裸异常演示 10.0.0.5")
+    assert info.value.code == "E_INTERNAL"
+    assert "RuntimeError" in str(info.value)
+    task = ledger.latest_task(conn)
+    assert task.exit_kind == "abnormal"  # 账照收
+    run = conn.execute("SELECT status FROM runs").fetchone()
+    assert run["status"] == "ended"  # 不烂尾
+    assert events[-1][0] == "run_ended" and events[-1][1]["exit_kind"] == "abnormal"
+    conn.close()
+
+
+def test_corrupt_run_config_raises_ledger_error_not_bare_json_error() -> None:
+    """脏 config_json：包装成 LedgerError（账本脏数据可查），不再裸 JSONDecodeError。"""
+    conn = migrate.connect(":memory:")
+    task = ledger.start_task(conn, "t", "g")
+    ledger.start_run(conn, task.id, config={"objective": "o", "success_criteria": "s"})
+    conn.execute("UPDATE runs SET config_json='{bad json'")
+    conn.commit()
+    fake = FakeLLM([GOAL_JSON])
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        FakeDispatcher(),
+        exit_checker=ExitChecklist(),
+    )
+    with pytest.raises(LedgerError, match="不是合法 JSON"):
+        loop.resume(task.id)
+    conn.close()

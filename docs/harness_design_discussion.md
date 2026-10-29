@@ -3146,3 +3146,59 @@ test_readonly_tools 翻新（根外绝对路径仍拒、根内放行）；test_e
 **遗留**：① raw 目录跨 run 累积未治理；② run_command program 白名单（安全默认
 值）仍欠；③ plan_review 仍按节拍触发；④ worker 领单后的子域枚举打法仍偏保守
 （本轮 host 串行解析 45s 超时）。
+
+## §105 M5-34 日志 / 存储 / 异常 / 健壮性四线收口
+
+三轮真实 run 复盘之后，把"审计可用性"与"故障不悬挂"补成机制（要求：项目结构
+清楚、日志可审计）。
+
+**结构归位**：日志装配从 cli_view 拆出独立模块 ``ob/logging_setup.py``——
+"进程级基础设施"与"事件订阅者"生命周期不同；cli_view 再导出
+``configure_logging`` 保持旧 import 面不破。
+
+**日志三件**：
+1. **行缓冲**：JSON（stderr）与气泡（stdout）两流 ``reconfigure(line_buffering=True)``
+   ——``2>&1 | tee`` 合流时块缓冲把两行粘成一团（三轮 run.log 多处 JSON 粘在
+   气泡行尾，机器解析报废）；冒烟实测整文件 0 坏行；
+2. **级别过滤**：``SECPT_LOG_LEVEL``（非法值静默回落 INFO，日志配置不配拒跑）；
+3. **审计文件双写**：``SECPT_LOG_FILE`` 非空时每条 JSON 事件同落文件（行缓冲
+   追加），写失败降级回 stderr——审计不再依赖用户记得 tee。
+
+**审计窗翻新**：``secpt evidence`` 的 findings 段从"一行数量 + 陈旧的 M1 文案"
+改为状态机明细（判态·方法·sweep 轮数·申报者·锚点 + detail 摘录），新增
+observations 客观流段——审计窗的职责是让人判断问题，一行数量什么都判断不了。
+
+**存储**：迁移 0007 补查询索引（tickets(task_id,raw_ref)=R1 取票、
+plans(task_id,status)、findings(task_id,verify_state)、experience 锚三元组、
+observations(task_id)——三轮 run 的账本规模下 sweep/打包全是全表扫描）；
+``connect()`` 增 ``PRAGMA busy_timeout=30000``（默认 0 = 锁冲突立即抛
+"database is locked"，多 worker 并发写真实场景必撞）。
+
+**异常两道兜底**：
+- 主循环 catch-all：非 Secpt 异常（证据文件解码/脏账本/器官裸 OSError…）包装成
+  ``E_INTERNAL``（堆栈进 context）走同一条异常出口——end_run/end_task/half
+  report 照走，run 不再以"永远 running"烂尾 + 裸 traceback；
+- ``main()`` catch-all：``E_UNHANDLED`` 结构化 JSON 一行 + 非零退出——trace 进
+  context 供审计，终端不再被 traceback 刷屏。
+
+**健壮性四件（主题：任何故障都到点脱身，绝不悬挂）**：
+1. 任务板 builder 失败不再无声死亡：记因 + 当面拒新单 + 已入队单立即置异常
+   （旧口径 future 永不 resolve = 主循环永久卡死）；worker 线程改 daemon，
+   shutdown join 加宽限（默认 30s）；
+2. ``agent_run`` 收拢硬上限 ``[budget].mission_timeout_s``（默认 600s）：worker
+   炸死/LLM 悬挂时主循环转 E_TOOL_FAIL 小票继续走，worker 侧工单自生自灭
+   （audit/findings 由它自己的连接落账，账不丢）；
+3. ``_goal_projection`` 脏 config_json 包装成 LedgerError（可查），不裸炸；
+4. CliApprover EOF（管道/后台运行）按拒绝处理——"等不到人 = 不动"。
+
+**测试面（+13 例，全库 629 例）**：test_logging_setup 4（文件双写/级别过滤/
+行缓冲/坏级别回落）；test_cli_view +1（findings 明细 + observations + 去陈旧
+文案）；test_loop +2（裸异常收账 E_INTERNAL / 脏 config 守卫）；test_main +2
+（E_UNHANDLED 结构化 / busy_timeout）；test_mission_board +2（builder 失败当面
+拒 / 收板宽限不陪葬）；test_tools_registry +1（收拢超时到点脱身）；test_guard
++1（EOF 拒绝）；test_store_migrate 翻新（v7）。ruff 全绿；CLI 冒烟：审计文件
+8 行 JSON 全部可解析、stderr 与文件逐条一致、evidence 新段渲染正常。
+
+**遗留**：① 人类气泡不进 SECPT_LOG_FILE（文件只有 JSON 事件——完整人读记录
+仍靠 tee）；② 日志无轮转（长跑由外部 logrotate 管）；③ run_command program
+白名单（安全默认值）仍欠。

@@ -43,7 +43,7 @@ class TestMigration:
 
         fresh = connect(":memory:")
         # 1 baseline + 双图 + 经验库 + 观测流 + findings.actor
-        assert schema_version(fresh) == 6
+        assert schema_version(fresh) == 7
         fresh.close()
 
     def test_migration_idempotent(self, db: sqlite3.Connection) -> None:

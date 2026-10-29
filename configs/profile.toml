@@ -30,6 +30,7 @@ review_limit = 3
 [budget]
 max_steps = 200
 workers = 3        # 任务板 worker 线程数（SECPT_WORKERS 可临时覆盖）
+# mission_timeout_s = 600   # agent_run 收拢硬上限（秒）；worker 悬挂时主循环到点脱身（M5-34）
 
 [stall]
 failures = 5        # 连续工具失败 N 步 → 拉铃（救场或 E_STALL）

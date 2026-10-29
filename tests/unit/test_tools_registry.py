@@ -245,3 +245,47 @@ def test_nmap_missing_binary_returns_receipt(tmp_path: Path) -> None:
     assert out.exit_code is None
     assert "E_TOOL_FAIL" in out.summary
     assert out.raw_ref == ""
+
+
+# ---- M5-34 收拢超时：worker 悬挂时主循环到点脱身 -----------------------------------
+
+
+def test_agent_run_collect_timeout_returns_receipt(tmp_path: Path) -> None:
+    """worker future 永不 resolve：mission_timeout_s 到点 → E_TOOL_FAIL 小票，
+    主循环不陪葬；worker 侧自生自灭（audit 由其自身连接落账）。"""
+    import threading
+    import time as _time
+
+    from secpt.core.mission_board import MissionBoard
+    from secpt.store import ledger
+    from secpt.store import migrate as migrate_store
+
+    conn = migrate_store.connect(":memory:")
+    task = ledger.start_task(conn, "t", "g")
+    release = threading.Event()
+
+    class _HangingWorker:
+        def run(self, mission):
+            release.wait(timeout=5)  # 模拟 LLM 悬挂
+            from secpt.core.mission_board import MissionResult
+
+            return MissionResult(
+                mission_id=mission.mission_id,
+                ok=True,
+                finished=True,
+                steps_taken=1,
+                findings_count=0,
+                summary="晚了",
+            )
+
+    board = MissionBoard(
+        conn, lambda _i: _HangingWorker(), size=1, task_resolver=lambda _c: task.id
+    )
+    tool = AgentRunTool(board=board, mission_timeout_s=0.3)
+    started = _time.monotonic()
+    out = tool.run({"mission": "挂住的单", "persona": "recon", "step_budget": "1"})
+    elapsed = _time.monotonic() - started
+    board.shutdown()
+    assert out.exit_code is None and "收拢超时" in out.summary
+    assert elapsed < 5  # 到点脱身，不陪葬 5s 的悬挂
+    conn.close()

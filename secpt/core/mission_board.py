@@ -79,17 +79,27 @@ class MissionBoard:
         *,
         size: int = 3,
         task_resolver: Callable[[sqlite3.Connection], str] | None = None,
+        shutdown_grace_s: float = 30.0,
     ) -> None:
-        """conn 只供 task_resolver 解析锚点（board 自身不落账）；resolver 返回 str。"""
+        """conn 只供 task_resolver 解析锚点（board 自身不落账）；resolver 返回 str。
+
+        ``shutdown_grace_s``（M5-34）：收板 join 的宽限上限——collect 超时后
+        worker 可能还在跑残留工单，join 无上限会让进程永远退不出去；宽限过后
+        放弃等待（daemon 线程随进程退出，sqlite 事务本身原子，不会写坏账）。
+        """
         self._conn = conn
         self._builder = worker_builder
         self._size = size
         self._resolver = task_resolver
+        self._shutdown_grace_s = shutdown_grace_s
         self._queue: queue.Queue[tuple[Mission, Future[object]] | object] = queue.Queue()
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
+        self._build_error: str | None = None
         self._threads: tuple[threading.Thread, ...] = tuple(
-            threading.Thread(target=self._work_loop, args=(index,), name=f"secpt-worker-{index}")
+            threading.Thread(
+                target=self._work_loop, args=(index,), name=f"secpt-worker-{index}", daemon=True
+            )
             for index in range(size)
         )
         for thread in self._threads:
@@ -101,9 +111,14 @@ class MissionBoard:
         return self._threads
 
     def submit(self, mission: Mission) -> Future[object]:
-        """报单：锚点齐备才入队；board 收板后当面拒（RuntimeError）不假收。"""
+        """报单：锚点齐备才入队；board 收板/线程无法上岗时当面拒，不假收。"""
         if self._shutdown:
             raise RuntimeError("MissionBoard 已 shutdown：拒收新单")
+        if self._build_error is not None:
+            # M5-34：builder 失败 = 全体线程无法上岗，挂在队列里的单永远没人领——
+            # 当面拒绝（AgentRunTool 转 E_TOOL_FAIL 小票），绝不让人等一个
+            # 永远不会 resolve 的 future（悬挂 = 主循环永久卡死）。
+            raise RuntimeError(f"worker 线程无法上岗：{self._build_error}")
         stamped = mission
         if stamped.task_id is None:
             if self._resolver is None:
@@ -125,16 +140,21 @@ class MissionBoard:
             for _ in range(self._size):
                 self._queue.put(_sentinel)
         for thread in self._threads:
-            thread.join()
+            thread.join(timeout=self._shutdown_grace_s)
 
     def _work_loop(self, index: int) -> None:
         """worker 线程主环：起工一次 build → 循环原子领单 → 回执上票。
 
-        builder 抛错 = 该线程无法上岗，到此为止（Mission 永远在路上且 future
-        永远等不到——所以 builder 是装配期职责，测试替身/生产装配都保证它
-        纯构造无业务动作）。
+        M5-34：builder 抛错不再让线程无声死亡——记下原因、当面拒后续新单，
+        队列里已入队的单立即置异常。旧口径"Mission 永远在路上且 future 永远
+        等不到"就是把主循环永久卡死。
         """
-        worker = self._builder(index)
+        try:
+            worker = self._builder(index)
+        except Exception as exc:  # noqa: BLE001  # 装配失败有痕、有拒、不悬挂
+            self._build_error = f"worker-{index} 装配失败 {type(exc).__name__}: {exc}"
+            self._fail_pending(self._build_error)
+            return
         while True:
             item = self._queue.get()
             try:
@@ -147,6 +167,19 @@ class MissionBoard:
                     future.set_exception(exc)
             finally:
                 self._queue.task_done()
+
+    def _fail_pending(self, reason: str) -> None:
+        """排空队列：在板的单全部当面置异常（future 等待方拿到错误而非悬挂）。"""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is _sentinel:
+                continue
+            _, future = item
+            if not future.done():
+                future.set_exception(RuntimeError(reason))
 
 
 __all__ = ["Mission", "MissionBoard", "MissionResult", "WorkerLike"]
