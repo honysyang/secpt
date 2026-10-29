@@ -115,7 +115,7 @@ web 面板同一份账本的投影：`/task/<id>` 黑板页、`/task/<id>/chat` 
 
 ### 用 `.env` 配置
 
-仓库根有模板 `env.example`，复制为 `.env`（已 gitignore）后填值。**默认自动加载**
+仓库根有模板 `.env.example`，复制为 `.env`（已 gitignore）后填值。**默认自动加载**
 当前目录的 `.env`：
 
 ```bash

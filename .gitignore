@@ -39,3 +39,7 @@ tmp/
 tsec*-run-*.log
 *.run.log
 snapshots/
+
+# --- sqlite 运行库（本地冒烟产物，不入库） ---
+secpt.db
+secpt.db-*
