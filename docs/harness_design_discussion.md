@@ -2394,3 +2394,40 @@ ruff 全绿。
 （workerA/workerB 同 implement 类），真正按线程编号区分需要 builder 传 index
 进 audit_actor，留待多 worker 并发批量派单时再做；③ R2 不要求两条路径的
 "工具参数"不同——同工具同参数但两个 worker 分别跑，仍算独立执行（成本换独立性）。
+
+## §83 M5-12 并发派单（"多线程"从名义到落地）
+
+设计文档 L12 的"多线程"此前只有任务板线程池撑场面：主循环 dispatch 是串行
+for 循环、agent_run 阻塞收单——一个 run 里实际只有一单在跑。
+
+**拍板①：并发与否由工具自己声明，默认不并发。**
+`ToolManifest.parallel_safe`（默认 False，与 read_only 同款"未知即保守"）：
+NmapTool/AgentRunTool 显式 True（独立子进程 / 任务板队列，无共享可变状态）；
+DeclareFindingTool 保持 False（写账本类永远串行）。
+
+**拍板②：保守批口径——全批 safe 才并发，混批整批串行。**
+不做"能并的并、不能的留后"：那会重排不同工具的副作用顺序（例如 declare_finding
+与 nmap 的先后）。整批串行时行为与 M5 之前逐字节一致。回执按**提交序**回填，
+失速计收数与落票顺序保持确定性。批大小天然 ≤4（schema 上限），并发度有界。
+
+**拍板③：两类全局态在场时强制串行（装配层决定）。**
+`main._parallel_allowed(guard, probe_enabled)`：hitl_mode=prompt 时 CliApprover
+读 stdin，多线程并发提问会互抢；探针后端 start/stop 是进程级全局态，并发开窗
+会串账。二者任一在场 → `parallel_dispatch=False`。其余情况开启。
+
+**证据（不是"看起来快了"）**：
+- `test_all_safe_batch_runs_concurrently` 用 `threading.Barrier(2)` 作铁证——
+  串行执行时第一个工具等不到第二个，必超时炸掉；并断言两个回执跑在两个
+  `secpt-dispatch` 工作线程上；
+- `test_two_missions_run_in_parallel_on_board` 端到端：一步两张 agent_run 单，
+  任务板 size=2，两个 worker 替身用同一 Barrier 证明"同时在干"，小票两条都
+  `parallel-ok`；
+- 混批/开关关闭/单调用三个反例分别断言"全在 MainThread"。
+
+**测试面（+12 例，全库 501 例）**：test_parallel_dispatch 12（声明面 2 /
+并发与串行 4 / 任务板端到端 1 / 装配口径 5）。ruff 全绿，CLI mock 冒烟 normal。
+
+**遗留**：① 没有真实延迟基准（barrier 证明的是"并发发生"，不是"快了多少"）；
+② 并发度上限就是批大小（≤4），未做 `[execute].max_parallel` 配置；③ 探针开启
+时整批串行——若将来要"抓包 + 并发"，需要后端支持多路会话；④ worker 之间共享
+broker 时（HITL prompt）本来就串行，未做并发审批队列。

@@ -50,6 +50,8 @@ class NmapTool:
         # 只读声明（M3-4 拍板①）：nmap 扫描无副作用，R1 重放可原样复跑；
         # agent_run/declare_finding 不声明 = 写操作，永不进重放（默认 False）。
         read_only=True,
+        # nmap 是独立子进程 + 独立 raw 文件：可与同批其它扫描并发（M5-12）。
+        parallel_safe=True,
     )
 
     def __init__(
@@ -142,6 +144,8 @@ class AgentRunTool:
         description="Sub-agent 领单（任务板派单，worker 执行器；未装配板时回占位小票）",
         params={"mission": "str", "persona": "str", "step_budget": "int", "skills": "str"},
         required=("mission", "persona", "step_budget"),
+        # 任务板本身是多线程队列：同一批多张单并发提交即并行领干（M5-12）。
+        parallel_safe=True,
     )
 
     def __init__(

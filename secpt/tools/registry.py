@@ -43,6 +43,10 @@ class ToolManifest(BaseModel):
     # read_only（M3-4 拍板①）：工具自身的诚实声明——R1 只读重放门据此放行。
     # 默认 False（未知即写操作），NmapTool 显式 True；写操作永不 rerun 是机制。
     read_only: bool = False
+    # parallel_safe（M5-12）：本工具能否与同批其它 parallel_safe 工具并发执行。
+    # 默认 False（未知即不可并发）——只对"无共享可变状态"的工具开（nmap 子进程/
+    # agent_run 任务板）；写账本类（declare_finding）永远串行。
+    parallel_safe: bool = False
     hash: str | None = None
 
 
@@ -153,6 +157,11 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolAdapter | None:
         return self._adapters.get(name)
+
+    def parallel_safe(self, name: str) -> bool:
+        """本工具能否与同批其它工具并发（M5-12）：未知工具一律 False。"""
+        tool = self._adapters.get(name)
+        return bool(tool is not None and tool.manifest.parallel_safe)
 
     def dispatch(self, name: str, args: Mapping[str, str]) -> ToolOutput:
         """§6.2 契约入口：schema 校验→dispatch→（落票归主循环）。业务失败不抛不重试。"""

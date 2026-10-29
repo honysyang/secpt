@@ -52,7 +52,7 @@ from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
 from secpt.tools.broker import ApprovalBroker
 from secpt.tools.executors import ArgvRunner, DockerRunner, load_isolation_config
-from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
+from secpt.tools.guard import Approver, AutoApprover, CliApprover, GuardConfig, load_guard_config
 from secpt.tools.mcp_client import build_mcp_adapters, load_mcp_config
 from secpt.tools.probe import (
     CaptureBackend,
@@ -432,6 +432,18 @@ def _profile_path() -> str:
     return os.environ.get("SECPT_PROFILE", "configs/profile.toml")
 
 
+def _parallel_allowed(guard: GuardConfig | None, probe_enabled: bool) -> bool:
+    """并发派单开关（M5-12，纯函数便于测）：两类全局态在场时必须串行。
+
+    - 交互审批（hitl_mode=prompt）：CliApprover 读 stdin，多线程并发提问会互抢；
+    - 探针后端：CaptureBackend.start/stop 是进程级全局态，并发开窗会串账。
+    其余情况允许并发（实际是否并发还要看工具是否声明 parallel_safe、批大小≥2）。
+    """
+    if probe_enabled:
+        return False
+    return guard is None or guard.hitl_mode != "prompt"
+
+
 def _assemble(
     conn: sqlite3.Connection,
     client: LlmClient,
@@ -458,6 +470,7 @@ def _assemble(
     bus.subscribe(watcher)
     # M5 关键参数（设计文档 L66）：步数线 / 失速阈值从 profile [budget]/[stall] 来。
     limits = limits or LimitsConfig()
+    guard_cfg = load_guard_config(_profile_path())
     reg = _registry(board=board, runner=runner, broker=broker)
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
@@ -489,6 +502,7 @@ def _assemble(
         plan_review_limit=plan_cfg.review_limit,
         stall_failures=limits.stall_failures,
         stall_repeat_plans=limits.stall_repeat_plans,
+        parallel_dispatch=_parallel_allowed(guard_cfg, probe_cfg.enabled),
     )
 
 

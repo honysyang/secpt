@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 import structlog
@@ -40,7 +41,7 @@ from secpt.assets import render_knowledge, select_knowledge
 from secpt.core import budget, checkpointer, fsm, stall
 from secpt.core.plan_watch import PlanWatcher
 from secpt.errors import LlmError, SecptError
-from secpt.llms.client import Goal, StepOutput
+from secpt.llms.client import Goal, StepOutput, ToolCall
 from secpt.llms.coach import Coach
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
@@ -155,6 +156,7 @@ class PentestLoop:
         plan_review_limit: int = 3,
         stall_failures: int = 5,
         stall_repeat_plans: int = 2,
+        parallel_dispatch: bool = True,
     ) -> None:
         if step_tool_limit <= 0:
             raise ValueError(
@@ -183,6 +185,7 @@ class PentestLoop:
         self._plan_review_limit = plan_review_limit
         self._stall_failures = stall_failures
         self._stall_repeat_plans = stall_repeat_plans
+        self._parallel_dispatch = parallel_dispatch
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -407,10 +410,7 @@ class PentestLoop:
                 f"工具上限截断：step {step_no} 共 {len(output.tool_calls)} 个 tool_calls，"
                 f"执行前 {self._step_tool_limit} 个，未执行 {len(dropped)} 个：{names}",
             )
-        receipts = [
-            self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
-            for call in kept
-        ]
+        receipts = self._dispatch_batch(kept)
         # M3-1/M3-2：Guard 拒绝（denied）与 HITL 批准（hitl_approved）都由主循环
         # 落 audit actor=main——registry ledger-free，此处是唯一握有 task_id 与
         # 审批事实的地方；批/拒两路各有账（完成定义②）。
@@ -556,6 +556,36 @@ class PentestLoop:
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
         )
         return outcome, output.done, ring
+
+    def _dispatch_batch(self, calls: Sequence[ToolCall]) -> list[ToolOutput]:
+        """派单一批工具调用（M5-12）：全批 parallel_safe 且开关开启才真并发。
+
+        保守口径（为什么不是"能并的就并"）：只要批里混入一个非 parallel_safe
+        工具，就整批串行——不同工具的副作用顺序不做重排，账本语义与串行逐字节
+        一致。回执顺序恒等于调用顺序（并发结果按提交序回填），失速计收数与小票
+        落账因此保持确定性。
+
+        并发开关在装配层决定（main._parallel_allowed）：交互审批（stdin 会被
+        多线程抢）与探针后端（start/stop 是全局态）任一在场就串行。
+        """
+        safe_of = getattr(self._dispatcher, "parallel_safe", None)
+        concurrent = (
+            self._parallel_dispatch
+            and len(calls) >= 2
+            and safe_of is not None
+            and all(safe_of(call.name) for call in calls)
+        )
+        if not concurrent:
+            return [self._dispatch_one(call) for call in calls]
+        with ThreadPoolExecutor(
+            max_workers=len(calls), thread_name_prefix="secpt-dispatch"
+        ) as pool:
+            futures = [pool.submit(self._dispatch_one, call) for call in calls]
+            return [future.result() for future in futures]
+
+    def _dispatch_one(self, call: ToolCall) -> ToolOutput:
+        """单次派单（串行与并发共用同一条路径，避免两套语义漂移）。"""
+        return self._dispatcher.dispatch(call.name, {k: str(v) for k, v in call.args.items()})
 
     def _on_stall_ring(
         self,
