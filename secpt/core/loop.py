@@ -419,9 +419,37 @@ class PentestLoop:
                         self._conn, task.id, run.id, event.channel, event.meta, event.snapshot_ref
                     )
             checkpointer.mark_step(self._conn, run.id, step_no)
+            # M4-6 双图写入（蓝本 L340"同一事务写双图"）：探索图每步落 step 节点
+            # + 步进边——key=step-{n} 稳定，resume 重跑同键走 version 线（幂等）。
+            # 写在 step_transaction 内：图与小票/水位线同生共死，账不撕裂。
+            graph.put_node(
+                self._conn,
+                task.id,
+                "step",
+                f"step-{step_no}",
+                {"thought": output.thought[:80]},
+            )
+            edge_writes = 0
+            if step_no > 1:
+                graph.put_edge(
+                    self._conn, task.id, f"step-{step_no - 1}", f"step-{step_no}", "sequence"
+                )
+                edge_writes = 1
         for ticket in tickets:
             if self._bus is not None:
                 self._bus.emit("ticket_appended", **ledger.ticket_event_payload(ticket))
+        # M4-6 graph_changed（R3 红线：事件线只报告不接管）：事务提交后广播图
+        # 变化——EventBus.emit 无返回值、无订阅者能改变执行流；面板 SSE 轮询
+        # audit 增量（step 行带 graph=+Xn+Ye 写痕）即见图变化，零新端点。
+        if self._bus is not None:
+            self._bus.emit(
+                "graph_changed",
+                task_id=task.id,
+                run_id=run.id,
+                step_no=step_no,
+                nodes=1,
+                edges=edge_writes,
+            )
         # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。
         self._judge_pass(task.id)
         # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 置铃位）。
@@ -434,7 +462,11 @@ class PentestLoop:
             if counter.observe(ok=receipt.exit_code == 0):
                 ring = True
                 break  # 同 M1 语义：铃响本轮就算，余下回执不再收数
-        self._audit(task.id, f"step {step_no}: {output.thought}, tool_calls={len(tickets)}")
+        self._audit(
+            task.id,
+            f"step {step_no}: {output.thought}, tool_calls={len(tickets)}"
+            f", graph=+1n+{edge_writes}e",
+        )
         outcome = StepOutcome(
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
         )

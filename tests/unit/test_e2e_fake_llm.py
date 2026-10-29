@@ -139,14 +139,16 @@ def test_normal_direction_full_pass(tmp_path: Path) -> None:
     assert run["status"] == "ended"
     assert run["step_count"] == 2
     assert conn.execute("SELECT COUNT(*) FROM steps").fetchone()[0] == 2
-    assert conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0] == 2
     task = ledger.get_task(conn, result.task_id)
     assert task.exit_kind == "normal"
     names = [name for name, _ in events]
     assert names == [
         "run_step_started",
         "ticket_appended",
+        "graph_changed",
         "run_step_started",
+        "graph_changed",
         "exit_passed",
         "run_ended",
     ]
@@ -246,9 +248,12 @@ def test_stall_direction_e_stall_exit(tmp_path: Path) -> None:
     task = ledger.latest_task(conn)
     assert task.exit_kind == "stalled"
     names = [name for name, _ in events]
-    # 失速环事件契约扩展（W3-3 记 §65）：拉铃必落 stall_alarm（事件线只管报告，
-    # 本方向无 coach，铃后仍按 M1 语义 E_STALL）。
-    assert names == (["run_step_started", "ticket_appended"] * 5 + ["stall_alarm", "run_ended"])
+    # 失速环事件契约扩展（W3-3 记 §65 + M4-6 graph_changed）：拉铃必落
+    # stall_alarm（事件线只管报告，本方向无 coach，铃后仍按 M1 语义 E_STALL）；
+    # 每步事务提交后另有 graph_changed（双图写入只报告，R3 红线不破）。
+    assert names == (
+        ["run_step_started", "ticket_appended", "graph_changed"] * 5 + ["stall_alarm", "run_ended"]
+    )
 
 
 # ---------- 方向四：经验沉淀 + 二轮回放（W3-1，验收②基础版） -------------------------

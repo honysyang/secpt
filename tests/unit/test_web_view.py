@@ -78,6 +78,16 @@ def test_index_lists_tasks(seeded: tuple[Path, str]) -> None:
     assert "客户目标 10.0.0.5" in html
 
 
+def test_index_shows_acceptance_bars(seeded: tuple[Path, str]) -> None:
+    """M4-6 验收 6：两杆只读统计在总览页可查（精度杆 50%＝1 verified/2 终态）。"""
+    db, _ = seeded
+    html = _client(db).get("/").data.decode()
+    assert "精度杆" in html
+    assert "50.0%" in html  # 1 verified / (1 verified + 1 rejected)
+    assert "复利杆" in html
+    assert "暂无" in html  # experience 空库如实显示，不编数
+
+
 # ---- 黑板页 --------------------------------------------------------------------
 
 

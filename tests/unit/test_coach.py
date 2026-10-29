@@ -166,12 +166,14 @@ def test_rescue_absorbed_run_recovers_to_normal(tmp_path: Path) -> None:
     # 事件序：五连败（含小票）→ stall_alarm → 换路步 → 收工步 → exit_passed → run_ended。
     names = [name for name, _ in events]
     assert names == (
-        ["run_step_started", "ticket_appended"] * 5
+        ["run_step_started", "ticket_appended", "graph_changed"] * 5
         + [
             "stall_alarm",
             "run_step_started",
             "ticket_appended",
+            "graph_changed",
             "run_step_started",
+            "graph_changed",
             "exit_passed",
             "run_ended",
         ]
@@ -217,9 +219,9 @@ def test_second_ring_after_rescue_spent_raises_and_stalls(tmp_path: Path) -> Non
     assert fake.call_count == 12  # 进场 + 10 败 + 教练 1（第二次拉铃不再烧教练）
     assert fake.remaining == 0
     assert [name for name, _ in events] == (
-        ["run_step_started", "ticket_appended"] * 5
+        ["run_step_started", "ticket_appended", "graph_changed"] * 5
         + ["stall_alarm"]  # 第一次拉铃：铃照落，救场提案随后被吸收
-        + ["run_step_started", "ticket_appended"] * 5
+        + ["run_step_started", "ticket_appended", "graph_changed"] * 5
         + ["stall_alarm", "run_ended"]  # 第二次拉铃：名额已用，raise E_STALL
     )
     assert len(_audit_what(conn, "llmc")) == 1  # 教练只发言过一次
@@ -247,7 +249,7 @@ def test_coach_absent_keeps_m1_semantics(tmp_path: Path) -> None:
         loop.run("无教练演示 10.0.0.5")
     assert info.value.code == "E_STALL"
     assert [name for name, _ in events] == (
-        ["run_step_started", "ticket_appended"] * 5 + ["stall_alarm", "run_ended"]
+        ["run_step_started", "ticket_appended", "graph_changed"] * 5 + ["stall_alarm", "run_ended"]
     )
     assert _audit_what(conn, "llmc") == []
     assert ledger.latest_task(conn).exit_kind == "stalled"

@@ -24,6 +24,8 @@ from typing import Any
 
 from flask import Flask, Response, abort, render_template_string, stream_with_context
 
+from secpt.store import metrics as store_metrics
+
 __all__ = ["create_app"]
 
 # SSE 轮询节奏（秒）：够"准实时"，又不至于把只读库拉痛。
@@ -35,6 +37,7 @@ _INDEX_TPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.3rem .6rem}
 h1{font-size:1.4rem}</style></head><body>
 <h1>任务总览（只读）</h1>
+<section><h2>验收杆（M4-6 只读统计）</h2><p>{{ metrics_text }}</p></section>
 <table><tr><th>task_id</th><th>input</th><th>goal</th><th>exit_kind</th><th>created_at</th></tr>
 {% for t in tasks %}<tr>
 <td><a href="/task/{{ t.id }}">{{ t.id[:12] }}</a></td>
@@ -125,10 +128,11 @@ def create_app(db_path: str | Path) -> Flask:
                 "SELECT id, input_text, goal, exit_kind, created_at FROM tasks"
                 " ORDER BY created_at DESC, id DESC"
             ).fetchall()
+            metrics_text = store_metrics.render_metrics(conn)  # M4-6 两杆（验收 6 面板面）
         finally:
             conn.close()
         tasks: list[dict[str, Any]] = [dict(r) for r in rows]
-        return render_template_string(_INDEX_TPL, tasks=tasks)
+        return render_template_string(_INDEX_TPL, tasks=tasks, metrics_text=metrics_text)
 
     @app.get("/task/<task_id>")
     def task_page(task_id: str) -> str | Response:

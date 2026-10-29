@@ -22,6 +22,7 @@ _log = structlog.get_logger(__name__)
 EventName = Literal[
     "run_step_started",
     "ticket_appended",
+    "graph_changed",
     "exit_passed",
     "exit_failed",
     "run_ended",

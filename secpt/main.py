@@ -45,6 +45,7 @@ from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
 from secpt.ob.web_view import create_app
 from secpt.store import ledger
+from secpt.store import metrics as store_metrics
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
 from secpt.tools.broker import ApprovalBroker
@@ -629,6 +630,16 @@ def _open_db_path() -> str:
     return os.environ.get("SECPT_DB", "secpt.db")
 
 
+def _cmd_metrics(_args: argparse.Namespace) -> int:
+    """M4-6 两杆可查（验收 6）：``secpt metrics`` 一行只读统计（精度杆/复利杆）。"""
+    conn = connect(_open_db_path())
+    try:
+        print(store_metrics.render_metrics(conn))
+    finally:
+        conn.close()
+    return 0
+
+
 def _print_result(result: LoopResult) -> None:
     """收束摘要：身份 + 步数 + 出口类型（CLI 面板的最后一行）。"""
     print(f"== run 收束 == task_id={result.task_id} run_id={result.run_id}")
@@ -667,6 +678,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_panel.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
     p_panel.add_argument("--port", type=int, default=8711, help="监听端口")
     p_panel.set_defaults(func=_cmd_panel)
+
+    p_metrics = sub.add_parser("metrics", help="两根验收杆（M4-6 只读统计：精度杆/复利杆）")
+    p_metrics.set_defaults(func=_cmd_metrics)
     return parser
 
 

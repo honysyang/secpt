@@ -131,7 +131,9 @@ def test_two_step_run_writes_ledger_and_emits_events(
     assert names == [
         "run_step_started",
         "ticket_appended",
+        "graph_changed",
         "run_step_started",
+        "graph_changed",
         "exit_passed",
         "run_ended",
     ]
@@ -299,12 +301,14 @@ def test_checklist_failure_bounces_back_then_passes(
     names = [name for name, _ in t.events]
     assert names == [
         "run_step_started",
+        "graph_changed",
         "exit_failed",
         "run_step_started",
+        "graph_changed",
         "exit_passed",
         "run_ended",
     ]
-    assert t.events[1][1]["streak"] == 1  # 弹回而非直接失败
+    assert t.events[2][1]["streak"] == 1  # 弹回而非直接失败（[2]=exit_failed，[1]=graph_changed）
     tasks = conn.execute("SELECT exit_kind FROM tasks").fetchall()
     assert tasks[0]["exit_kind"] == "normal"
 
@@ -395,3 +399,85 @@ def test_experience_replay_enters_attention_pack(
     assert "（命令：nmap -p 22）" in user_msg
     assert "端口 22 曾验证开放" not in user_msg  # claimed 判票前不进包（收紧）
     assert "lab 环境的经验" not in user_msg  # 异环境不混包
+
+
+# ---------- M4-6 双图事件线：主循环写图 + graph_changed 只报告不接管 ----------------
+
+
+def test_step_writes_graph_node_and_sequence_edge(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """蓝本 L340"同一事务写双图"的落地：每步落 step 节点 + 步进边（探索图活起来）。"""
+    t = rig(
+        [
+            GOAL_JSON,
+            _step_json(
+                "先扫 80 端口", calls=[{"name": "nmap", "args": {"ports": "80"}}], done=False
+            ),
+            _step_json("收工", calls=[], done=True),
+        ]
+    )
+    result = t.loop.run("测试主机 10.0.0.5")
+    nodes = t.conn.execute(
+        "SELECT kind, key FROM graph_nodes WHERE task_id = ? ORDER BY key", (result.task_id,)
+    ).fetchall()
+    assert [(r["kind"], r["key"]) for r in nodes] == [("step", "step-1"), ("step", "step-2")]
+    edges = t.conn.execute(
+        "SELECT kind, src, dst FROM graph_edges WHERE task_id = ?", (result.task_id,)
+    ).fetchall()
+    assert [(r["kind"], r["src"], r["dst"]) for r in edges] == [("sequence", "step-1", "step-2")]
+
+
+def test_graph_changed_emitted_after_commit_reports_only(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """graph_changed 在事务提交后发（同 ticket_appended 手式），且只报告不接管（R3）。
+
+    只报告的证据：EventBus.emit 无返回值、无订阅者能改执行流——本事件后循环
+    照常推进（exit_passed/run_ended 照发），事件序里 graph_changed 必在
+    ticket_appended 之后、exit_* 之前（写图→提交→报告→出口判定）。
+    """
+    t = rig(
+        [
+            GOAL_JSON,
+            _step_json("扫 80", calls=[{"name": "nmap", "args": {"ports": "80"}}], done=False),
+            _step_json("收工", calls=[], done=True),
+        ]
+    )
+    result = t.loop.run("测试主机 10.0.0.5")
+    names = [name for name, _ in t.events]
+    assert names == [
+        "run_step_started",
+        "ticket_appended",
+        "graph_changed",
+        "run_step_started",
+        "graph_changed",
+        "exit_passed",
+        "run_ended",
+    ]
+    payload = dict(t.events[2][1])
+    assert payload["task_id"] == result.task_id
+    assert payload["step_no"] == 1
+    assert payload["nodes"] == 1 and payload["edges"] == 0  # 首步只有节点无前驱边
+    payload2 = dict(t.events[4][1])
+    assert payload2["step_no"] == 2 and payload2["edges"] == 1
+
+
+def test_step_audit_row_carries_graph_writes(
+    rig: Callable[[list[object]], SimpleNamespace],
+) -> None:
+    """audit step 行带 graph 写痕：面板 SSE 轮询 audit 增量即见图变化（零新端点）。"""
+    t = rig(
+        [
+            GOAL_JSON,
+            _step_json("扫 80", calls=[{"name": "nmap", "args": {"ports": "80"}}], done=False),
+            _step_json("收工", calls=[], done=True),
+        ]
+    )
+    t.loop.run("测试主机 10.0.0.5")
+    rows = t.conn.execute(
+        "SELECT what FROM audit_log WHERE what LIKE 'step %' ORDER BY id"
+    ).fetchall()
+    whats = [str(r["what"]) for r in rows]
+    assert "graph=+1n+0e" in whats[0]  # 首步：step-1 节点
+    assert "graph=+1n+1e" in whats[1]  # 次步：step-2 节点 + 步进边

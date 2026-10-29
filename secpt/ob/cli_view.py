@@ -85,6 +85,13 @@ class CliView:
             f" task_id={payload.get('task_id', '?')}"
         )
 
+    def _on_graph_changed(self, payload: Mapping[str, object]) -> None:
+        """M4-6 图变化行（事件线只报告不接管）：双图每步落账后广播写痕。"""
+        self._print(
+            f"【图】step {payload.get('step_no', '?')} 双图更新"
+            f" +{payload.get('nodes', 0)}n+{payload.get('edges', 0)}e"
+        )
+
 
 def _on_unknown(_view: CliView, _payload: Mapping[str, object]) -> None:
     """M1 契约外的 M2 事件不渲染——面板保持干净，接口在、接线留给后续里程碑。"""
@@ -93,6 +100,7 @@ def _on_unknown(_view: CliView, _payload: Mapping[str, object]) -> None:
 _HANDLERS: dict[str, Callable[[CliView, Mapping[str, object]], None]] = {
     "run_step_started": CliView._on_step_started,
     "ticket_appended": CliView._on_ticket,
+    "graph_changed": CliView._on_graph_changed,
     "run_ended": CliView._on_run_ended,
 }
 
