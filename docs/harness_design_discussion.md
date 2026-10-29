@@ -2057,3 +2057,45 @@ pre-flight、其余场景睡死不监听）——缺失 E_PROBE、端口永不�
 同款）；mitmproxy 档装配注记落账 + 真后端起停无降级告警。遗留：演示真
 抓包需把 HTTP 流量指进 proxy_port（`MitmCapture.proxy_port` 已暴露），
 M4 收尾演示时用本地 http server 走代理取景。
+
+## 75. M4-4 施工结论：worker 后台审批代理——队列转发、有界拒绝、actor 分层落账
+
+**拍板①：代问挂在收拢等待窗里，不设专职服务员线程。**
+worker 只经 agent_run 派生，主线程 dispatch agent_run 时必然阻塞在
+future 上——AgentRunTool._collect 以 0.2s 轮询 future + 顺手 serve 代理
+队列，单线程通道就够（CLI prompt 档"由主循环代问"任务书口径的机械兑现）。
+broker=None 走原路 future.result() 逐字节守恒——M3-5 无代理行为零漂移。
+
+**拍板②：有界性三道闸（超时=拒绝，不悬死）。**
+- worker 侧 decide 有 timeout_s 硬上限（默认 60s，构造期校验必须为正）：
+  主线程 serve 不及时（人不在）→ 拒绝回执照走，worker 继续干活；
+- 主线程晚到答复不改判：future 置过值就不再 set_result——回执一旦发出
+  永不反悔，晚到的裁决只影响裁决行落账（照常落，账面如实）；
+- 转发链任何异常（审批人炸了/queue 炸了）一律拒绝 + structlog warning，
+  绝不向 worker 抛异常炸步循环；deny_pending() 清场供收板用。
+
+**拍板③：批/拒两路落 audit，actor 分层 = 发起半边 + 裁决半边。**
+- 发起半边（worker loop，actor=workerA）：denied 与 hitl_approved 双路
+  各落一行（与主循环 L346 同手式）——未装代理的 fail-closed 拒绝也留痕，
+  "拒绝无账"的静默盲区就此消除；
+- 裁决半边（main.py `_broker_audit_sink`，actor=main）：serve 侧经
+  on_decision 回调落"审批代理裁决（human，主线程代问）: nmap → 批准/
+  拒绝"；独立短连接直写文件库，任务锚走最近 task（与 board 的
+  task_resolver 同口径——serve 必然发生在派单 task 的 run 窗内）。
+  broker 本体保持 ledger-free（tools 层红线：Guard/registry/adapter 都
+  不碰账本，落账归 loop/worker/装配层）。
+
+**拍板④：kind 透传，代理不冒充人。**
+broker.kind = delegate.kind——registry 的 hitl_note 署名"人工"来自真
+审批人的 kind；若 delegate 是 auto 型审批人，账面也如实署 auto。装配
+（_approval_broker）：仅 prompt 档出代理；off/auto/缺 [guard] 段 = None
+——任务书口径"未装代理 → fail-closed 保持现语义"的保守兑现（auto 档
+worker 的 HIGH 维持 M3-5 fail-closed，不借 M4-4 扩权）。
+
+**测试面（14 + 2 例）**：纯 broker 有界性（批/拒/超时拒绝/无服务员不悬死/
+晚到答复不改判/清场/审批人炸）；registry 级同权过闸（note=人工、delegate
+被真问到）；worker 级发起侧两路账（批有账拒也有账）+ 未装代理 fail-closed
+守恒；e2e：AgentRunTool 收拢等待窗内代问（board 真 worker 真 HIGH 真过闸）；
+main 装配级（prompt 档出代理、off/缺段 None、sink 落账 actor=main 两行）。
+遗留：CLI prompt 档人工审批的"等人"时长与 broker timeout（60s）的交互——
+人想太久 worker 会拿到拒绝继续走，语义如实但操作侧需知悉（可调构造参数）。
