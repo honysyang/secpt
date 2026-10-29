@@ -51,14 +51,25 @@ class _Workspace:
         self._root = Path(root)
 
     def resolve(self, raw: str) -> Path:
-        """把相对路径解析到工作区内；越界/绝对路径一律 ValueError。"""
+        """把相对路径解析到工作区内；越界/绝对路径一律 ValueError。
+
+        M5-32 双写法兼容（与只读工具 ``_RootedTool`` 同手式）：回执摘要与工具
+        说明里回显的都是 ``work/xxx`` 形态，模型照抄会被再拼一层——实测落盘
+        ``work/work/parse_subs.py``，run_command 按正确路径找不到文件连败两步。
+        首段与根同名时剥掉，``work/xxx`` 与裸 ``xxx`` 都落在同一处。
+        """
         text = (raw or "").strip()
         if not text:
             raise ValueError("path 为空")
         if Path(text).is_absolute():
             raise ValueError("只接受相对路径（work/ 内定位）")
+        given = Path(text)
+        root_name = self._root.name
+        parts = given.parts
+        if root_name and len(parts) > 1 and parts[0] == root_name:
+            given = Path(*parts[1:])
         base = self._root.resolve()
-        candidate = (base / text).resolve()
+        candidate = (base / given).resolve()
         if not candidate.is_relative_to(base):
             raise ValueError("路径越出工作区根（只允许 work/ 内写入）")
         return candidate

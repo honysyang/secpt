@@ -9,6 +9,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from secpt.tools.workspace import DownloadTool, RunCommandTool, WriteFileTool
 
 
@@ -151,3 +153,35 @@ def test_workspace_manifests_are_serial() -> None:
     for manifest in (WriteFileTool.manifest, RunCommandTool.manifest, DownloadTool.manifest):
         assert not manifest.parallel_safe
         assert not manifest.read_only  # 都有副作用，永不进 R1 重放
+
+
+# ---- M5-32 双拼路径回归：模型照抄回执里的 "work/xxx" 不再落到 work/work/ ----
+
+
+def test_write_file_accepts_root_prefixed_path(tmp_path: Path) -> None:
+    """首段与根同名时剥掉：work/xxx 与裸 xxx 落在同一处（实测双拼 work/work/）。"""
+    tool = WriteFileTool(root=tmp_path / "work")
+    out = tool.run({"path": "work/parse_subs.py", "content": "print('hi')\n"})
+    assert out.exit_code == 0
+    assert (tmp_path / "work" / "parse_subs.py").is_file()
+    assert not (tmp_path / "work" / "work").exists()  # 不再有 work/work/ 双拼
+
+
+def test_write_then_run_command_find_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """跨工具回归（本轮 run 的故障形态）：write_file 落盘后 run_command 以 cwd
+    相对路径能找到同一文件。"""
+    import sys
+
+    monkeypatch.chdir(tmp_path)  # cwd = tmp_path；root="work" 相对 cwd（生产形态）
+    writer = WriteFileTool(root="work")
+    out = writer.run({"path": "work/parse_subs.py", "content": "print('ok')\n"})
+    assert out.exit_code == 0
+    assert (tmp_path / "work" / "parse_subs.py").is_file()
+    assert not (tmp_path / "work" / "work").exists()
+
+    runner_tool = RunCommandTool(raw_dir=tmp_path / "raw")
+    run_out = runner_tool.run({"program": sys.executable, "args": "work/parse_subs.py"})
+    assert run_out.exit_code == 0, run_out.summary
+    assert "ok" in run_out.summary

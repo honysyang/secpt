@@ -33,6 +33,8 @@ _USER_AGENT = "secpt/0.1 (read-only passive recon)"
 _MAX_BODY = 512 * 1024
 _MAX_LINES = 400
 _HTTP_TIMEOUT_S = 20.0
+# read_file 摘要携带的正文上限（M5-32）：小文件整文可见，大文件截断 + offset 续读。
+_SUMMARY_CONTENT_CHARS = 1200
 
 
 class Opener(Protocol):
@@ -148,12 +150,16 @@ class HttpGetTool:
 
 
 def _parse_timeout(raw: str | None) -> float:
-    """timeout_s 解析：非法/越界一律回落默认（超时是保护，不该因笔误失效）。"""
+    """timeout_s 解析：非法/越界一律回落默认（超时是保护，不该因笔误失效）。
+
+    M5-32 上限 120→30：被动源查询没有合法的 40s+ 场景（实测模型给 dns.google
+    传 40s，白烧一整个等待窗）；crt.sh 慢响应 18.7s 仍在限内。
+    """
     try:
         value = float(raw) if raw else _HTTP_TIMEOUT_S
     except (TypeError, ValueError):
         return _HTTP_TIMEOUT_S
-    if value <= 0 or value > 120:
+    if value <= 0 or value > 30:
         return _HTTP_TIMEOUT_S
     return value
 
@@ -201,6 +207,10 @@ class ReadFileTool(_RootedTool):
     前 3 行，读 60 行也只见 200 字符，模型永远拿不到 crt.sh 的 JSON 正文，只能
     原地重读。``offset``（1 起始行号）让"接着读"成为一句话的事；摘要明说
     "本读区间/剩余行数/怎么续读"，读一遍就能拿全。
+
+    M5-32 内容进摘要：摘要是模型唯一看得到 read_file 结果的通道，实测一个
+    16 行的小文件仍被同参数重读 7 次——所读区间的正文折叠进摘要（上限
+    ``_SUMMARY_CONTENT_CHARS``），小文件一次读完；超上限才提示分段续读。
     """
 
     manifest = ToolManifest(
@@ -230,17 +240,19 @@ class ReadFileTool(_RootedTool):
         if offset > len(lines):
             offset = max(1, len(lines))
         shown = lines[offset - 1 : offset - 1 + limit]
-        # M5-31 摘要带真内容：截取本读区间的头部（不是永远文件头 3 行），上限
-        # 300 字符；"读到什么"至少能在摘要里看见个开头。
-        excerpt = " | ".join(line.strip() for line in shown[:4] if line.strip())[:300]
+        # M5-32 所读区间的正文折叠进摘要（小文件整文可见，模型不必重读）。
+        body = " ".join(line.strip() for line in shown if line.strip())
+        content = body[:_SUMMARY_CONTENT_CHARS]
         remaining = len(lines) - (offset - 1 + len(shown))
         summary = (
             f"{args.get('path')}（共 {len(lines)} 行，本读 {offset}..{offset - 1 + len(shown)})"
         )
         if remaining > 0:
             summary += f"，剩 {remaining} 行未读：offset={offset + len(shown)} 续读"
-        if excerpt:
-            summary += f"：{excerpt}"
+        if content:
+            summary += f"：{content}"
+        if len(body) > len(content):
+            summary += "…（本段超出摘要上限已截断，请用 offset 分段读）"
         return ToolOutput(
             tool_name=self.manifest.name,
             args=dict(args),
@@ -269,7 +281,11 @@ class ListDirTool(_RootedTool):
     def run(self, args: Mapping[str, str]) -> ToolOutput:
         try:
             target = self._resolve(args.get("path") or ".", want_dir=True)
-            entries = sorted(target.iterdir(), key=lambda item: item.name)[:100]
+            # M5-32 按修改时间新→旧：raw 目录跨 run 累积，按名字排序会把当前 run
+            # 的产物挤出一百项窗口——最近落盘的才是本 run 要找的证据。
+            entries = sorted(target.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)[
+                :100
+            ]
         except (OSError, ValueError) as exc:
             return ToolOutput(
                 tool_name=self.manifest.name,

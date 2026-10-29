@@ -278,3 +278,30 @@ def test_unresolved_plan_ref_is_audited() -> None:
         for row in conn.execute("SELECT status FROM plans WHERE task_id=?", (task_id,))
     ]
     assert statuses == ["done"]
+
+
+# ---- M5-32 引用剥包装：模型照抄渲染行 "[id=…] 原文" 也能收口 ------------------------
+
+
+def test_complete_accepts_rendered_line_wrapper() -> None:
+    """plan_done 引用带 "[id=xxxxxxxx · step N] 原文" 包装：剥掉后按 id/原文各试
+    一次——实测一轮 16 次收口引用有 3 条因带包装全部打空，20 条 active 堆到出场。"""
+    conn = migrate_store.connect(":memory:")
+    task_id = ledger.start_task(conn, "t", "g").id
+    (a, b) = plan.add(conn, task_id, 1, ["A：扫端口", "B：查证书"])
+    for row, status in ((a, "done"), (b, "cancelled")):
+        wrapped = f"[id={row.id[:8]} · step 3] {row.content}"
+        done_rows, unresolved = plan.complete(conn, task_id, [wrapped], status=status)
+        assert done_rows and not unresolved  # 两种包装都能解析
+    states = {r["content"]: r["status"] for r in conn.execute("SELECT content, status FROM plans")}
+    assert states == {"A：扫端口": "done", "B：查证书": "cancelled"}
+
+
+def test_complete_accepts_bare_id_bracket_wrapper() -> None:
+    """只带 "[id=xxxxxxxx]" 不带原文的引用同样收口。"""
+    conn = migrate_store.connect(":memory:")
+    task_id = ledger.start_task(conn, "t", "g").id
+    (row,) = plan.add(conn, task_id, 1, ["A：扫端口"])
+    done_rows, unresolved = plan.complete(conn, task_id, [f"[id={row.id[:8]}]"])
+    assert done_rows and not unresolved
+    assert conn.execute("SELECT status FROM plans").fetchone()["status"] == "done"

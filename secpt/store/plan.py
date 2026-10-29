@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 import uuid
@@ -34,6 +35,9 @@ _EMPTY_PLAN = "（暂无规划：主 LLM 尚未通过 plan_updates 提出）"
 _PLAN_STATUSES = frozenset({"done", "cancelled"})
 # 短 id 前缀匹配的最小长度：太短的串会撞上多条规划，宁可不匹配。
 _MIN_ID_PREFIX = 6
+# M5-32 渲染行包装：模型会把注意力包里的 "- [id=xxxxxxxx · step N] 原文" 整行
+# 当引用传回——剥掉包装后按裸 id/裸原文各试一次。id 是 8 位 hex。
+_UNWRAP_REF = re.compile(r"^\[id=([0-9a-f]+)(?:\s*·\s*step\s*\d+)?\]\s*(.*)$")
 
 
 class PlanRow(BaseModel):
@@ -167,9 +171,11 @@ def complete(
 ) -> tuple[list[PlanRow], list[str]]:
     """把 refs 指向的 active 规划推进到终态（done/cancelled）。
 
-    引用解析顺序：原文精确匹配 → 短 id 前缀（≥6 字符且唯一）。解析不到的一律
-    进 unresolved 由调用方落审计——**绝不猜**：把 A 标成完成而实际是 B，比漏标
-    更危险。
+    引用解析顺序：原文精确匹配 → 短 id 前缀（≥6 字符且唯一）→ **剥包装再试**
+    （M5-32：模型照抄注意力包渲染行 ``[id=xxxxxxxx · step N] 原文`` 当引用——
+    实测一轮 16 次收口引用有 3 条因带包装全部打空，20 条 active 堆到出场）。
+    解析不到的一律进 unresolved 由调用方落审计——**绝不猜**：把 A 标成完成而
+    实际是 B，比漏标更危险。
 
     Args:
         status: ``"done"``（完成）或 ``"cancelled"``（放弃）；其余 ValueError。
@@ -192,6 +198,15 @@ def complete(
                 continue
             seen.add(ref)
             target = by_content.get(ref) or _by_id_prefix(rows, ref)
+            if target is None:
+                # M5-32 剥掉渲染行包装再试一次：[id=xxxxxxxx] 与 [id=… · step N]
+                # 两种形态都认；id 与原文各自走同一条解析路径，仍不猜。
+                unwrapped = _UNWRAP_REF.match(ref)
+                if unwrapped is not None:
+                    wrapped_id, wrapped_content = unwrapped.group(1), unwrapped.group(2).strip()
+                    target = _by_id_prefix(rows, wrapped_id) or (
+                        by_content.get(wrapped_content) if wrapped_content else None
+                    )
             if target is None:
                 unresolved.append(ref)
                 continue

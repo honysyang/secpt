@@ -193,3 +193,59 @@ def test_http_get_repeat_hint_names_first_capture(tmp_path: Path) -> None:
     assert "本 run 第 2 次抓取同 URL" in second.summary
     assert f"首见 {first.raw_ref}" in second.summary
     assert "本 run 第 3 次抓取同 URL" in third.summary
+
+
+# ---- M5-32 内容进摘要 / 超时上限 / list_dir 新→旧 ---------------------------------
+
+
+def test_read_file_small_file_fully_visible_in_summary(tmp_path: Path) -> None:
+    """16 行小文件：正文整段折叠进摘要——模型一次读完，不必同参数重读 7 次。"""
+    target = tmp_path / "small.txt"
+    lines = [f'{{"item": "s{i}.example.com"}}' for i in range(1, 17)]
+    target.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+    out = ReadFileTool(roots=(tmp_path,)).run({"path": "small.txt", "max_lines": "120"})
+    assert "本读 1..16" in out.summary
+    header = out.summary.split("：", 1)[0]
+    assert "剩" not in header  # 读全了，没有剩余行提示
+    assert '"item": "s16.example.com"' in out.summary  # 最后一行也在摘要里
+    assert "已截断" not in out.summary
+
+
+def test_read_file_big_slice_truncates_with_hint(tmp_path: Path) -> None:
+    """超上限的段落：内容截断 + 明说"用 offset 分段读"。"""
+    target = tmp_path / "big.txt"
+    target.write_text(chr(10).join("y" * 60 for _ in range(60)), encoding="utf-8")
+    out = ReadFileTool(roots=(tmp_path,)).run({"path": "big.txt", "max_lines": "60"})
+    assert "本读 1..60" in out.summary
+    assert "已截断" in out.summary and "offset" in out.summary
+
+
+def test_http_get_timeout_clamped_to_30s(tmp_path: Path) -> None:
+    """M5-32：模型传 40s 超时被夹回默认 20s——被动源查询没有合法的 40s+ 场景。"""
+    seen: dict[str, float] = {}
+
+    def _recorder(url: str, timeout_s: float) -> tuple[int, dict[str, str], bytes]:
+        seen["timeout"] = timeout_s
+        return 200, {}, b"ok"
+
+    HttpGetTool(raw_dir=tmp_path, opener=_recorder).run(
+        {"url": "https://x.example.com/", "timeout_s": "40"}
+    )
+    assert seen["timeout"] == 20.0
+
+
+def test_list_dir_newest_first(tmp_path: Path) -> None:
+    """跨 run 的 raw 目录按修改时间新→旧：本 run 的产物排前面，不被旧文件挤出。"""
+    import os
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    old = evidence / "old_run.txt"
+    new = evidence / "new_run.txt"
+    old.write_text("old", encoding="utf-8")
+    new.write_text("new", encoding="utf-8")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    os.utime(new, (2_000_000_000, 2_000_000_000))
+    out = ListDirTool(roots=(tmp_path / "raw", evidence)).run({"path": "."})
+    assert out.exit_code == 0
+    assert out.summary.index("new_run.txt") < out.summary.index("old_run.txt")

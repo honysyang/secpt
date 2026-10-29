@@ -3064,3 +3064,43 @@ ruff 全绿；三场景冒烟（§102 开头）全过。
 仍无白名单（Guard 关档时可执行任意 argv——安全默认值另卡处理）；③ http_get
 重复计数是进程内状态，resume 后从零起算；④ plan_review 仍按每 5 步节拍触发，
 "仅当双图零增长才重估"的条件触发未做。
+
+## §103 M5-32 第二轮复盘修复（work 双拼 / read_file 内容通道 / plan 引用包装）
+
+第二轮真实 run（task c1e20b9b，同目标，3m15s / 17 步 / E_STALL）验证了 §102
+七项修复全部生效（时长分解、头摘要、offset 续读、拉铃→救场→二铃死、串行化
+均有日志实证），同时暴露三个残余问题，本卡逐个补焊。冒烟三场景（work 双拼
+write+run 同步跑通 / 16 行小文件末行进摘要 / 包装引用收口 + verified(rerun)+
+normal 出场）全过。
+
+**① workspace 双拼路径（§102 的"根目录不一致"实为路径双拼，误诊竞态在此更正）。**
+第二轮步骤 13/14 在已串行化的前提下仍两次失败：write_file 报"写入
+work/parse_subs.py 成功"，实际落盘 ``work/work/parse_subs.py``——``_Workspace.resolve``
+把模型照抄回执的 "work/xxx" 又拼到 work 根上。readonly 工具的同款问题早已用
+"双写法都收"修过（``_RootedTool``），workspace 三件套没享受到同款处理。修：
+首段与根同名时剥掉，``work/xxx`` 与裸 ``xxx`` 落在同一处（write/download 共用）。
+
+**② read_file 内容进摘要（二铃 E_STALL 的根因）。** 实测 16 行的小文件被同参数
+重读 7 次——摘要是模型唯一看得到 read_file 结果的通道，旧口径只给 4 行/300 字符。
+修：所读区间的正文折叠进摘要（上限 ``_SUMMARY_CONTENT_CHARS=1200``），小文件
+一次读全；超上限才截断并提示 offset 分段读。摘要进注意力包后，"读全三源合并
+子域清单"这类任务在感知层第一次变得可完成。
+
+**③ plan 引用剥包装（20 条 active 堆到出场的直接原因）。** 实测 16 次收口引用
+（11 done + 5 cancel）有 3 条 audit"规划引用未匹配"——模型把注意力包渲染行
+``[id=xxxxxxxx · step N] 原文`` 整行当引用传回，旧解析只认裸原文/裸短 id。
+修：``complete`` 解析失败时剥掉 ``[id=…]``（含 "· step N" 变体）包装，id 与
+原文各走同一条解析路径再试一次；仍不猜。
+
+**④ 两个小项**：http_get 超时上限 120→30s（实测模型给 dns.google 传 40s 白烧
+一整个等待窗，被动源查询没有合法的 40s+ 场景）；list_dir 按修改时间新→旧
+（raw 目录跨 run 累积，按名字排序会把当前 run 的产物挤出一百项窗口）。
+
+**测试面（+8 例，全库 613 例）**：test_workspace_tools 2（双拼回归 / write→run
+跨工具同文件）；test_readonly_tools 4（小文件全文 / 大段截断提示 / 超时夹回 /
+list_dir 新→旧）；test_plan 2（"· step N" 包装 / 裸 [id=…] 包装）。ruff 全绿；
+三场景冒烟全过。
+
+**遗留**：① read_file 内容上限 1200 字符对 73 行 JSON 仍会分段（但 offset 提示
+在，两段读完）；② raw 目录跨 run 累积本身未治理（list_dir 排序只缓解发现面）；
+③ plan_review 仍按节拍触发；④ run_command program 白名单（安全默认值）仍欠。
