@@ -32,11 +32,16 @@ _sentinel = object()
 
 
 class Mission(BaseModel):
-    """工单：worker 领单的最小契约面（goal 必填，task_id 由板级解析或显式携带）。"""
+    """工单：worker 领单的最小契约面（goal 必填，task_id 由板级解析或显式携带）。
+
+    ``skills``（M5）：技能库 id 清单——工单把"这单按哪套打法做"显式带上，
+    而不是让 worker 自己猜。空元组 = 不挂技能（M3-5 老语义逐字节守恒）。
+    """
 
     persona: str = "worker"
     goal: str
     step_budget: int = 8
+    skills: tuple[str, ...] = ()
     task_id: str | None = None
     mission_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 

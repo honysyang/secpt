@@ -6,6 +6,11 @@
 两层共用同一套 client structured 纪律（规划档温度、E_SCHEMA 重试由协议层
 天然承接）。
 
+技能挂载（M5，设计文档 L11 + L42）：工单可带 ``skills`` 技能 id 清单——
+worker 领单时从文件资产库读技能正文与其引用的纪律片段（角色 ← skills ←
+prompts 的下链），拼进系统话术。缺件/引用断裂一律 audit 留痕后按"未挂载"
+继续：技能是增强不是前置，但"没挂上"必须可证，绝不静默假装挂上。
+
 黑板纪律（拍板③）：worker 有独立 conn 直写 findings（唯一写口仍经
 store/ledger 官门）——findings 与小票同生死的原子收口依然归主循环
 step_transaction；worker 只走"申报受理 → 直写 claimed"单向门，绝不反串
@@ -23,18 +28,12 @@ from __future__ import annotations
 
 import sqlite3
 
+from secpt.assets import load_skill, prompt_text, skill_fragments
 from secpt.core.mission_board import Mission, MissionResult
+from secpt.errors import SecptError
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message, StepOutput
 from secpt.store import ledger
 from secpt.tools.registry import ToolOutput, ToolRegistry
-
-_SYS_PROMPT = (
-    "你是一名单独领单的渗透测试工人（worker）。你每一步只能输出一个 JSON 对象："
-    '{"thought": 一句理由, "plan_updates": [], '
-    '"tool_calls": [{"name": 工具名, "args": {参数: 值}}] (≤4), "done": 是否收工}。'
-    "有凭据（evidence_ref 指向真实产物文件）就申报 declare_finding；做完就 done。"
-    "不要输出 JSON 以外的任何文本。"
-)
 
 
 class Worker:
@@ -55,7 +54,7 @@ class Worker:
         self._actor = audit_actor
 
     def run(self, mission: Mission) -> MissionResult:
-        """领单干活：工单三个人事（goal/persona/step_budget）定节奏，收拢小票交代。"""
+        """领单干活：工单四个人事（goal/persona/skills/step_budget）定节奏，收拢小票交代。"""
         task_id = mission.task_id
         if not task_id:
             # 订单锚点在 board 层就该钉上；这里兜底诚实拒绝（不假写飞账）。
@@ -67,13 +66,18 @@ class Worker:
                 findings_count=0,
                 summary="E_TOOL_FAIL: mission 缺 task_id 锚点，worker 不接悬空单",
             )
+        system_prompt = self._system_prompt(mission, task_id)
+        skills_note = f"，skills={','.join(mission.skills)}" if mission.skills else ""
         ledger.audit(
-            self._conn, task_id, self._actor, f"领单：{mission.goal}（persona={mission.persona}）"
+            self._conn,
+            task_id,
+            self._actor,
+            f"领单：{mission.goal}（persona={mission.persona}{skills_note}）",
         )
         findings_count = 0
         for step_no in range(1, mission.step_budget + 1):
             messages = [
-                Message(role="system", content=_SYS_PROMPT),
+                Message(role="system", content=system_prompt),
                 Message(
                     role="user",
                     content=(
@@ -119,6 +123,34 @@ class Worker:
             findings_count=findings_count,
             summary=summary,
         )
+
+    def _system_prompt(self, mission: Mission, task_id: str) -> str:
+        """基线话术 + 工单挂载技能（正文 + 引用纪律片段）。
+
+        缺件与引用断裂都 audit 留痕后跳过该技能——技能挂载失败不阻断领单，
+        但"这单实际挂了哪几条"必须能从账本复算（领单行带 skills 清单）。
+        """
+        parts = [prompt_text("worker.system")]
+        for skill_id in mission.skills:
+            skill = load_skill(skill_id)
+            if skill is None:
+                ledger.audit(
+                    self._conn, task_id, self._actor, f"技能库缺件：{skill_id}（按未挂载继续）"
+                )
+                continue
+            try:
+                fragments = skill_fragments(skill)
+            except SecptError as exc:
+                ledger.audit(
+                    self._conn,
+                    task_id,
+                    self._actor,
+                    f"技能 {skill_id} 引用纪律缺失：{exc}（按未挂载继续）",
+                )
+                continue
+            parts.append(f"## 挂载技能：{skill.name}\n{skill.description}\n{skill.body}".strip())
+            parts.extend(fragments)
+        return "\n\n".join(parts)
 
     def _audit_hitl(self, task_id: str, receipt: ToolOutput) -> None:
         """M4-4 发起侧落账：HIGH 审批批/拒两路各有 audit 痕（actor=workerA）。

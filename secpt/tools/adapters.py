@@ -140,7 +140,7 @@ class AgentRunTool:
         name="agent_run",
         kind="in-process",
         description="Sub-agent 领单（任务板派单，worker 执行器；未装配板时回占位小票）",
-        params={"mission": "str", "persona": "str", "step_budget": "int"},
+        params={"mission": "str", "persona": "str", "step_budget": "int", "skills": "str"},
         required=("mission", "persona", "step_budget"),
     )
 
@@ -170,6 +170,11 @@ class AgentRunTool:
                 persona=(args.get("persona") or "worker").strip() or "worker",
                 goal=(args.get("mission") or "").strip() or "(空工单)",
                 step_budget=int(args.get("step_budget") or 8),
+                # skills 用逗号分隔的 id 清单（manifest 只认 str 类型参数）；
+                # 空白项丢弃——空技能 id 不该进工单，也不该报错打断派单。
+                skills=tuple(
+                    item.strip() for item in (args.get("skills") or "").split(",") if item.strip()
+                ),
             )
             future = self._board.submit(mission)
             result = self._collect(future)

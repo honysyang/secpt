@@ -17,6 +17,7 @@ import sqlite3
 
 from pydantic import BaseModel, Field
 
+from secpt.assets import render_prompt
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message
 from secpt.store import experience, ledger
 
@@ -90,16 +91,16 @@ class Distiller:
         return recorded
 
     def _prompt(self, candidates: list[tuple[str, str, str]]) -> str:
-        """喂给 LLMB 的蒸馏材料：候选逐条带判态与锚点，LLM 只负责话术。"""
+        """喂给 LLMB 的蒸馏材料：候选逐条带判态与锚点，LLM 只负责话术。
+
+        话术本体在 prompt 资产（``distiller``）里，本方法只负责把候选渲染成
+        一段清单——资产与取数分离，改话术不必改代码。
+        """
         lines = [
-            "收尾蒸馏：从下面候选里挑出值得记住的经验（不超过 5 条），"
-            '只输出 JSON 对象：{"entries": [{"idx": 候选序号, '
-            '"summary": 一句可复用的经验, "command": 应复用的命令或 null}]}。',
-            "候选：",
+            f"- idx={idx} 判态={verify_state} 锚点={raw_ref} 凭据={detail}"
+            for idx, (verify_state, raw_ref, detail) in enumerate(candidates)
         ]
-        for idx, (verify_state, raw_ref, detail) in enumerate(candidates):
-            lines.append(f"- idx={idx} 判态={verify_state} 锚点={raw_ref} 凭据={detail}")
-        return "\n".join(lines)
+        return render_prompt("distiller", candidates="\n".join(lines))
 
 
 __all__ = ["Distiller"]

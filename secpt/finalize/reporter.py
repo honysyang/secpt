@@ -17,6 +17,7 @@ import sqlite3
 
 from pydantic import BaseModel, Field
 
+from secpt.assets import render_prompt
 from secpt.core.loop import ExitVerdict
 from secpt.finalize.exit_checklist import run_checklist
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message
@@ -129,15 +130,17 @@ class Reporter:
         )
 
     def _context(self, findings: list[ReportFinding], failures: list[str], half_court: bool) -> str:
-        """喂给 LLM 的转述材料：只有 verified 条目与计数，claims 无中生有的路被真正堵死。"""
+        """喂给 LLM 的转述材料：只有 verified 条目与计数，claims 无中生有的路被真正堵死。
+
+        话术本体在 prompt 资产（``reporter``）；本方法只填事实槽位。
+        """
         kind = "半场（异常出口）" if half_court else "终场"
-        lines = [
-            f"任务{kind}报告摘要（只转述，不发明新发现）。",
-            f"verified 条目 {len(findings)} 条（逐条含证据锚点）：",
-        ]
-        lines += [f"- {f.title}：{f.detail}；锚点 {f.evidence_ref}" for f in findings]
-        lines.append(
-            f"出场/异常计数：exit_checklist 失败 {len(failures)} 条"
-            + (f"：{'；'.join(failures)}" if failures else "")
+        bullet = "\n".join(f"- {f.title}：{f.detail}；锚点 {f.evidence_ref}" for f in findings)
+        return render_prompt(
+            "reporter",
+            kind=kind,
+            count=str(len(findings)),
+            findings=bullet or "（无 verified 条目）",
+            failure_count=str(len(failures)),
+            failure_detail=f"：{'；'.join(failures)}" if failures else "",
         )
-        return "\n".join(lines)
