@@ -405,8 +405,12 @@ class PentestLoop:
         # W3-2 判零刻点（WF4）：事务已提交、新 claim 在账，立即无条件裁决一遍。
         self._judge_pass(task.id)
         # 失速计收数（E_TOOL_FAIL 每张异常回执 +1，成功回执清零连败；数满 N 置铃位）。
+        # denied 回执不进失速计（§67 遗留②）：拒绝 = 闸门没放行、工具压根没执行，
+        # 把它记成"工具连败"会误导救场器去换打法——真实病因是授权，不是手法。
         ring = False
         for receipt in receipts:
+            if receipt.denied:
+                continue
             if counter.observe(ok=receipt.exit_code == 0):
                 ring = True
                 break  # 同 M1 语义：铃响本轮就算，余下回执不再收数

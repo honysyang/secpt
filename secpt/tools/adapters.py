@@ -15,6 +15,8 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
+from secpt.core.mission_board import Mission, MissionBoard
+from secpt.tools.executors import ArgvRunner, LocalRunner
 from secpt.tools.registry import ToolManifest, ToolOutput
 
 
@@ -49,10 +51,14 @@ class NmapTool:
         binary: str | Path = "/usr/bin/nmap",
         raw_dir: Path | str = "raw",
         timeout_s: float = 120.0,
+        runner: ArgvRunner | None = None,
     ) -> None:
+        """runner 是 M3-5 执行隔离注入点：None = LocalRunner（M1/M2 行为守恒），
+        DockerRunner = 隔离执行；失败文案带 runner.label，让"谁没跑成"可证。"""
         self._binary = str(binary)
         self._raw_dir = Path(raw_dir)
         self._timeout_s = timeout_s
+        self._runner = runner
 
     def build_argv(self, target: str, ports: str | None) -> list[str]:
         """argv 构建独立成纯函数：可测注入面，无 subprocess 无副作用。"""
@@ -65,16 +71,16 @@ class NmapTool:
     def run(self, args: Mapping[str, str]) -> ToolOutput:
         """执行 nmap 并落 raw 产物；失败/超时一律转回执（E_TOOL_FAIL 语义）。"""
         argv = self.build_argv(args.get("target", ""), args.get("ports") or None)
+        active = self._runner if self._runner is not None else LocalRunner()
         try:
-            proc = subprocess.run(  # noqa: S603  # argv 列表，无 shell
-                argv, capture_output=True, text=True, timeout=self._timeout_s, check=False
-            )
-        except FileNotFoundError:
+            proc = active.run(argv, timeout_s=self._timeout_s)
+        except FileNotFoundError as exc:
+            missing = exc.filename or self._binary
             return ToolOutput(
                 tool_name=self.manifest.name,
                 args=dict(args),
                 exit_code=None,
-                summary=f"E_TOOL_FAIL: 找不到二进制 {self._binary}",
+                summary=f"E_TOOL_FAIL: 执行器 {active.label} 找不到二进制 {missing}",
                 raw_ref="",
             )
         except subprocess.TimeoutExpired:
@@ -112,11 +118,13 @@ class NmapTool:
 
 
 class AgentRunTool:
-    """内嵌工具 agent_run（§3.6）：kind=in-process 的登记占位。
+    """内嵌工具 agent_run（§3.6）：主循环派单的收拢窗口。
 
-    M1 只立登记与禁递归机制——worker 执行器（Mission/角色/预算内循环）是 M2
-    的器官施工件，这里绝不假实现；如果 M1 版主 LLM 在 tool_calls 里点名
-    agent_run，回执明说“占位”，落小票不吹牛。
+    M1 占位（board=None）逐字节保留——204 例兼容机位，改即破约；M3-5 整装版
+    （board 非 None）：Mission 构造 → Board.submit → future.result() 阻塞收单，
+    回出任一小票 `agent_run 收拢：{worker 摘要}`（exit_code 0/1 如实署名）。
+    派单/收单链路任何异常（无空板、worker 引爆）一律转 E_TOOL_FAIL 小票——
+    与 nmap 失败同手式：不吹牛、不炸主循环，异常原文进 summary 留痕。
     """
 
     manifest = ToolManifest(
@@ -127,12 +135,42 @@ class AgentRunTool:
         required=("mission", "persona", "step_budget"),
     )
 
-    def run(self, args: Mapping[str, str]) -> ToolOutput:
+    def __init__(self, board: MissionBoard | None = None) -> None:
+        """board 是 M3-5 接线点：None=占位守恒；非 None=领单真通。"""
+        self._board = board
+
+    def _placeholder(self, args: Mapping[str, str]) -> ToolOutput:
         return ToolOutput(
             tool_name=self.manifest.name,
             args=dict(args),
             exit_code=None,
             summary="E_TOOL_FAIL: agent_run M1 占位——worker 执行器 M2 接线",
+            raw_ref="",
+        )
+
+    def run(self, args: Mapping[str, str]) -> ToolOutput:
+        if self._board is None:
+            return self._placeholder(args)
+        try:
+            mission = Mission(
+                persona=(args.get("persona") or "worker").strip() or "worker",
+                goal=(args.get("mission") or "").strip() or "(空工单)",
+                step_budget=int(args.get("step_budget") or 8),
+            )
+            result = self._board.submit(mission).result()
+        except Exception as exc:  # 派单/执行全链：退款小票，不炸主循环
+            return ToolOutput(
+                tool_name=self.manifest.name,
+                args=dict(args),
+                exit_code=None,
+                summary=f"E_TOOL_FAIL: agent_run 派单失败 {type(exc).__name__}: {exc}",
+                raw_ref="",
+            )
+        return ToolOutput(
+            tool_name=self.manifest.name,
+            args=dict(args),
+            exit_code=0 if result.ok else 1,
+            summary=f"agent_run 收拢：{result.summary}",
             raw_ref="",
         )
 

@@ -18,10 +18,11 @@ import json
 import os
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 from secpt.core.loop import LoopResult, PentestLoop
+from secpt.core.mission_board import MissionBoard
 from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.finalize.experience import Distiller as ExperienceDistiller
@@ -31,12 +32,14 @@ from secpt.llms.client import TEMPERATURE_FREESTYLE, LlmClient, Message, StepOut
 from secpt.llms.coach import Coach
 from secpt.llms.fake import FakeLLM
 from secpt.llms.main_llm import MainLlm
+from secpt.llms.worker import Worker
 from secpt.ob.cli_view import CliView, configure_logging, evidence_report
 from secpt.ob.events import EventBus
 from secpt.ob.web_view import create_app
 from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
+from secpt.tools.executors import ArgvRunner, DockerRunner, load_isolation_config
 from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
 from secpt.tools.probe import (
     CaptureBackend,
@@ -49,6 +52,8 @@ from secpt.tools.probe import (
 from secpt.tools.registry import ToolRegistry
 
 _NULL_TARGET = "(demo)"
+_DEFAULT_WORKERS = 3
+_DEFAULT_WORKER_TIMEOUT_S = 300.0
 
 
 def _require_mock() -> None:
@@ -87,9 +92,36 @@ def _demo_provider(goal_text: str) -> FakeLLM:
         {"summary": "M1 mock 演示：nmap 摸扫一轮（工具回执已落账），出口三验通过。"},
         ensure_ascii=False,
     )
+    # M3-5 领单演示（env 门控）：SECPT_DEMO_AGENT_RUN=1 时插一步 agent_run，
+    # 让"主循环 → 任务板 → worker → 收拢小票"整链在 mock 离线一次跑通；
+    # 未开时脚本与 M1/M2 逐字节一致（老演示不回退）。
+    agent_step = StepOutput(
+        thought="派一单给 worker（M3-5 领单演示）",
+        tool_calls=[
+            ToolCall(
+                name="agent_run",
+                args={
+                    "mission": "演示单：摸扫一圈并如实回执",
+                    "persona": "recon",
+                    "step_budget": "2",
+                },
+            )
+        ],
+    )
+    mid = [sweep, agent_step] if _demo_agent_run_enabled() else [sweep]
     if goal_text:
-        return FakeLLM([goal_json, sweep, wrap_up, summary])
+        if _demo_agent_run_enabled():
+            # agent_run 成功小票会成为收尾蒸馏候选（experience.py 的候选口径），
+            # 因此演示脚本多备一条"空草案"应答——蒸馏器真跑一次、如实落 0 条。
+            distill_stub = json.dumps({"entries": []}, ensure_ascii=False)
+            return FakeLLM([goal_json, *mid, wrap_up, distill_stub, summary])
+        return FakeLLM([goal_json, *mid, wrap_up, summary])
     return FakeLLM([wrap_up, summary])
+
+
+def _demo_agent_run_enabled() -> bool:
+    """M3-5 演示开关（env）：默认关，保持 M1/M2 出厂脚本原样。"""
+    return os.environ.get("SECPT_DEMO_AGENT_RUN", "").strip().lower() in ("1", "true", "yes")
 
 
 def _chat_provider() -> FakeLLM:
@@ -103,19 +135,118 @@ def _chat_provider() -> FakeLLM:
     )
 
 
+def _worker_provider(index: int) -> FakeLLM:
+    """worker 出厂脚本（M3-5 mock 路径）：单步收工，收拢摘要带工号。
+
+    为什么不在演示 worker 里仿造 nmap/declare_finding：mock 无网络，伪造证据
+    会破"raw_ref 必指真文件"的诚实锚；worker 的能力链路由 e2e 测试用预置
+    证据文件覆盖，CLI 演示只需证明"领单—收单—小票回主账"这条线是活的。
+    """
+    _require_mock()
+    step = StepOutput(
+        thought=f"worker-{index} 领单完成（mock 演示：无网络动作，不伪造证据）",
+        tool_calls=[],
+        done=True,
+    )
+    return FakeLLM([step])
+
+
+def _worker_builder() -> Callable[[int], Worker]:
+    """worker 装配工厂：每线程一次构建（独立 conn + 独立 registry + 独立 LLM）。
+
+    两条硬约束落在这里：
+    - 独立 conn：sqlite 连接不跨线程共享，各线程直写同一文件库（拍板③）；
+    - registry 不含 agent_run：worker 无从再派单，套娃死锁从构造上不存在。
+
+    Guard 同权（§3.6）但 approver=None：后台线程没有人工通道，HIGH 级动作
+    fail-closed——worker 不得替人点头，这与主循环 CliApprover 的口径一致。
+    """
+    _require_mock()  # 装配期校验：别让 provider 错误在 worker 线程里炸成哑弹
+    raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
+    binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
+    db_path = os.environ.get("SECPT_DB", "secpt.db")
+    runner = _runner()
+    guard = load_guard_config(_profile_path())
+    probe = _probe_backend()
+
+    def build(index: int) -> Worker:
+        return Worker(
+            llm=LlmClient(_worker_provider(index)),
+            dispatcher=ToolRegistry(
+                [NmapTool(binary=binary, raw_dir=raw_dir, runner=runner), DeclareFindingTool()],
+                guard=guard,
+                approver=None,
+                probe=probe,
+            ),
+            conn=connect(db_path),
+        )
+
+    return build
+
+
+def _runner() -> ArgvRunner | None:
+    """M3-5 执行隔离：docker 档包 DockerRunner，shell 档 None（LocalRunner 默认）。
+
+    fail-closed 语义在 adapters 层：docker 不可用 → E_TOOL_FAIL 回执，
+    绝不静默退回本机执行（宿主方案不可信）。
+    """
+    cfg = load_isolation_config(_profile_path())
+    if cfg.isolation != "docker":
+        return None
+    return DockerRunner(image=cfg.image, docker_bin=cfg.docker_bin)
+
+
+def _board(conn: sqlite3.Connection) -> MissionBoard:
+    """领单任务板装配：默认 3 worker（SECPT_WORKERS 可调），锚点走最近 task。
+
+    为什么锚点用 ledger.latest_task：agent_run 是主循环里的同步派单，此刻
+    必然已有当前 task；解析失败（空库）由 submit 包成 ValueError，经
+    AgentRunTool 转 E_TOOL_FAIL 小票——不造空锚把 worker 的 findings 写飞。
+    """
+    db_path = os.environ.get("SECPT_DB", "secpt.db")
+    if db_path == ":memory:":
+        raise SecptError(
+            "多 worker 需要文件库（SECPT_DB 不能是 :memory:）",
+            code="E_CONFIG",
+            context={"db": db_path},
+        )
+    size_raw = os.environ.get("SECPT_WORKERS", str(_DEFAULT_WORKERS)).strip() or str(
+        _DEFAULT_WORKERS
+    )
+    try:
+        size = int(size_raw)
+    except ValueError as exc:
+        raise SecptError(
+            "SECPT_WORKERS 必须是整数",
+            code="E_CONFIG",
+            context={"got": size_raw},
+        ) from exc
+    if size <= 0:
+        raise SecptError("SECPT_WORKERS 必须为正整数", code="E_CONFIG", context={"got": size})
+    return MissionBoard(
+        conn,
+        _worker_builder(),
+        size=size,
+        task_resolver=lambda c: ledger.latest_task(c).id,
+    )
+
+
 def _open_db():
     """事实层唯一入口：env 指路，migrate 保证 schema 幂等推进。"""
     return connect(os.environ.get("SECPT_DB", "secpt.db"))
 
 
-def _registry() -> ToolRegistry:
+def _registry(
+    *, board: MissionBoard | None = None, runner: ArgvRunner | None = None
+) -> ToolRegistry:
     """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）；
     M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
     （闸常开，与 M1/M2 行为逐字节一致），坏 tier 值才 E_PROFILE 拒跑。
     M3-2 起 HITL：prompt 档=CliApprover（stdin 阻塞提问，蓝本 v0.1 形态），
     其余档（含缺省 auto）装配非交互审批人；off 档审批人闲置（闸内已拦死）。
     M3-3 起探针：probe=None = 不开窗（R6 关档零开销）；开档按
-    SECPT_PROBE_BACKEND 装配事件源（默认 mock 伪事件源）。"""
+    SECPT_PROBE_BACKEND 装配事件源（默认 mock 伪事件源）。
+    M3-5 起双注入：runner=执行隔离（None=本机），board=领单板（None=占位）。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
     guard = load_guard_config(_profile_path())
@@ -124,7 +255,11 @@ def _registry() -> ToolRegistry:
         approver = CliApprover() if guard.hitl_mode == "prompt" else AutoApprover()
     probe = _probe_backend()
     return ToolRegistry(
-        [NmapTool(binary=binary, raw_dir=raw_dir), AgentRunTool(), DeclareFindingTool()],
+        [
+            NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
+            AgentRunTool(board=board),
+            DeclareFindingTool(),
+        ],
         guard=guard,
         approver=approver,
         probe=probe,
@@ -160,17 +295,24 @@ def _profile_path() -> str:
     return os.environ.get("SECPT_PROFILE", "configs/profile.toml")
 
 
-def _assemble(conn: sqlite3.Connection, client: LlmClient) -> PentestLoop:
+def _assemble(
+    conn: sqlite3.Connection,
+    client: LlmClient,
+    *,
+    board: MissionBoard | None = None,
+    runner: ArgvRunner | None = None,
+) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
     出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
     W3-1 起收尾挂经验蒸馏器，W3-2 起裁判 sweep 以 partial 注入 JudgeSweep 口
     （core 只见 callable；profile 缺文件由 load_profile 降关闭 + note 携带降级口径），
-    全部与 MainLlm 共用同一条 chat 协议 client。"""
+    全部与 MainLlm 共用同一条 chat 协议 client。
+    M3-5：board/runner 由调用方持有并负责收板（装配层不管生命周期）。"""
     bus = EventBus()
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
     probe_cfg = load_probe_config(_profile_path())
-    reg = _registry()
+    reg = _registry(board=board, runner=runner)
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
     return PentestLoop(
@@ -245,14 +387,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     fake = _demo_provider(goal)  # provider 校验在进场前
     client = LlmClient(fake)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
     conn = _open_db()
+    board: MissionBoard | None = None
     try:
-        result = _assemble(conn, client).run(goal)
+        board = _board(conn)
+        result = _assemble(conn, client, board=board, runner=_runner()).run(goal)
         _print_result(result)
         _emit_report(conn, fake, result.task_id, half=False)
     except SecptError:
         _half_report(conn, None)
         raise
     finally:
+        if board is not None:
+            board.shutdown()
         conn.close()
     return 0
 
@@ -260,15 +406,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     """``secpt resume <task_id>``：WF8 只复建不回放，从水位线+1 续走。"""
     conn = _open_db()
+    board: MissionBoard | None = None
     try:
         fake = _demo_provider("")
-        result = _assemble(conn, LlmClient(fake)).resume(str(args.task_id))
+        board = _board(conn)
+        result = _assemble(conn, client=LlmClient(fake), board=board, runner=_runner()).resume(
+            str(args.task_id)
+        )
         _print_result(result)
         _emit_report(conn, fake, result.task_id, half=False)
     except SecptError:
         _half_report(conn, str(args.task_id))
         raise
     finally:
+        if board is not None:
+            board.shutdown()
         conn.close()
     return 0
 
