@@ -574,3 +574,68 @@ def test_ledger_error_propagation_from_experience_vote() -> None:
         experience.promote_claimed(conn, task_id, "lab", "runs/g.txt")
     with pytest.raises(LedgerError):
         experience.decay_votes(conn, task_id, "lab", "runs/g.txt")
+
+
+# ---------- M5-25 R1 结构化比对（易变行免疫） ----------------------------------
+
+
+class TestR1StableCompare:
+    def _setup(self, tmp_path: Path, original: str) -> tuple[sqlite3.Connection, str, str, Path]:
+        evidence = tmp_path / "orig.txt"
+        evidence.write_text(original, encoding="utf-8")
+        conn = _make_db()
+        task_id = ledger.start_task(conn, "稳定比对", goal="g").id
+        fid = _claim(conn, str(evidence), task_id)
+        _ticket_on(conn, task_id, str(evidence))
+        return conn, task_id, fid, evidence
+
+    def test_timestamp_only_difference_still_verifies(self, tmp_path: Path) -> None:
+        """真实 nmap 的启动/结束时间必然不同——不能被判成"不一致"。"""
+        original = (
+            "Starting Nmap 7.95 ( https://nmap.org ) at 2026-10-29 08:49 EDT\n"
+            "22/tcp open  ssh     OpenSSH 9.2\n"
+            "Nmap done at 2026-10-29 08:49:03; 1 IP address (1 host up) scanned in 1.2 seconds\n"
+        )
+        conn, _task_id, fid, _evidence = self._setup(tmp_path, original)
+        replay = tmp_path / "replay.txt"
+        replay.write_text(
+            "Starting Nmap 7.95 ( https://nmap.org ) at 2026-10-30 09:00 EDT\n"
+            "22/tcp open  ssh     OpenSSH 9.2\n"
+            "Nmap done at 2026-10-30 09:00:07; 1 IP address (1 host up) scanned in 3.4 seconds\n",
+            encoding="utf-8",
+        )
+        spy = SpyReplay(_out(raw_ref=str(replay)))
+        row = r1(conn, ledger.get_finding(conn, fid), spy.readonly_replay, "lab")
+        assert row is not None and row.method == "rerun"
+
+    def test_argv_cover_line_is_ignored(self, tmp_path: Path) -> None:
+        """argv 封面（执行器/镜像路径）变化不影响判据。"""
+        conn, _task_id, fid, _evidence = self._setup(
+            tmp_path, "$ argv(nmap -Pn -p 22 10.0.0.5)\n22/tcp open ssh\n"
+        )
+        replay = tmp_path / "replay.txt"
+        replay.write_text(
+            "$ argv(/usr/bin/nmap -Pn -p 22 10.0.0.5)\n22/tcp open ssh\n", encoding="utf-8"
+        )
+        spy = SpyReplay(_out(raw_ref=str(replay)))
+        row = r1(conn, ledger.get_finding(conn, fid), spy.readonly_replay, "lab")
+        assert row is not None
+
+    def test_real_difference_suspends(self, tmp_path: Path) -> None:
+        conn, _task_id, fid, _evidence = self._setup(tmp_path, "22/tcp open ssh\n")
+        replay = tmp_path / "replay.txt"
+        replay.write_text("22/tcp closed\n", encoding="utf-8")
+        spy = SpyReplay(_out(raw_ref=str(replay)))
+        assert r1(conn, ledger.get_finding(conn, fid), spy.readonly_replay, "lab") is None
+        assert ledger.get_finding(conn, fid).verify_state == "claimed"
+
+    def test_stable_lines_drops_volatile(self) -> None:
+        from secpt.judge.r123 import stable_lines
+
+        lines = stable_lines(
+            "Starting Nmap 7.95 at 2026-10-29 08:49\n"
+            "$ argv(nmap -p 22 x)\n"
+            "22/tcp   open   ssh   (0.0012s latency)\n"
+            "\n"
+        )
+        assert lines == ["22/tcp open ssh"]

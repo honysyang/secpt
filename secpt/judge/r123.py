@@ -18,6 +18,7 @@ command 是 LLM 自由文本，无法确定性对齐；改判"证据链同源"�
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -25,6 +26,36 @@ from typing import Protocol
 
 from secpt.store import experience, ledger
 from secpt.store.ledger import FindingRow
+
+# 易变行（M5-25）：重放比对必须剔除，否则真实工具输出永远"不匹配"。
+# nmap 的 raw 里有启动时间、耗时、延迟、argv 封面——两次运行必然不同；
+# 直接全文相等会让 R1 在真实场景恒失败（单测用确定性假工具，暴露不出来）。
+_VOLATILE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"  # 任何日期时间
+    r"|starting nmap .* at "  # nmap 启动行
+    r"|nmap done at "
+    r"|scanned in [\d.]+ seconds"
+    r"|^\$ argv\(",  # 命令行封面（执行器/镜像路径可能变）
+    re.IGNORECASE,
+)
+# 行内延迟注记（"(0.0012s latency)"）：剥掉即可，不该丢掉整行证据。
+_LATENCY = re.compile(r"\(\s*[\d.]+s?\s*latency\s*\)", re.IGNORECASE)
+
+
+def stable_lines(text: str) -> list[str]:
+    """把证据文本归一成"稳定行"：折叠空白、小写、剔除易变行。
+
+    R1 的判据是"证据内容一致"，不是"文件逐字节相同"——判据必须对时间戳、
+    耗时、命令行封面免疫，否则真实工具的两次运行永远不等。行内延迟注记
+    （``(0.0012s latency)``）只剥离不丢行：端口证据要留下。
+    """
+    kept: list[str] = []
+    for raw in text.splitlines():
+        line = " ".join(_LATENCY.sub("", raw).split())
+        if not line or _VOLATILE.search(line):
+            continue
+        kept.append(line.casefold())
+    return kept
 
 
 class ReplayOutcome(Protocol):
@@ -62,7 +93,8 @@ def r1(
     - 无票面证据源（锚没落在任何小票上，如 obs 锚/手铺证明）→ 悬置不裁决；
     - 写操作/未知工具（执行器返 None）→ 悬置（claimed 保持，交 R2/R3 接手）；
     - 重放失败（exit_code 空/非零、raw_ref 空、产物文件缺失）→ 悬置不裁决；
-    - 新旧证据全文一致 → verified(method="rerun") + 经验升 verified 且 +1 票；
+    - 新旧证据的**稳定行**一致（剔除时间戳/耗时/argv 封面）→ verified(method="rerun")
+      + 经验升 verified 且 +1 票；
     - 不一致 → 经验降票（地板 0）且 claim 保持 claimed（减票不动判）。
 
     Args:
@@ -112,12 +144,25 @@ def r1(
     if not (original.is_file() and replayed.is_file()):
         _suspend(conn, finding, "R1 重放失败：原证据或重放产物文件缺失（诚实锚点缺位）")
         return None
-    if original.read_text(encoding="utf-8") == replayed.read_text(encoding="utf-8"):
+    try:
+        original_lines = stable_lines(original.read_text(encoding="utf-8"))
+        replayed_lines = stable_lines(replayed.read_text(encoding="utf-8"))
+    except OSError:
+        _suspend(conn, finding, "R1 重放失败：证据文件不可读")
+        return None
+    if not original_lines:
+        _suspend(conn, finding, "R1 重放无法比对：原证据剔除易变行后为空")
+        return None
+    if original_lines == replayed_lines:
         row = ledger.set_finding_state(conn, finding.id, "verified", method="rerun")
         if environment is not None:
             experience.promote_claimed(conn, finding.task_id, environment, anchor)
         ledger.audit(
-            conn, finding.task_id, "judge", f"裁决 {finding.id[:8]}: verified(rerun)（重放一致）"
+            conn,
+            finding.task_id,
+            "judge",
+            f"裁决 {finding.id[:8]}: verified(rerun)"
+            f"（重放一致：{len(original_lines)} 行稳定证据，剔除时间戳/耗时）",
         )
         return row
     if environment is not None:
@@ -126,4 +171,4 @@ def r1(
     return None
 
 
-__all__ = ["ReplayExecutor", "ReplayOutcome", "r1"]
+__all__ = ["ReplayExecutor", "ReplayOutcome", "r1", "stable_lines"]

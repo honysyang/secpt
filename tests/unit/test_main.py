@@ -437,3 +437,26 @@ def test_chat_sends_pentest_identity_prompt(
     assert "secpt" in messages[0].content
     assert "授权" in messages[0].content  # 边界纪律也在系统提示里
     assert messages[1].role == "user" and messages[1].content == "你好"
+
+
+def test_run_prints_security_posture(
+    cli_env: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M5-25：默认关的开关必须在第一屏可见。"""
+    main_mod.main(["run", "--goal", "x"])
+    out = capsys.readouterr().out
+    assert "【安全态势】" in out
+    assert "裁判=" in out and "探针=" in out and "隔离=" in out and "Guard=" in out
+
+
+def test_posture_warns_when_judge_off(
+    cli_env: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    monkeypatch.setenv("SECPT_PROFILE", str(tmp_path / "no-such-profile.toml"))
+    main_mod.main(["run", "--goal", "x"])
+    out = capsys.readouterr().out
+    assert "裁判=关" in out
+    assert "注意：裁判关闭" in out

@@ -45,6 +45,8 @@ class AttentionPack(BaseModel):
     experience_snapshot: list[str] = Field(default_factory=list)  # M2：三态规则接线位
     knowledge_snapshot: list[str] = Field(default_factory=list)  # M5：知识库只读参考
     role_catalog: list[str] = Field(default_factory=list)  # M5-16：可派角色清单
+    evidence_digest: list[str] = Field(default_factory=list)  # M5-25：raw 证据摘录
+    findings_digest: list[str] = Field(default_factory=list)  # M5-25：已申报 findings
 
     def render(self) -> str:
         """渲染纯文本包。字段缺失显式标占位，不给模型留"看到空字符串"的歧义。"""
@@ -76,6 +78,15 @@ class AttentionPack(BaseModel):
             lines.append(
                 "## 可派角色（agent_run 的 persona 取 id）\n"
                 + "\n".join(f"- {item}" for item in self.role_catalog)
+            )
+        if self.evidence_digest:
+            lines.append(
+                "## 证据摘录（raw 前几行，事实本身）\n"
+                + "\n".join(f"- {item}" for item in self.evidence_digest)
+            )
+        if self.findings_digest:
+            lines.append(
+                "## 已申报 findings\n" + "\n".join(f"- {item}" for item in self.findings_digest)
             )
         return "\n".join(lines)
 
@@ -114,6 +125,8 @@ def build(
     experiences: Sequence[ExperienceRow] = (),
     knowledge: Sequence[str] = (),
     roles: Sequence[str] = (),
+    evidence_digest: Sequence[str] = (),
+    findings_digest: Sequence[str] = (),
 ) -> AttentionPack:
     """从账本事实装配注意力包（纯函数现打包即弃；经验经三态投影进包）。
 
@@ -132,6 +145,8 @@ def build(
         experience_snapshot=_project_experience(experiences),
         knowledge_snapshot=list(knowledge),
         role_catalog=list(roles),
+        evidence_digest=list(evidence_digest),
+        findings_digest=list(findings_digest),
     )
 
 

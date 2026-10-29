@@ -57,6 +57,8 @@ def _assemble(
     """
     conn = migrate_store.connect(":memory:")
     task = ledger.start_task(conn, input_text="worker 测试进场", goal="摸扫")
+    # M5-25：worker 的小票要挂 run 锚（真实流程里 agent_run 由主循环派发，run 必然在）
+    ledger.start_run(conn, task.id, config={"objective": "o", "success_criteria": "s"})
     script_items: list[object] = list(script)
     fake = FakeLLM(script_items)
     client = LlmClient(fake)
@@ -251,3 +253,25 @@ def test_worker_coach_failure_degrades_without_killing_mission() -> None:
 
 def test_mission_coach_threshold_defaults_to_zero() -> None:
     assert Mission(goal="g").coach_after_failures == 0
+
+
+def test_worker_records_tickets_for_tool_calls(tmp_path: Path) -> None:
+    """M5-25：worker 的工具动作也要落小票，否则 R1 找不到票面证据源。"""
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("客观证据\n", encoding="utf-8")
+    script = [
+        _step("申报", calls=[_declare_call("w 发现", "依据在档", str(evidence))]),
+        _step("收工", done=True),
+    ]
+    worker, mission, _fake, conn = _assemble(script)
+    worker.run(mission)
+
+    rows = conn.execute(
+        "SELECT tool_name, exit_code, raw_ref, step_id FROM tickets WHERE task_id=?",
+        (mission.task_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "declare_finding"
+    assert rows[0]["exit_code"] == 0
+    assert rows[0]["raw_ref"] == str(evidence)
+    assert rows[0]["step_id"].startswith("worker-workerA-")  # 无主循环步，前缀可辨

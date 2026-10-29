@@ -27,10 +27,12 @@ MissionResult(ok=False, finished=False) + audit 落痕（actor=workerA），绝
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
+from typing import Any
 
 from secpt.assets import load_role, load_skill, prompt_text, role_fragments, skill_fragments
 from secpt.core.mission_board import Mission, MissionResult
-from secpt.errors import SecptError
+from secpt.errors import LedgerError, SecptError
 from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message, StepOutput
 from secpt.llms.coach import Coach
 from secpt.store import graph, ledger
@@ -87,6 +89,7 @@ class Worker:
         failures_streak = 0
         coach_used = False
         hint = ""
+        run_id = self._current_run_id(task_id)
         for step_no in range(1, mission.step_budget + 1):
             hint_note = f"\n教练提示（一次性）：{hint}" if hint else ""
             hint = ""  # 提案吸收一次即用掉（同主循环口径）
@@ -111,6 +114,7 @@ class Worker:
                 receipt = self._dispatcher.dispatch(
                     call.name, {k: str(v) for k, v in call.args.items()}
                 )
+                self._record_ticket(task_id, run_id, step_no, call.name, call.args, receipt)
                 self._audit_hitl(task_id, receipt)
                 findings_count += self._claim_finding(task_id, call.name, receipt)
                 # 失败连败计（denied 不算工具失败：闸门没放行，工具没执行）。
@@ -250,6 +254,48 @@ class Worker:
                 self._actor,
                 f"HIGH 审批发起（批准 {receipt.hitl_note}）: {receipt.tool_name}",
             )
+
+    def _current_run_id(self, task_id: str) -> str | None:
+        """worker 工具动作归属的 run：最近一次 run（无则小票记不上，落审计）。
+
+        为什么让 worker 自己查：派单只带 task 锚；run 是"本次执行"的容器，
+        用最近 run 与任务板 task_resolver 同口径，不额外引入板级参数。
+        """
+        try:
+            return ledger.latest_run(self._conn, task_id).id
+        except LedgerError:
+            ledger.audit(self._conn, task_id, self._actor, "工单缺 run 锚点：本轮工具动作不落小票")
+            return None
+
+    def _record_ticket(
+        self,
+        task_id: str,
+        run_id: str | None,
+        step_no: int,
+        tool_name: str,
+        args: Mapping[str, Any],
+        receipt: ToolOutput,
+    ) -> None:
+        """worker 的工具动作落小票（M5-25）：证据链不能在派单侧断掉。
+
+        没有小票 → R1 找不到"票面证据源"，worker 的 finding 只能靠 R2/R3/R4
+        验真。step_id 用 ``worker-<actor>-<step>`` 命名（worker 的步不进主循环
+        水位线，也不写 steps 表；出场①的孤儿检查据此排除）。
+        """
+        if run_id is None:
+            return
+        ledger.append_ticket(
+            self._conn,
+            task_id,
+            run_id,
+            f"worker-{self._actor}-{step_no}",
+            tool_name,
+            {str(k): str(v) for k, v in args.items()},
+            receipt.exit_code,
+            receipt.summary,
+            receipt.raw_ref,
+            bus=None,
+        )
 
     def _claim_finding(self, task_id: str, tool_name: str, receipt: ToolOutput) -> int:
         """declare_finding 受理即直写 claimed（黑板单向门）；其余工具一律不写账。"""

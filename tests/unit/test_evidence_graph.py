@@ -163,3 +163,22 @@ def test_voided_step_blocks_exit() -> None:
     verdict = run_checklist(conn, task_id)
     assert verdict.passed is False
     assert any("步骤未全部完成" in f for f in verdict.failures)
+
+
+def test_worker_tickets_are_not_orphans() -> None:
+    """worker 小票无主循环步（step_id 带 worker- 前缀），出场①不得误判孤儿。"""
+    conn = migrate_store.connect(":memory:")
+    task_id, run = _task_with_run(conn)
+    ledger.append_ticket(
+        conn,
+        task_id,
+        run.id,
+        "worker-workerA-1",
+        "nmap",
+        {"target": "10.0.0.5"},
+        0,
+        "worker 摸扫",
+        "raw/w.txt",
+    )
+    verdict = run_checklist(conn, task_id)
+    assert verdict.passed is True

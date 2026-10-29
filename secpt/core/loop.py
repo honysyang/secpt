@@ -32,6 +32,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Protocol
 
 import structlog
@@ -108,6 +109,13 @@ JudgeSweep = Callable[[sqlite3.Connection, str], list[FindingRow]]
 # M5-5 规划对象：主 LLM 的 plan_updates 落 plans 表（store/plan），注意力包的
 # 规划段每步从账本现渲染；教练提案吸收期额外挂一行提示（下一步即还原）。
 _NO_HINT = ""
+
+# M5-25 证据回读：每步最多带 3 张小票的 raw 摘录（每张读 600 字、压成 240 字），
+# 以及最近 5 条 findings 概览——让模型看见证据本身，而不是只看一行 summary。
+_DIGEST_TICKETS = 3
+_DIGEST_FINDINGS = 5
+_DIGEST_READ_CHARS = 600
+_DIGEST_CHARS = 240
 
 
 class StepOutcome(BaseModel):
@@ -390,6 +398,9 @@ class PentestLoop:
             knowledge=knowledge,
             # M5-16 可派角色：主 LLM 读角色库（设计文档 L8），persona 才有取值域。
             roles=role_catalog(),
+            # M5-25 证据回读：raw 摘录 + findings 概览（感知带宽不再只有一行摘要）。
+            evidence_digest=self._evidence_digest(task.id),
+            findings_digest=self._findings_digest(task.id),
         )
         try:
             output = self._llm.step(pkg)
@@ -749,6 +760,31 @@ class PentestLoop:
             environment=self._experience_env,
             entries=len(rows),
         )
+
+    def _evidence_digest(self, task_id: str) -> list[str]:
+        """最近小票的 raw 关键行（M5-25）：模型要看到证据，而不是只看到摘要。
+
+        只读前 ``_DIGEST_READ_CHARS`` 字符并压成一行——够判断 banner/响应特征，
+        又不至于把注意力包撑爆；文件缺失/不可读就跳过（证据链本身由 R0 兜底）。
+        """
+        lines: list[str] = []
+        for ticket in ledger.recent_tickets(self._conn, task_id, limit=_DIGEST_TICKETS):
+            if not ticket.raw_ref:
+                continue
+            try:
+                text = Path(ticket.raw_ref).read_text(encoding="utf-8", errors="replace")[
+                    :_DIGEST_READ_CHARS
+                ]
+            except OSError:
+                continue
+            snippet = " ".join(text.split())[:_DIGEST_CHARS]
+            lines.append(f"[{ticket.tool_name}] {snippet}")
+        return lines
+
+    def _findings_digest(self, task_id: str) -> list[str]:
+        """最近 findings 概览（标题 + 判态/方法）：模型要看得到自己的 claim 状态。"""
+        rows = ledger.task_findings(self._conn, task_id)[-_DIGEST_FINDINGS:]
+        return [f"{row.title} [{row.verify_state}/{row.method or '-'}]" for row in rows]
 
     def _goal_projection(self, task: TaskRow, run: RunRow) -> Goal:
         """从账本还原进场三问（不依赖任何内存态，resume 路径同一个函数）。"""

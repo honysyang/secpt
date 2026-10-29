@@ -609,12 +609,36 @@ def _read_stdin_line() -> str:
         return ""
 
 
+def _posture_note() -> str:
+    """一行安全态势（M5-25）：默认关的开关必须让人看得见。
+
+    裁判/验收/探针/隔离/Guard 里有四项缺省是"关"，缺省只在 audit 留痕，用户
+    在终端上看不到——这里在闭环第一屏就把真实态势摊开。
+    """
+    prof = load_profile(_profile_path())
+    probe_cfg = load_probe_config(_profile_path())
+    iso = load_isolation_config(_profile_path())
+    guard = load_guard_config(_profile_path())
+    parts = [
+        f"裁判={'开' if prof.enabled else '关'}",
+        f"验收={len(prof.acceptance)} 条" if prof.acceptance else "验收=未配置",
+        f"探针={'开' if probe_cfg.enabled else '关'}",
+        f"隔离={iso.isolation}",
+        f"Guard={'开' if guard is not None else '关（闸常开）'}",
+    ]
+    note = " · ".join(parts)
+    if not prof.enabled:
+        note += " · 注意：裁判关闭时写操作 claim 无法验真，出场会卡在 claimed 悬置"
+    return note
+
+
 def _run_pentest(goal: str) -> int:
     """渗透闭环主体：进场三问 → 主循环 → 终场报告（原 _cmd_run 逻辑）。"""
     conn = _open_db()
     board: MissionBoard | None = None
     provider: LlmProvider | None = None
     print(f"【任务】{goal}")  # 本轮在干什么：CLI 第一行固定可见
+    print(f"【安全态势】{_posture_note()}")  # M5-25：默认关的开关摊开给人看
     try:
         provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）

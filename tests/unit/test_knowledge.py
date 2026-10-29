@@ -144,3 +144,48 @@ def test_loop_pack_carries_role_catalog() -> None:
     pack = fake.calls[1][1].content
     assert "## 可派角色（agent_run 的 persona 取 id）" in pack
     assert "recon（侦察员）" in pack
+
+
+def test_pack_carries_evidence_and_findings_digest(tmp_path) -> None:
+    """M5-25：模型要看得到 raw 证据本身与自己的 findings 判态，而不只是摘要。"""
+    from secpt.tools.adapters import DeclareFindingTool
+
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("22/tcp open  ssh  OpenSSH 9.2\n", encoding="utf-8")
+    goal = json.dumps(
+        {"target": "10.0.0.5", "objective": "端口摸底", "success_criteria": "拿到 banner"},
+        ensure_ascii=False,
+    )
+    declare = json.dumps(
+        {
+            "thought": "申报",
+            "tool_calls": [
+                {
+                    "name": "declare_finding",
+                    "args": {
+                        "title": "22 开放",
+                        "detail": "banner 见 raw",
+                        "evidence_ref": str(evidence),
+                    },
+                }
+            ],
+            "done": False,
+        },
+        ensure_ascii=False,
+    )
+    noop = json.dumps({"thought": "继续", "tool_calls": [], "done": False})
+    fake = FakeLLM([goal, declare, noop])
+    conn = migrate_store.connect(":memory:")
+    loop = PentestLoop(
+        conn,
+        MainLlm(LlmClient(fake)),
+        ToolRegistry([DeclareFindingTool()]),
+        exit_checker=ExitChecklist(),
+    )
+    loop.run("对 10.0.0.5 做端口摸底", max_steps=2)
+
+    pack = fake.calls[2][1].content  # 第二步的注意力包
+    assert "## 证据摘录（raw 前几行，事实本身）" in pack
+    assert "22/tcp open ssh OpenSSH 9.2" in pack  # 空白已折叠，证据原文仍在
+    assert "## 已申报 findings" in pack
+    assert "22 开放 [claimed/-]" in pack

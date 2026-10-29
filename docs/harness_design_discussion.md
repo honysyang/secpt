@@ -2733,3 +2733,45 @@ test_main auto-chat 用例改为双 provider 注入；test_assets 的出厂 prom
 
 **测试面**：翻新 5 个断言文件（cli_view 两例、main 两例、openai provider 一例、
 plan_watch 一例），全库 536 例仍全绿；README 增"CLI 输出约定"表。ruff 全绿。
+
+## §96 M5-25 三个接缝补焊（R1 判据 / worker 小票 / 证据回读）+ 默认态势可见
+
+上一轮的评审结论：不是缺模块，而是三条链在接缝上没焊死。本卡逐条处理。
+
+**① R1 改"稳定行比对"（judge/r123）**。原判据是两份 raw 文件逐字节相等，但
+nmap 输出含启动时间、`scanned in N seconds`、行内 `(0.0012s latency)` 与 argv
+封面——真实场景两次运行必然不同，R1 恒"不匹配"甚至降票。改为：
+`stable_lines()` 折叠空白 + 小写 + 剔除易变行（日期时间/nmap 启动与结束行/耗时/
+argv 封面），行内延迟注记只剥离不丢行；两份稳定行列表相等才 verified(rerun)。
+剔除后原文为空 → 悬置（无法比对，不虚绿）。
+
+**② worker 落小票（llms/worker）**。worker 此前只写 finding，不写 ticket → R1
+找不到"票面证据源"，派单侧的证据链是断的。现在每次工具调用都
+`ledger.append_ticket`，`step_id=worker-<actor>-<n>`（worker 的步不进主循环
+水位线、不写 steps 表）；出场①的孤儿检查显式排除该前缀。run 锚取最近 run，
+取不到则 audit 一行并跳过（不假写）。
+
+**③ 感知带宽：raw 摘录 + findings 概览（core/loop + store/attention）**。
+注意力包新增两节：「证据摘录（raw 前几行，事实本身）」取最近 3 张小票、每张读
+600 字压成 240 字；「已申报 findings」取最近 5 条，带 `[state/method]`。模型
+第一次能看见 banner/响应片段与自己的判态，而不是只有一行 summary。
+
+**④ 默认关的开关可见化（main._posture_note）**。闭环第一屏打印
+`【安全态势】裁判=开 · 验收=未配置 · 探针=关 · 隔离=shell · Guard=关（闸常开）`；
+裁判关闭时追加"写操作 claim 无法验真，出场会卡在 claimed 悬置"的提示。
+
+**⑤ 出场诊断升级（finalize/exit_checklist）**。claimed 悬置的失败文案补上
+"若无 R4/探针/只读重放，写操作 claim 无法验真——检查 profile 的 ground_truth
+或开启 [probe]"，让人知道该去开哪个开关，而不是只看到一个计数。
+
+**实测**：mock 闭环首屏可见 `【安全态势】裁判=开 · 验收=未配置 · 探针=关 ·
+隔离=shell · Guard=关（闸常开）`；R1 对"仅时间戳不同"的重放判 verified。
+
+**测试面（+9 例，全库 545 例）**：test_r123 4（时间戳免疫 / argv 免疫 / 真实
+差异仍悬置 / stable_lines 归一）；test_worker 1（工具调用落小票，step_id 前缀）；
+test_evidence_graph 1（worker 小票不算孤儿）；test_knowledge 1（包内证据摘录 +
+findings 概览）；test_main 2（态势行存在 / 裁判关闭时告警）。ruff 全绿。
+
+**遗留**：① R1 仍只对"只读且产物可稳定比较"的工具成立（交互式/随机化输出会
+一直悬置）；② 证据摘录只读文件头 600 字，大 dump 的尾部仍需专门的 read/grep
+工具；③ worker 步没有独立 steps 行，"worker 第几步"只能从 step_id 读。

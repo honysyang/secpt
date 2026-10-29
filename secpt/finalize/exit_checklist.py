@@ -55,7 +55,8 @@ def run_checklist(
     orphans = conn.execute(
         "SELECT t.summary FROM tickets t"
         " LEFT JOIN steps s ON s.id = t.step_id"
-        " WHERE t.task_id = ? AND s.id IS NULL",
+        " WHERE t.task_id = ? AND s.id IS NULL"
+        " AND t.step_id NOT LIKE 'worker-%'",  # worker 小票无主循环步（M5-25）
         (task_id,),
     ).fetchall()
     if orphans:
@@ -71,7 +72,11 @@ def run_checklist(
         (task_id,),
     ).fetchone()[0]
     if pending:
-        failures.append(f"claimed 悬置 {pending} 条未收口（需 verified/rejected 终态）")
+        failures.append(
+            f"claimed 悬置 {pending} 条未收口（需 verified/rejected 终态；"
+            "若无 R4/探针/只读重放，写操作 claim 无法验真——检查 profile 的 "
+            "ground_truth 或开启 [probe]）"
+        )
 
     # 条 3：进场三问齐全——goal + objective/success_criteria 从账本还原。
     task = ledger.get_task(conn, task_id)
