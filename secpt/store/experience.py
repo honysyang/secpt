@@ -201,6 +201,10 @@ def fetch_replay(
     三态规则在 SQL 一层收死：verified=凭据进包 / claimed=线索不进包 / rejected=
     不进包——M3-4 拍板④兑现 §63：判票接线后，回放位要的是"验证过的真本事"，
     而不是待验证的直觉（attention 投影层还会再挡一次，双闸互为备份）。
+
+    M5 拍板 A（§86）：这是**有意收窄**，与需求文档"claimed 只当线索进包"不同——
+    未判真的线索进包会让注意力被猜测污染，且"连续 0 命中降级"缺少曝光计数无法
+    可复算。若将来要放宽，先补曝光计数列再改这里，别绕过本函数的 SQL 闸门。
     """
     rows = conn.execute(
         "SELECT * FROM experience WHERE environment = ? AND verify_state = 'verified'"

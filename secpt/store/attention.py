@@ -80,6 +80,10 @@ def _project_experience(rows: Sequence[ExperienceRow]) -> list[str]:
     - verified：正典进包，命令原样带出（回放即复用）；
     - claimed：仅当线索，命令藏住（裁判未过不许给命令，防半真经验误导）；
     - rejected：不进包（fetch_replay SQL 层已排，这里兜底防独立失效）。
+
+    M5 拍板 A（§86）：``fetch_replay`` 只供 verified，所以 claimed 分支在当前
+    装配下不会命中——保留它是防御位（换取数口径时仍遵守"线索藏命令"），
+    不据此认为 claimed 会进包。
     """
     lines: list[str] = []
     for row in rows:
