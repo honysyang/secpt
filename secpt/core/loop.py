@@ -418,6 +418,14 @@ class PentestLoop:
             # M5-5 规划对象：本步 plan_updates 与小票/水位线同事务落账——规划是
             # 账本事实（不是内存变量），resume 后自然延续，steps.plan_refs 可回溯。
             plan_rows = plan.add(self._conn, task.id, step_no, output.plan_updates)
+            # M5-9 规划收口：plan_done/plan_cancel 与新增同事务——"这条做完了"与
+            # "这步的账"同生共死。解析不到的引用不猜，提交后落审计点名。
+            plan_done_rows, unresolved_done = plan.complete(
+                self._conn, task.id, output.plan_done, status="done"
+            )
+            plan_cancel_rows, unresolved_cancel = plan.complete(
+                self._conn, task.id, output.plan_cancel, status="cancelled"
+            )
             step = ledger.record_step(
                 self._conn,
                 task.id,
@@ -511,14 +519,27 @@ class PentestLoop:
             if counter.observe(ok=receipt.exit_code == 0):
                 ring = True
                 break  # 同 M1 语义：铃响本轮就算，余下回执不再收数
+        # M5-9 规划引用未匹配（模型写了不存在的 id/原文）：不静默——账上点名，
+        # 让"标了但没生效"可证（状态一条都没动）。
+        unresolved = unresolved_done + unresolved_cancel
+        if unresolved:
+            self._audit(
+                task.id,
+                f"规划引用未匹配：{unresolved}（既非 active 规划原文也非唯一短 id，未改状态）",
+            )
         # M5 重复抑制（设计文档 L84）：连续提出同一段规划 = 原地打转的早期信号，
         # 与工具连败共用一条拉铃通道（救场 → 换规划 → reset）。空 updates 不算重复。
         if counter.observe_plan(output.plan_updates):
             ring = True
+        plan_trace = f", plan=+{len(plan_rows)}"
+        if plan_done_rows:
+            plan_trace += f", plan_done=+{len(plan_done_rows)}"
+        if plan_cancel_rows:
+            plan_trace += f", plan_cancel=+{len(plan_cancel_rows)}"
         self._audit(
             task.id,
             f"step {step_no}: {output.thought}, tool_calls={len(tickets)}"
-            f", graph=+1n+{edge_writes}e, plan=+{len(plan_rows)}",
+            f", graph=+1n+{edge_writes}e{plan_trace}",
         )
         outcome = StepOutcome(
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)

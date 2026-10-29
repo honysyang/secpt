@@ -101,9 +101,15 @@ def _goal_json() -> str:
     )
 
 
-def _step_json(thought: str, *, done: bool = False) -> str:
+def _step_json(thought: str, *, done: bool = False, plan_done: list[str] | None = None) -> str:
     return json.dumps(
-        {"thought": thought, "plan_updates": [], "tool_calls": [], "done": done},
+        {
+            "thought": thought,
+            "plan_updates": [],
+            "plan_done": plan_done or [],
+            "tool_calls": [],
+            "done": done,
+        },
         ensure_ascii=False,
     )
 
@@ -140,7 +146,7 @@ def test_review_fires_on_beat_and_is_absorbed_next_step() -> None:
             _step_json("扫 2"),
             _step_json("扫 3"),
             Proposal(idea="换打 443", reason="双图显示只有 22"),
-            _step_json("听教练的，换打 443", done=True),
+            _step_json("听教练的，换打 443", done=True, plan_done=["换打 443"]),
         ]
     )
     loop, bus, events, conn = _loop(fake, every=3)
@@ -164,7 +170,7 @@ def test_review_limit_stops_llm_and_notes_once() -> None:
             _step_json("扫 1"),
             Proposal(idea="换 443", reason="r1"),
             _step_json("扫 2"),
-            _step_json("收工", done=True),
+            _step_json("收工", done=True, plan_done=["换 443"]),
         ]
     )
     loop, _bus, _events, conn = _loop(fake, every=1, limit=1)
@@ -185,7 +191,7 @@ def test_blank_review_consumes_no_quota() -> None:
             Proposal(idea="  ", reason="现状够用"),
             _step_json("扫 2"),
             Proposal(idea="补打 8080", reason="发现新线索"),
-            _step_json("收工", done=True),
+            _step_json("收工", done=True, plan_done=["补打 8080"]),
         ]
     )
     loop, _bus, _events, conn = _loop(fake, every=1, limit=1)

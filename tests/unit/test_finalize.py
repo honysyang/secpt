@@ -17,7 +17,7 @@ from secpt.errors import LedgerError, LlmError
 from secpt.finalize import exit_checklist, reporter
 from secpt.llms.client import LlmClient
 from secpt.llms.fake import FakeLLM
-from secpt.store import ledger, migrate
+from secpt.store import ledger, migrate, plan
 
 
 @pytest.fixture()
@@ -128,6 +128,22 @@ def test_no_acceptance_keeps_old_semantics(conn: sqlite3.Connection) -> None:
     """未配验收 = 不判（mock/探索型任务不因"没交付物"虚红）。"""
     task = _task_with_run(conn)
     assert exit_checklist.ExitChecklist().check(conn, task.id).passed is True
+
+
+def test_checklist_fails_on_open_plan(conn: sqlite3.Connection) -> None:
+    """规划未收口 = 不能出场（M5：提过的规划必须标完成或废弃）。"""
+    task = _task_with_run(conn)
+    plan.add(conn, task.id, 1, ["A：端口摸底"])
+    verdict = exit_checklist.run_checklist(conn, task.id)
+    assert verdict.passed is False
+    assert any("规划未收口" in f for f in verdict.failures)
+
+
+def test_checklist_passes_after_plan_closed(conn: sqlite3.Connection) -> None:
+    task = _task_with_run(conn)
+    plan.add(conn, task.id, 1, ["A：端口摸底"])
+    plan.complete(conn, task.id, ["A：端口摸底"])
+    assert exit_checklist.run_checklist(conn, task.id).passed is True
 
 
 def test_unmet_acceptance_bounces_done_until_wall() -> None:

@@ -7,8 +7,10 @@
 - 本模块把规划变成 task 级的账本事实（baseline 的 plans 表早有此位，M5 才接上）：
   每条规划一行，version 是"规划修订号"（同一批新增共享一号），供注意力包与教练
   看到同一份规划文本。
-- 写入口唯一：:func:`add` 是唯一 INSERT；读路径纯 SELECT。``status`` 字段留给后续
-  "规划条目完成判定"（与出场清单③同源），本卡只推进 active。
+- 写入口唯一：:func:`add` / :func:`complete` 是仅有的两个写口；读路径纯 SELECT。
+  status 推进（M5-9）：主 LLM 用 ``plan_done`` / ``plan_cancel`` 声明收口，本模块
+  负责"引用解析 + 状态迁移"——引用既认规划短 id（注意力包渲染 ``[id=xxxxxxxx]``），
+  也认原文（模型复述原句同样有效），歧义前缀不猜（宁可报未匹配也不误收口）。
 
 去重口径：内容（strip 后）相同且仍 active 的规划不重复落行——模型复述同一规划
 不该把账本撑成流水账；已 done/cancelled 的旧条目允许同名重开。
@@ -29,10 +31,13 @@ from secpt.store.ledger import _maybe_commit
 # 注意力包最多展示的规划条数（防规划无限增补把包撑爆）。
 _RENDER_LIMIT = 12
 _EMPTY_PLAN = "（暂无规划：主 LLM 尚未通过 plan_updates 提出）"
+_PLAN_STATUSES = frozenset({"done", "cancelled"})
+# 短 id 前缀匹配的最小长度：太短的串会撞上多条规划，宁可不匹配。
+_MIN_ID_PREFIX = 6
 
 
 class PlanRow(BaseModel):
-    """plans 行强类型视图（status 只读展示，本卡不推进状态）。"""
+    """plans 行强类型视图（status：active/done/cancelled/failed）。"""
 
     id: str
     task_id: str
@@ -132,17 +137,75 @@ def add(
 
 
 def render(conn: sqlite3.Connection, task_id: str) -> str:
-    """渲染进注意力包的规划段：修订号 + 条数 + 逐条（含提出步号）。纯读。"""
+    """渲染进注意力包的规划段：修订号 + 条数 + 逐条（短 id + 提出步号 + 原文）。"""
     rows = active(conn, task_id)
     if not rows:
         return _EMPTY_PLAN
     version = max(row.version for row in rows)
     shown = rows[-_RENDER_LIMIT:]
     lines = [f"规划 v{version}（active {len(rows)} 条）"]
-    lines += [f"- [step {row.step_no}] {row.content}" for row in shown]
+    lines += [f"- [id={row.id[:8]} · step {row.step_no}] {row.content}" for row in shown]
     if len(rows) > len(shown):
         lines.append(f"（仅显示最近 {len(shown)} 条，更早条目已折叠）")
     return "\n".join(lines)
 
 
-__all__ = ["PlanRow", "active", "add", "latest_id", "render"]
+def complete(
+    conn: sqlite3.Connection,
+    task_id: str,
+    refs: Sequence[str],
+    *,
+    status: str = "done",
+) -> tuple[list[PlanRow], list[str]]:
+    """把 refs 指向的 active 规划推进到终态（done/cancelled）。
+
+    引用解析顺序：原文精确匹配 → 短 id 前缀（≥6 字符且唯一）。解析不到的一律
+    进 unresolved 由调用方落审计——**绝不猜**：把 A 标成完成而实际是 B，比漏标
+    更危险。
+
+    Args:
+        status: ``"done"``（完成）或 ``"cancelled"``（放弃）；其余 ValueError。
+
+    Returns:
+        (被推进的行, 解析失败的引用原文)。
+    """
+    if status not in _PLAN_STATUSES:
+        raise ValueError(f"非法规划终态 {status!r}（可选：{sorted(_PLAN_STATUSES)}）")
+    rows = active(conn, task_id)
+    by_content = {row.content: row for row in rows}
+    now = int(time.time())
+    completed: list[PlanRow] = []
+    unresolved: list[str] = []
+    seen: set[str] = set()
+    try:
+        for raw in refs:
+            ref = str(raw).strip()
+            if not ref or ref in seen:
+                continue
+            seen.add(ref)
+            target = by_content.get(ref) or _by_id_prefix(rows, ref)
+            if target is None:
+                unresolved.append(ref)
+                continue
+            conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, target.id),
+            )
+            completed.append(target.model_copy(update={"status": status, "updated_at": now}))
+        _maybe_commit(conn)
+    except sqlite3.Error as exc:
+        raise LedgerError(
+            "plans 状态推进失败", context={"task_id": task_id, "status": status}
+        ) from exc
+    return completed, unresolved
+
+
+def _by_id_prefix(rows: Sequence[PlanRow], ref: str) -> PlanRow | None:
+    """短 id 前缀解析：唯一命中才认，歧义/过短一律 None（不猜）。"""
+    if len(ref) < _MIN_ID_PREFIX:
+        return None
+    hits = [row for row in rows if row.id.startswith(ref)]
+    return hits[0] if len(hits) == 1 else None
+
+
+__all__ = ["PlanRow", "active", "add", "complete", "latest_id", "render"]

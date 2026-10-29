@@ -17,6 +17,7 @@ import pytest
 
 from secpt.core.loop import PentestLoop
 from secpt.core.plan_watch import PlanWatcher
+from secpt.errors import SecptError
 from secpt.finalize.exit_checklist import ExitChecklist
 from secpt.llms.client import LlmClient
 from secpt.llms.coach import Coach, Proposal
@@ -46,7 +47,7 @@ class TestPlanStore:
         assert {row.version for row in rows} == {1}
         text = plan.render(conn, task_id)
         assert "规划 v1（active 2 条）" in text
-        assert "- [step 1] A：端口摸底" in text
+        assert "- [id=" in text and "· step 1] A：端口摸底" in text
 
     def test_duplicate_content_is_not_appended(self, conn: sqlite3.Connection) -> None:
         task_id = ledger.start_task(conn, "去重演示", goal="g").id
@@ -67,6 +68,37 @@ class TestPlanStore:
         assert plan.add(conn, task_id, 1, ["   "]) == []
         assert plan.render(conn, task_id).startswith("（暂无规划")
 
+    def test_complete_by_content_and_cancel(self, conn: sqlite3.Connection) -> None:
+        task_id = ledger.start_task(conn, "收口演示", goal="g").id
+        plan.add(conn, task_id, 1, ["A：摸底", "B：初筛"])
+        done, unresolved = plan.complete(conn, task_id, ["A：摸底"])
+        assert [row.status for row in done] == ["done"] and unresolved == []
+        cancelled, unresolved = plan.complete(conn, task_id, ["B：初筛"], status="cancelled")
+        assert [row.status for row in cancelled] == ["cancelled"] and unresolved == []
+        assert plan.active(conn, task_id) == []
+        assert "暂无规划" in plan.render(conn, task_id)
+
+    def test_complete_by_unique_id_prefix(self, conn: sqlite3.Connection) -> None:
+        task_id = ledger.start_task(conn, "前缀演示", goal="g").id
+        row = plan.add(conn, task_id, 1, ["A：摸底"])[0]
+        done, unresolved = plan.complete(conn, task_id, [row.id[:8]])
+        assert [item.id for item in done] == [row.id] and unresolved == []
+        # 已达到终态：重复收口不算命中（只认 active），如实报未匹配。
+        assert plan.complete(conn, task_id, [row.id[:8]]) == ([], [row.id[:8]])
+
+    def test_complete_never_guesses(self, conn: sqlite3.Connection) -> None:
+        """歧义/过短/不存在的引用一律进 unresolved，绝不误收口。"""
+        task_id = ledger.start_task(conn, "不猜演示", goal="g").id
+        plan.add(conn, task_id, 1, ["A：摸底", "B：初筛"])
+        done, unresolved = plan.complete(conn, task_id, ["幽灵规划", "abc"])
+        assert done == [] and unresolved == ["幽灵规划", "abc"]
+        assert len(plan.active(conn, task_id)) == 2
+
+    def test_complete_rejects_bad_status(self, conn: sqlite3.Connection) -> None:
+        task_id = ledger.start_task(conn, "坏状态", goal="g").id
+        with pytest.raises(ValueError):
+            plan.complete(conn, task_id, ["x"], status="failed")
+
 
 # ---------- 主循环接线 ----------------------------------------------------------
 
@@ -77,11 +109,20 @@ def _goal_json() -> str:
     )
 
 
-def _step_json(thought: str, *, plan_updates: list[str] | None = None, done: bool = False) -> str:
+def _step_json(
+    thought: str,
+    *,
+    plan_updates: list[str] | None = None,
+    plan_done: list[str] | None = None,
+    plan_cancel: list[str] | None = None,
+    done: bool = False,
+) -> str:
     return json.dumps(
         {
             "thought": thought,
             "plan_updates": plan_updates or [],
+            "plan_done": plan_done or [],
+            "plan_cancel": plan_cancel or [],
             "tool_calls": [],
             "done": done,
         },
@@ -117,20 +158,24 @@ def test_plan_updates_land_in_ledger_and_next_pack() -> None:
         [
             _goal_json(),
             _step_json("先摸端口", plan_updates=["A：端口摸底", "B：web 初筛"]),
-            _step_json("收工", done=True),
+            _step_json("收工", plan_done=["A：端口摸底", "B：web 初筛"], done=True),
         ]
     )
     loop, _bus, _events, conn = _loop(fake)
     loop.run("规划落地演示 10.0.0.5")
 
     task = ledger.latest_task(conn)
-    rows = plan.active(conn, task.id)
-    assert [row.content for row in rows] == ["A：端口摸底", "B：web 初筛"]
-    assert [row.step_no for row in rows] == [1, 1]
+    rows = conn.execute(
+        "SELECT content, step_no, status FROM plans WHERE task_id = ? ORDER BY rowid",
+        (task.id,),
+    ).fetchall()
+    assert [row["content"] for row in rows] == ["A：端口摸底", "B：web 初筛"]
+    assert {row["status"] for row in rows} == {"done"}  # 收工步已一并收口
+    assert [row["step_no"] for row in rows] == [1, 1]
 
     second_pack = fake.calls[2][1].content
     assert "规划 v1（active 2 条）" in second_pack
-    assert "- [step 1] A：端口摸底" in second_pack  # 模型下一步看到的是真实规划
+    assert "· step 1] A：端口摸底" in second_pack  # 模型下一步看到的是真实规划
 
     step_rows = conn.execute(
         "SELECT plan_refs FROM steps WHERE task_id = ? ORDER BY step_no", (task.id,)
@@ -150,10 +195,10 @@ def test_plan_survives_resume() -> None:
     plan.add(conn, task.id, 1, ["A：端口摸底"])
     ledger.mark_step(conn, run.id, 1)
 
-    fake = FakeLLM([_step_json("续走一步", done=True)])
+    fake = FakeLLM([_step_json("续走一步", plan_done=["A：端口摸底"], done=True)])
     loop, _bus, _events, _conn = _loop(fake, conn=conn)
     loop.resume(task.id, max_steps=2)
-    assert "- [step 1] A：端口摸底" in fake.calls[0][1].content
+    assert "· step 1] A：端口摸底" in fake.calls[0][1].content
     assert ledger.latest_task(conn).exit_kind == "normal"
 
 
@@ -164,17 +209,72 @@ def test_coach_proposal_becomes_plan_revision() -> None:
             _goal_json(),
             _step_json("先摸端口", plan_updates=["A：端口摸底"]),
             Proposal(idea="B：换打 443", reason="22 没动静"),
-            _step_json("按教练推进", done=True),
+            _step_json("按教练推进", plan_done=["A：端口摸底", "B：换打 443"], done=True),
         ]
     )
     loop, _bus, _events, conn = _loop(fake, watcher=PlanWatcher(every_steps=1))
     loop.run("教练规划演示 10.0.0.5")
 
     task_id = ledger.latest_task(conn).id
-    rows = plan.active(conn, task_id)
+    rows = plan_rows(conn, task_id)
     contents = [row.content for row in rows]
     assert "B：换打 443" in contents
     revision = next(row for row in rows if row.content == "B：换打 443")
     first = next(row for row in rows if row.content == "A：端口摸底")
     assert revision.version == first.version + 1
     assert revision.parent_id is not None
+
+
+def plan_rows(conn: sqlite3.Connection, task_id: str) -> list[plan.PlanRow]:
+    """全量规划行（含终态）：收口后 active 为空，断言要看历史全貌。"""
+    rows = conn.execute(
+        "SELECT * FROM plans WHERE task_id = ? ORDER BY rowid", (task_id,)
+    ).fetchall()
+    return [plan.PlanRow.model_validate(dict(row)) for row in rows]
+
+
+def test_open_plan_blocks_exit_until_closed() -> None:
+    """规划未收口：done 连败 3 轮按 E_WALL 走异常出口（"规划 A/B/C"不许只说不收）。"""
+    fake = FakeLLM(
+        [
+            _goal_json(),
+            _step_json("先摸端口", plan_updates=["A：端口摸底"]),
+            _step_json("收工", done=True),
+            _step_json("收工", done=True),
+            _step_json("收工", done=True),
+        ]
+    )
+    loop, _bus, _events, conn = _loop(fake)
+    with pytest.raises(SecptError) as info:
+        loop.run("规划未收口演示 10.0.0.5")
+    assert info.value.code == "E_WALL"
+    assert ledger.latest_task(conn).exit_kind == "stalled"
+
+
+def test_unresolved_plan_ref_is_audited() -> None:
+    """写了不存在的规划引用：不猜、不改状态，但必须落审计点名。"""
+    fake = FakeLLM(
+        [
+            _goal_json(),
+            _step_json("先摸端口", plan_updates=["A：端口摸底"]),
+            _step_json(
+                "收工",
+                plan_done=["A：端口摸底", "幽灵规划"],
+                done=True,
+            ),
+        ]
+    )
+    loop, _bus, _events, conn = _loop(fake)
+    loop.run("未匹配演示 10.0.0.5")
+
+    task_id = ledger.latest_task(conn).id
+    assert ledger.latest_task(conn).exit_kind == "normal"
+    audits = [
+        r["what"] for r in conn.execute("SELECT what FROM audit_log WHERE task_id=?", (task_id,))
+    ]
+    assert any("规划引用未匹配" in what and "幽灵规划" in what for what in audits)
+    statuses = [
+        row["status"]
+        for row in conn.execute("SELECT status FROM plans WHERE task_id=?", (task_id,))
+    ]
+    assert statuses == ["done"]

@@ -58,10 +58,17 @@ class Goal(BaseModel):
 
 
 class StepOutput(BaseModel):
-    """主 LLM·一步的结构化输出（WF2）：thought + plan_updates + tool_calls(≤4) + done。"""
+    """主 LLM·一步的结构化输出（WF2）：thought + 规划增补/收口 + tool_calls(≤4) + done。
+
+    ``plan_done`` / ``plan_cancel``（M5）：对已有规划条目的收口声明——值是规划条目的
+    短 id（注意力包里 ``[id=xxxxxxxx]``）或原文，store 侧两种都认。上限 8 条/步：
+    规划收口是低频动作，给个上界防模型刷屏。它们都是可选字段，老脚本不受影响。
+    """
 
     thought: str
     plan_updates: list[str] = Field(default_factory=list)
+    plan_done: list[str] = Field(default_factory=list, max_length=8)
+    plan_cancel: list[str] = Field(default_factory=list, max_length=8)
     tool_calls: list[ToolCall] = Field(default_factory=list, max_length=4)
     done: bool = False
 

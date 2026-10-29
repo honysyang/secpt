@@ -116,9 +116,21 @@ def _goal_json() -> str:
     )
 
 
-def _step_json(thought: str, *, plans: list[str] | None = None, done: bool = False) -> str:
+def _step_json(
+    thought: str,
+    *,
+    plans: list[str] | None = None,
+    plan_done: list[str] | None = None,
+    done: bool = False,
+) -> str:
     return json.dumps(
-        {"thought": thought, "plan_updates": plans or [], "tool_calls": [], "done": done},
+        {
+            "thought": thought,
+            "plan_updates": plans or [],
+            "plan_done": plan_done or [],
+            "tool_calls": [],
+            "done": done,
+        },
         ensure_ascii=False,
     )
 
@@ -155,7 +167,7 @@ def test_changing_plan_does_not_ring() -> None:
             _goal_json(),
             _step_json("第一步", plans=["A：摸底"]),
             _step_json("第二步", plans=["B：初筛"]),
-            _step_json("收工", done=True),
+            _step_json("收工", plan_done=["A：摸底", "B：初筛"], done=True),
         ]
     )
     loop, conn = _loop(fake)

@@ -2293,3 +2293,38 @@ test_main +1（max_steps=1 真掐步数线）。CLI mock 演示冒烟：worker �
 完全相同的 plan_updates"，语义相似（换个说法复述）不判——那需要 LLM，违背失速计
 零成本口径；③ 角色库只有 recon 一个出厂语料，其余角色待填；④ max_steps 配置在
 run/resume 生效，尚未做"超限后半场报告里的预算余量"展示。
+
+## §80 M5-9 规划收口（plans.status 推进 + 出场第 5 验）
+
+§79 遗留①收口：规划"提了就没下文"的问题。
+
+**契约变更（向后兼容）**：`StepOutput` 增两个可选字段
+`plan_done: list[str]`（完成）与 `plan_cancel: list[str]`（废弃），各限 8 条/步；
+值为规划条目的短 id 或原文。main.system 资产补上字段说明与"收工前必须收口"纪律。
+老脚本不写这两个字段 = 空列表语义，逐字节兼容。
+
+**引用解析口径（拍板）：原文精确匹配优先，其次唯一短 id 前缀（≥6 字符），
+解析不到绝不猜。** 歧义前缀/过短/不存在 → unresolved 由主循环落 audit
+"规划引用未匹配：…（未改状态）"。把 A 标成完成而实际是 B 比漏标更危险，
+所以宁可报未匹配也不误收口。终态只从 active 迁移：重复收口第二次即报未匹配
+（幂等语义 = 什么都不发生，但事实可证）。
+
+**落账时机**：`plan.complete` 在 step_transaction 内、`plan.add` 之后执行——
+"这条做完了"与本步的 steps/小票/水位线同生共死；`unresolved` 审计在提交后落
+（不占事务）。step audit 行按需追加 `plan_done=+n` / `plan_cancel=+n`。
+
+**出场第 5 验**：`plans WHERE status='active'` 必须为 0，否则 done 弹回，
+连败 3 轮 E_WALL 走异常出口。没提过规划的任务不判（mock/短任务不虚红）——
+提过就必须收口，"规划 A/B/C"不许只说不收。注意力包规划行现在渲染
+`- [id=xxxxxxxx · step k] 原文`，模型可直接引用短 id。
+
+**测试面（+8 新例，翻新 5 处，全库 477 例）**：test_plan 器官 4（内容收口/取消/
+短 id 前缀/不猜）+ 接线 2（未收口 E_WALL / 未匹配落审计）；test_finalize 2
+（活性规划阻断出场 / 收口后放行）；翻新：test_coach 救场收工步、test_limits
+换规划收工步、test_plan_watch 三处收工步补 plan_done（教练提案现在也是规划条目，
+必须收口才能出场——这本身就是新语义的实证）。CLI mock 冒烟 normal 收束不变
+（无规划任务零影响）。
+
+**遗留**：① plans.status 的 `failed` 值仍未使用（规划"做失败了"与"废弃"目前
+都走 cancelled）；② 规划条目不能重新激活（done 后同名可重开，但没有"撤销完成"
+通道）；③ 短 id 引用依赖模型正确复述 8 位前缀，若模型改写则只能回落到原文匹配。

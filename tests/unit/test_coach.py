@@ -90,9 +90,21 @@ def _goal_json(target: str) -> str:
     )
 
 
-def _step_json(thought: str, calls: list[dict[str, object]], *, done: bool) -> str:
+def _step_json(
+    thought: str,
+    calls: list[dict[str, object]],
+    *,
+    done: bool,
+    plan_done: list[str] | None = None,
+) -> str:
     return json.dumps(
-        {"thought": thought, "plan_updates": [], "tool_calls": calls, "done": done},
+        {
+            "thought": thought,
+            "plan_updates": [],
+            "plan_done": plan_done or [],
+            "tool_calls": calls,
+            "done": done,
+        },
         ensure_ascii=False,
     )
 
@@ -140,7 +152,7 @@ def test_rescue_absorbed_run_recovers_to_normal(tmp_path: Path) -> None:
                 calls=[{"name": "nmap", "args": {"target": "10.0.0.5", "ports": "443"}}],
                 done=False,
             ),
-            _step_json("收工", calls=[], done=True),
+            _step_json("收工", calls=[], done=True, plan_done=["换打 443"]),
         ]
     )
     conn = _make_db()
