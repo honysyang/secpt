@@ -92,7 +92,7 @@ class NmapTool:
                 raw_ref="",
             )
 
-        raw_path = self._write_raw(argv, proc.stdout, proc.stderr)
+        raw_path = self._write_raw(active.command(argv), proc.stdout, proc.stderr)
         exit_code = proc.returncode or 0
         summary = (
             _single_line(proc.stdout.strip() if proc.stdout.strip() else proc.stderr.strip())

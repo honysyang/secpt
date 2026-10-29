@@ -138,6 +138,21 @@ def test_nmap_docker_image_missing_is_honest_rc125(tmp_path: Path) -> None:
     assert Path(receipt.raw_ref).is_file()
 
 
+def test_docker_raw_records_effective_command(tmp_path: Path) -> None:
+    """raw 封面记真跑的命令：docker 包裹不得在账本上凭空消失（诚实锚）。"""
+    docker_shim = _shim(tmp_path, "docker", 'echo "$@"')
+    receipt = NmapTool(
+        binary="/bin/nmap-fake",
+        raw_dir=tmp_path / "raw",
+        timeout_s=5.0,
+        runner=DockerRunner(image="secpt-sandbox", docker_bin=docker_shim),
+    ).run({"target": "10.0.0.9"})
+    first_line = Path(receipt.raw_ref).read_text(encoding="utf-8").splitlines()[0]
+    assert first_line == (
+        f"$ argv({docker_shim} run --rm secpt-sandbox /bin/nmap-fake -Pn -sV 10.0.0.9)"
+    )
+
+
 # ---------- load_isolation_config（[execute] 段三态） ------------------------------
 
 

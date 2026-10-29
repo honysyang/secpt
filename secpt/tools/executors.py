@@ -26,7 +26,16 @@ from secpt.errors import SecptError
 
 
 class ArgvRunner(Protocol):
-    """执行器契约：吃 argv 列表，吐 CompletedProcess；失败语义上抛由工具转回执。"""
+    """执行器契约：吃 argv 列表，吐 CompletedProcess；失败语义上抛由工具转回执。
+
+    ``command`` 是"实际要跑的那串命令"的投影（raw 落盘用）：LocalRunner 原样返回，
+    DockerRunner 返回包裹后的 argv——账本封面记的必须是真跑过的东西，
+    不能让 docker 包裹在 raw 里凭空消失。
+    """
+
+    def command(self, argv: list[str]) -> list[str]:
+        """返回该执行器实际交给操作系统的 argv（纯函数，不执行）。"""
+        ...
 
     def run(self, argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[str]:
         """同步执行一次：shell 例如 subprocess 语义，docker 则 Wrapped。"""
@@ -37,6 +46,10 @@ class LocalRunner:
     """宿主执行器：与 M1/M2 的 subprocess.run 行为逐字节守恒（拍板② 缺省档）。"""
 
     label = "shell"
+
+    def command(self, argv: list[str]) -> list[str]:
+        """本机执行不做任何包裹：实际 argv 就是工具构建的 argv。"""
+        return list(argv)
 
     def run(self, argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[str]:
         """argv 列表直接进 subprocess（禁 shell=True 在工具层纪律，本层不改写）。"""
@@ -62,10 +75,14 @@ class DockerRunner:
         """执行器身份一句话（失败回执署名用——"docker" 照何进回执）。"""
         return "docker"
 
+    def command(self, argv: list[str]) -> list[str]:
+        """实际命令 = docker 包裹后的完整 argv（raw 落盘照此署名）。"""
+        return build_docker_argv(argv, image=self._image, docker_bin=self._docker_bin)
+
     def run(self, argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[str]:
         """包裹一次：纯函数定 argv 序 → subprocess 照跑（缺 bin/镜像 = FileNotFoundError/诚
         实 rc 透传）。无 runner 侧 fallback，NmapTool 落 E_TOOL_FAIL。"""
-        wrapped = build_docker_argv(argv, image=self._image, docker_bin=self._docker_bin)
+        wrapped = self.command(argv)
         return subprocess.run(  # noqa: S603  # argv 列表，无 shell
             wrapped, capture_output=True, text=True, timeout=timeout_s, check=False
         )
