@@ -176,6 +176,22 @@ def test_unknown_provider_rejected_assembly_time(
     assert "deepseek" in capsys.readouterr().err
 
 
+def test_max_steps_from_profile_limits_the_run(
+    cli_env: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """M5 关键参数：profile [budget].max_steps 真的掐主循环步数线（1 步即撞限）。"""
+    profile = tmp_path / "profile.toml"
+    profile.write_text("[budget]\nmax_steps = 1\n", encoding="utf-8")
+    monkeypatch.setenv("SECPT_PROFILE", str(profile))
+    rc = main_mod.main(["run", "--goal", "对内网 10.0.0.7 做端口摸底"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "steps=1 exit_kind=stalled" in out
+
+
 # ---- secpt resume：水位线续跑 =================================================
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from secpt.assets import render_prompt
-from secpt.llms.client import TEMPERATURE_PLAN, LlmClient, Message
+from secpt.llms.client import TEMPERATURE_FREESTYLE, TEMPERATURE_PLAN, LlmClient, Message
 
 
 class Proposal(BaseModel):
@@ -54,26 +54,31 @@ class Coach:
 
         graphs/plan 都是已渲染文本（graph_summary / 注意力包的规划段）——LLMC
         与主 LLM 看同一份世界，不用第二套取数路径。
+
+        温度取**发散档**（0.8，设计文档 L83"CTF 撞墙场景才升温"）：走到失速救场
+        说明按原打法已经走死，此时需要的是跳出局部最优的新思路，而不是在低温下
+        复述同一条路。
         """
-        return self._ask("coach.propose", graphs, plan)
+        return self._ask("coach.propose", graphs, plan, temperature=TEMPERATURE_FREESTYLE)
 
     def review(self, graphs: str, plan: str) -> Proposal | None:
         """双图变化事件驱动的规划重估（M5）：现有规划是否仍然成立。
 
-        与 propose 的区别是触发语境（事件线 vs 失速铃），不是权限——同样只
-        提案不裁决，同样无话可说返回 None。
+        与 propose 的区别是触发语境（事件线 vs 失速铃）与温度（重估是"核对现状"，
+        用规划档低温即可；只有撞墙换路才升温），权限完全相同——只提案不裁决，
+        无话可说返回 None。
         """
-        return self._ask("coach.review", graphs, plan)
+        return self._ask("coach.review", graphs, plan, temperature=TEMPERATURE_PLAN)
 
-    def _ask(self, asset_id: str, graphs: str, plan: str) -> Proposal | None:
-        """单次结构化调用；两入口共用（形状、温度、空白收口全部一致）。"""
+    def _ask(self, asset_id: str, graphs: str, plan: str, *, temperature: float) -> Proposal | None:
+        """单次结构化调用；两入口共用形状与空白收口，温度由调用方选档。"""
         prompt = render_prompt(
             asset_id,
             graphs=graphs or _EMPTY_GRAPHS,
             plan=plan or _EMPTY_PLAN,
         )
         proposal = self._client.structured(
-            [Message(role="user", content=prompt)], Proposal, temperature=TEMPERATURE_PLAN
+            [Message(role="user", content=prompt)], Proposal, temperature=temperature
         )
         if not proposal.idea.strip():
             return None

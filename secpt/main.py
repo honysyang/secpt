@@ -21,6 +21,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 
+from secpt.core.limits import LimitsConfig, load_limits_config
 from secpt.core.loop import LoopResult, PentestLoop
 from secpt.core.mission_board import MissionBoard
 from secpt.core.plan_watch import PlanWatcher, load_plan_config
@@ -438,6 +439,7 @@ def _assemble(
     board: MissionBoard | None = None,
     runner: ArgvRunner | None = None,
     broker: ApprovalBroker | None = None,
+    limits: LimitsConfig | None = None,
 ) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
     出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
@@ -454,6 +456,8 @@ def _assemble(
     plan_cfg = load_plan_config(_profile_path())
     watcher = PlanWatcher(plan_cfg.review_every_steps)
     bus.subscribe(watcher)
+    # M5 关键参数（设计文档 L66）：步数线 / 失速阈值从 profile [budget]/[stall] 来。
+    limits = limits or LimitsConfig()
     reg = _registry(board=board, runner=runner, broker=broker)
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
@@ -483,6 +487,8 @@ def _assemble(
         step_tool_limit=_step_tool_limit(),
         plan_watcher=watcher,
         plan_review_limit=plan_cfg.review_limit,
+        stall_failures=limits.stall_failures,
+        stall_repeat_plans=limits.stall_repeat_plans,
     )
 
 
@@ -547,9 +553,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
+        limits = load_limits_config(_profile_path())  # 步数线/失速阈值（[budget]/[stall]）
         broker = _approval_broker()
         board = _board(conn, broker=broker)
-        result = _assemble(conn, client, board=board, runner=_runner(), broker=broker).run(goal)
+        result = _assemble(
+            conn, client, board=board, runner=_runner(), broker=broker, limits=limits
+        ).run(goal, max_steps=limits.max_steps)
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:
@@ -569,11 +578,17 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     provider: LlmProvider | None = None
     try:
         provider = _main_provider("")
+        limits = load_limits_config(_profile_path())
         broker = _approval_broker()
         board = _board(conn, broker=broker)
         result = _assemble(
-            conn, client=LlmClient(provider), board=board, runner=_runner(), broker=broker
-        ).resume(str(args.task_id))
+            conn,
+            client=LlmClient(provider),
+            board=board,
+            runner=_runner(),
+            broker=broker,
+            limits=limits,
+        ).resume(str(args.task_id), max_steps=limits.max_steps)
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:

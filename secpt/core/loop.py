@@ -152,6 +152,8 @@ class PentestLoop:
         step_tool_limit: int = 4,
         plan_watcher: PlanWatcher | None = None,
         plan_review_limit: int = 3,
+        stall_failures: int = 5,
+        stall_repeat_plans: int = 2,
     ) -> None:
         if step_tool_limit <= 0:
             raise ValueError(
@@ -159,6 +161,11 @@ class PentestLoop:
             )
         if plan_review_limit <= 0:
             raise ValueError(f"plan_review_limit 必须为正整数（名额上界），got {plan_review_limit}")
+        if stall_failures <= 0 or stall_repeat_plans <= 0:
+            raise ValueError(
+                "失速阈值必须为正整数（构造期契约），got"
+                f" failures={stall_failures} repeat_plans={stall_repeat_plans}"
+            )
         self._conn = conn
         self._llm = main_llm
         self._dispatcher = dispatcher
@@ -173,6 +180,8 @@ class PentestLoop:
         self._step_tool_limit = step_tool_limit
         self._plan_watcher = plan_watcher
         self._plan_review_limit = plan_review_limit
+        self._stall_failures = stall_failures
+        self._stall_repeat_plans = stall_repeat_plans
 
     def enter(self, user_input: str) -> tuple[TaskRow, RunRow]:
         """WF1 进场：LLM 固化三问 → tasks + runs 两行落账。空 goal 视为对话模式拒入。"""
@@ -224,7 +233,7 @@ class PentestLoop:
         """
         machine = fsm.Fsm()
         machine.go(fsm.FSMState.WORK)
-        counter = stall.StallCounter()
+        counter = stall.StallCounter(n=self._stall_failures, repeat_n=self._stall_repeat_plans)
         outcomes: list[StepOutcome] = []
         exit_streak = 0  # 出场三验连败计（W2-1）：每次 done 过验，不过弹回
         rescue_used = False  # 救场名额（WF5）：每 run 只有一次 LLMC 救场机会
@@ -502,6 +511,10 @@ class PentestLoop:
             if counter.observe(ok=receipt.exit_code == 0):
                 ring = True
                 break  # 同 M1 语义：铃响本轮就算，余下回执不再收数
+        # M5 重复抑制（设计文档 L84）：连续提出同一段规划 = 原地打转的早期信号，
+        # 与工具连败共用一条拉铃通道（救场 → 换规划 → reset）。空 updates 不算重复。
+        if counter.observe_plan(output.plan_updates):
+            ring = True
         self._audit(
             task.id,
             f"step {step_no}: {output.thought}, tool_calls={len(tickets)}"

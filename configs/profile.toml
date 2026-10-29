@@ -25,3 +25,11 @@ review_limit = 3
 # id = "AC-flag"
 # pattern = "flag{"
 # description = "拿到靶场 flag"
+
+# 关键参数（设计文档 L66）：步数线（主 LLM 循环预算）与失速阈值。
+[budget]
+max_steps = 200
+
+[stall]
+failures = 5        # 连续工具失败 N 步 → 拉铃（救场或 E_STALL）
+repeat_plans = 2    # 连续 N 步提出同一段规划 → 拉铃（重复抑制）
