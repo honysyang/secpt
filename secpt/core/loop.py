@@ -43,7 +43,7 @@ from secpt.llms.client import Goal, StepOutput
 from secpt.llms.coach import Coach
 from secpt.llms.main_llm import MainLlm
 from secpt.ob.events import EventBus
-from secpt.store import attention, experience, graph, ledger, observations
+from secpt.store import attention, experience, graph, ledger, observations, plan
 from secpt.store.experience import ExperienceRow
 from secpt.store.ledger import FindingRow, RunRow, TaskRow
 from secpt.tools.registry import ToolOutput
@@ -103,8 +103,9 @@ JudgeSweep = Callable[[sqlite3.Connection, str], list[FindingRow]]
 （actor=judge）。None = 裁判不在装配（M1 兼容）。
 """
 
-# M2 注意力包的规划段占位文案：救场提案（WF5）会临时替换它一个步，用过即还原。
-_BASE_PLAN_NOTE = "（M1 主循环暂无规划重排，A/B/C 规划接线在 M2）"
+# M5-5 规划对象：主 LLM 的 plan_updates 落 plans 表（store/plan），注意力包的
+# 规划段每步从账本现渲染；教练提案吸收期额外挂一行提示（下一步即还原）。
+_NO_HINT = ""
 
 
 class StepOutcome(BaseModel):
@@ -229,7 +230,7 @@ class PentestLoop:
         rescue_used = False  # 救场名额（WF5）：每 run 只有一次 LLMC 救场机会
         reviews_used = 0  # 规划重估名额（M5 事件线）：每 run 至多 plan_review_limit 次
         review_stop_noted = False  # "名额用尽"只落一次账（不随节拍刷屏）
-        plan_note = _BASE_PLAN_NOTE  # 注意力包规划段；救场提案临时替换一个步
+        plan_note = _NO_HINT  # 教练提案吸收期的一行提示（账本规划段之外的临时物）
         exit_kind = "stalled"  # 默认 = 步线走完没 done：E_BUDGET_EXHAUSTED 撞限
         crashed: SecptError | None = None
         try:
@@ -238,7 +239,7 @@ class PentestLoop:
                     break  # 撞步线：停执行（§39：非降级收尾，走异常出口落账）
                 outcome, done, ring = self._one_step(task, run, step_no, counter, plan_note)
                 outcomes.append(outcome)
-                plan_note = _BASE_PLAN_NOTE  # 提案吸收一次即用掉：下一步还原占位
+                plan_note = _NO_HINT  # 提案吸收一次即用掉：下一步还原
                 # M5 事件线消费：graph_changed 订阅者已在步界置旗；此处才动 LLMC
                 # （消费端只报告不接管——重估的账先落、提案下一步才被吸收）。
                 if self._plan_watcher is not None and self._plan_watcher.take():
@@ -348,10 +349,13 @@ class PentestLoop:
         """
         if self._bus is not None:
             self._bus.emit("run_step_started", task_id=task.id, run_id=run.id, step_no=step_no)
+        plan_summary = plan.render(self._conn, task.id)
+        if plan_note:
+            plan_summary = f"{plan_summary}\n{plan_note}"
         pkg = attention.build(
             goal=self._goal_projection(task, run),
             step_no=step_no,
-            plan_summary=plan_note,
+            plan_summary=plan_summary,
             recent=ledger.recent_tickets(self._conn, task.id),
             graph_summary=graph.graph_summary(self._conn, task.id),
             experiences=experience.fetch_replay(self._conn, self._experience_env),
@@ -402,8 +406,16 @@ class PentestLoop:
                     f"HITL 批准（{receipt.hitl_note}）: {receipt.tool_name}",
                 )
         with checkpointer.step_transaction(self._conn):
+            # M5-5 规划对象：本步 plan_updates 与小票/水位线同事务落账——规划是
+            # 账本事实（不是内存变量），resume 后自然延续，steps.plan_refs 可回溯。
+            plan_rows = plan.add(self._conn, task.id, step_no, output.plan_updates)
             step = ledger.record_step(
-                self._conn, task.id, run.id, step_no, output.model_dump_json(exclude_none=True)
+                self._conn,
+                task.id,
+                run.id,
+                step_no,
+                output.model_dump_json(exclude_none=True),
+                plan_refs=[row.id for row in plan_rows],
             )
             tickets = [
                 ledger.append_ticket(
@@ -493,7 +505,7 @@ class PentestLoop:
         self._audit(
             task.id,
             f"step {step_no}: {output.thought}, tool_calls={len(tickets)}"
-            f", graph=+1n+{edge_writes}e",
+            f", graph=+1n+{edge_writes}e, plan=+{len(plan_rows)}",
         )
         outcome = StepOutcome(
             step_no=step_no, step_id=step.id, output=output, ticket_count=len(tickets)
@@ -534,6 +546,15 @@ class PentestLoop:
             self._audit(task.id, "教练提案降级：LLM 无话说，不救场（只提案不裁决红线不变）")
             return None
         hint = f"教练提案待吸收（WF5 救场，只提案不裁决）：{proposal.idea}——{proposal.reason}"
+        # M5-5：救场提案同时成为规划修订（parent 指向上版）——规划是账本事实，
+        # 下一包读到的规划段里就有它，主 LLM 按新规划续跑而非只看一行临时提示。
+        plan.add(
+            self._conn,
+            task.id,
+            step_no,
+            [proposal.idea],
+            parent_id=plan.latest_id(self._conn, task.id),
+        )
         ledger.audit(self._conn, task.id, "llmc", f"教练提案（只提案不裁决）：{hint}")
         counter.reset()
         _log.info("coach_proposal_accepted", task_id=task.id)
@@ -562,6 +583,14 @@ class PentestLoop:
             _log.info("plan_review_no_proposal", task_id=task.id, step_no=step_no)
             return None
         hint = f"教练规划重估待吸收（事件驱动，只提案不裁决）：{proposal.idea}——{proposal.reason}"
+        # M5-5：重估提案成为规划修订（同救场口径），规划段下一包即含新条目。
+        plan.add(
+            self._conn,
+            task.id,
+            step_no,
+            [proposal.idea],
+            parent_id=plan.latest_id(self._conn, task.id),
+        )
         ledger.audit(self._conn, task.id, "llmc", hint)
         _log.info("plan_review_accepted", task_id=task.id, step_no=step_no)
         if self._bus is not None:

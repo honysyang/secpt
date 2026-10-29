@@ -13,7 +13,7 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -323,14 +323,19 @@ def record_step(
     llm_output: str,
     *,
     status: str = "ok",
+    plan_refs: Sequence[str] = (),
 ) -> StepRow:
-    """WF2 落账：steps 表挂本步结构化输出原文（审计盘根问底的锚）。"""
+    """WF2 落账：steps 表挂本步结构化输出原文（审计盘根问底的锚）。
+
+    ``plan_refs``（M5）：本步新增规划行的 id 清单——规划与小票/水位线同事务
+    落账，事后能复算"哪一步提出了哪条规划"。
+    """
     step = StepRow(
         id=uuid.uuid4().hex,
         task_id=task_id,
         run_id=run_id,
         step_no=step_no,
-        plan_refs="[]",
+        plan_refs=json.dumps(list(plan_refs), ensure_ascii=False),
         llm_output=llm_output,
         status=status,
         started_at=_now(),
