@@ -2704,7 +2704,7 @@ assets）、系统纪律（事实必须锚 raw/流量、R0-R4 验真、经验只
   我只围绕这套系统和你说话"；
 - `secpt run "你能做什么？"` → `【模式】自动判断为对话` + 同一人格的三段能力说明。
 
-**测试面（+2 例，翻新 3 处，全库 538 例）**：test_main 新增"chat 必须带身份
-系统提示"（system 消息含 secpt 与授权边界）；test_route 改为"只分类"口径
-（chat 不带 reply）；test_main auto-chat 用例改为双 provider 注入；test_assets
-的出厂 prompt 清单加入 `chat.system`。ruff 全绿。
+**测试面（全库 536 例）**：test_main 新增"chat 必须带身份系统提示"（system 消息
+含 secpt 与授权边界）；test_route 改为"只分类"口径（chat 不带 reply，净例数不变）；
+test_main auto-chat 用例改为双 provider 注入；test_assets 的出厂 prompt 清单加入
+`chat.system`。ruff 全绿。
