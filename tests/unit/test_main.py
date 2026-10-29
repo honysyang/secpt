@@ -240,3 +240,48 @@ def test_chat_empty_input_no_op(
     monkeypatch.setattr("sys.stdin", io.StringIO(""))  # 模拟空输入（pytest 默认封锁 stdin）
     assert main_mod.main(["chat"]) == 0
     assert capsys.readouterr().out != ""
+
+
+# ---- M4-4 审批代理装配（prompt 档出代理，未装档 None） ===========================
+
+
+def test_approval_broker_only_in_prompt_mode(
+    cli_env: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """prompt 档装配 ApprovalBroker（delegate=CliApprover）；off/缺段 = None 守恒。"""
+    profile = tmp_path / "profile.toml"
+
+    def set_profile(text: str) -> None:
+        profile.write_text(text, encoding="utf-8")
+        monkeypatch.setenv("SECPT_PROFILE", str(profile))
+
+    set_profile("[guard]\nhitl_mode = 'prompt'\n")
+    broker = main_mod._approval_broker()
+    assert isinstance(broker, main_mod.ApprovalBroker)
+    assert broker.kind == "human"  # 署名透传真审批人，代理不冒充
+
+    set_profile("[guard]\nhitl_mode = 'off'\n")
+    assert main_mod._approval_broker() is None
+
+    set_profile("")  # 缺 [guard] 段 = 未装代理
+    assert main_mod._approval_broker() is None
+
+
+def test_broker_audit_sink_writes_main_actor_row(cli_env: pathlib.Path) -> None:
+    """裁决侧落账：actor=main + 批准/拒绝文案（与 workerA 发起半边分层可辨）。"""
+    conn = connect(str(cli_env))
+    task = ledger.start_task(conn, input_text="m44", goal="摸扫")
+    conn.close()
+
+    main_mod._broker_audit_sink("nmap", True, "human")
+    main_mod._broker_audit_sink("nmap", False, "human")
+
+    conn = connect(str(cli_env))
+    rows = conn.execute(
+        "SELECT actor, what FROM audit_log WHERE task_id=? AND what LIKE '%审批代理裁决%'",
+        (task.id,),
+    ).fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["main", "main"]
+    assert "批准" in rows[0][1] and "nmap" in rows[0][1]
+    assert "拒绝" in rows[1][1]

@@ -13,11 +13,17 @@ from __future__ import annotations
 import subprocess
 import uuid
 from collections.abc import Mapping
+from concurrent.futures import Future
 from pathlib import Path
+from typing import cast
 
-from secpt.core.mission_board import Mission, MissionBoard
+from secpt.core.mission_board import Mission, MissionBoard, MissionResult
+from secpt.tools.broker import ApprovalBroker
 from secpt.tools.executors import ArgvRunner, LocalRunner
 from secpt.tools.registry import ToolManifest, ToolOutput
+
+# 主循环收拢 worker 小票的轮询步长：等待窗内顺手 serve 审批代理队列。
+_SERVE_POLL_S = 0.2
 
 
 def _single_line(text: str, limit: int = 160) -> str:
@@ -123,6 +129,9 @@ class AgentRunTool:
     M1 占位（board=None）逐字节保留——204 例兼容机位，改即破约；M3-5 整装版
     （board 非 None）：Mission 构造 → Board.submit → future.result() 阻塞收单，
     回出任一小票 `agent_run 收拢：{worker 摘要}`（exit_code 0/1 如实署名）。
+    M4-4 起收拢等待窗内代问审批：broker 非 None 时轮询 serve 代理队列——
+    worker 只经 agent_run 派生，主线程此刻必然阻塞在本 future 上，单线程
+    通道就够（CLI prompt 档由主循环代问，任务书口径）。
     派单/收单链路任何异常（无空板、worker 引爆）一律转 E_TOOL_FAIL 小票——
     与 nmap 失败同手式：不吹牛、不炸主循环，异常原文进 summary 留痕。
     """
@@ -135,9 +144,14 @@ class AgentRunTool:
         required=("mission", "persona", "step_budget"),
     )
 
-    def __init__(self, board: MissionBoard | None = None) -> None:
-        """board 是 M3-5 接线点：None=占位守恒；非 None=领单真通。"""
+    def __init__(
+        self,
+        board: MissionBoard | None = None,
+        broker: ApprovalBroker | None = None,
+    ) -> None:
+        """board 是 M3-5 接线点、broker 是 M4-4 接线点：None=占位/无代问守恒。"""
         self._board = board
+        self._broker = broker
 
     def _placeholder(self, args: Mapping[str, str]) -> ToolOutput:
         return ToolOutput(
@@ -157,7 +171,8 @@ class AgentRunTool:
                 goal=(args.get("mission") or "").strip() or "(空工单)",
                 step_budget=int(args.get("step_budget") or 8),
             )
-            result = self._board.submit(mission).result()
+            future = self._board.submit(mission)
+            result = self._collect(future)
         except Exception as exc:  # 派单/执行全链：退款小票，不炸主循环
             return ToolOutput(
                 tool_name=self.manifest.name,
@@ -173,6 +188,22 @@ class AgentRunTool:
             summary=f"agent_run 收拢：{result.summary}",
             raw_ref="",
         )
+
+    def _collect(self, future: Future[object]) -> MissionResult:
+        """收单：有代理时在等待窗内代问（M4-4——CLI prompt 档由主循环代问）。
+
+        为什么代问挂在收拢等待里：worker 只经 agent_run 派生，主线程此刻
+        必然阻塞在本 future 上——0.2s 轮询窗里顺手 serve 代理队列，单线程
+        通道就够，不需要专职服务员线程；无代理走原路 future.result() 逐字节
+        守恒（M3-5 行为）。
+        """
+        if self._broker is None:
+            return cast("MissionResult", future.result())
+        while True:
+            try:
+                return cast("MissionResult", future.result(timeout=_SERVE_POLL_S))
+            except TimeoutError:  # concurrent.futures 超时（3.11+ 即内建本尊）
+                self._broker.serve_once()
 
 
 class DeclareFindingTool:

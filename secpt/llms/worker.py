@@ -93,6 +93,7 @@ class Worker:
                 receipt = self._dispatcher.dispatch(
                     call.name, {k: str(v) for k, v in call.args.items()}
                 )
+                self._audit_hitl(task_id, receipt)
                 findings_count += self._claim_finding(task_id, call.name, receipt)
             if output.done:
                 summary = output.thought.strip() or "worker 收工（无 thought）"
@@ -118,6 +119,26 @@ class Worker:
             findings_count=findings_count,
             summary=summary,
         )
+
+    def _audit_hitl(self, task_id: str, receipt: ToolOutput) -> None:
+        """M4-4 发起侧落账：HIGH 审批批/拒两路各有 audit 痕（actor=workerA）。
+
+        与主循环同手式（loop L346 的 denied/hitl 双路）：worker 的 Guard 拒绝
+        （含未装代理 fail-closed 与代理超时拒绝）和经代理批准在此各落一行——
+        "workerA 发起 + 代理裁决"actor 分层的发起半边；裁决半边由 main.py
+        的 sink（actor=main）在 serve 侧落。
+        """
+        if receipt.denied:
+            ledger.audit(
+                self._conn, task_id, self._actor, f"HIGH 审批发起（拒绝）: {receipt.summary}"
+            )
+        elif receipt.hitl_approved:
+            ledger.audit(
+                self._conn,
+                task_id,
+                self._actor,
+                f"HIGH 审批发起（批准 {receipt.hitl_note}）: {receipt.tool_name}",
+            )
 
     def _claim_finding(self, task_id: str, tool_name: str, receipt: ToolOutput) -> int:
         """declare_finding 受理即直写 claimed（黑板单向门）；其余工具一律不写账。"""

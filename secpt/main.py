@@ -47,6 +47,7 @@ from secpt.ob.web_view import create_app
 from secpt.store import ledger
 from secpt.store.migrate import connect
 from secpt.tools.adapters import AgentRunTool, DeclareFindingTool, NmapTool
+from secpt.tools.broker import ApprovalBroker
 from secpt.tools.executors import ArgvRunner, DockerRunner, load_isolation_config
 from secpt.tools.guard import Approver, AutoApprover, CliApprover, load_guard_config
 from secpt.tools.mcp_client import build_mcp_adapters, load_mcp_config
@@ -211,15 +212,16 @@ def _worker_mock_script(index: int) -> FakeLLM:
     return FakeLLM([step])
 
 
-def _worker_builder() -> Callable[[int], Worker]:
+def _worker_builder(broker: ApprovalBroker | None = None) -> Callable[[int], Worker]:
     """worker 装配工厂：每线程一次构建（独立 conn + 独立 registry + 独立 LLM）。
 
     两条硬约束落在这里：
     - 独立 conn：sqlite 连接不跨线程共享，各线程直写同一文件库（拍板③）；
     - registry 不含 agent_run：worker 无从再派单，套娃死锁从构造上不存在。
 
-    Guard 同权（§3.6）但 approver=None：后台线程没有人工通道，HIGH 级动作
-    fail-closed——worker 不得替人点头，这与主循环 CliApprover 的口径一致。
+    Guard 同权（§3.6）的审批面（M4-4）：prompt 档经 ApprovalBroker 转发主
+    线程代问（worker 线程绝不直读 stdin）；未装代理（off/auto 档）= None
+    → HIGH fail-closed——保持 M3-5 现语义，worker 不得替人点头。
     """
     _worker_provider(0)  # 装配期试装：openai 档缺 env 的 E_CONFIG 必须在主线程炸，
     # 不能等 worker 线程上岗才成哑弹（builder 是装配期职责，§66 记档口径）。
@@ -243,7 +245,7 @@ def _worker_builder() -> Callable[[int], Worker]:
                     *mcp,
                 ],
                 guard=guard,
-                approver=None,
+                approver=broker,
                 probe=probe,
             ),
             conn=connect(db_path),
@@ -264,7 +266,40 @@ def _runner() -> ArgvRunner | None:
     return DockerRunner(image=cfg.image, docker_bin=cfg.docker_bin)
 
 
-def _board(conn: sqlite3.Connection) -> MissionBoard:
+def _broker_audit_sink(name: str, approved: bool, via: str) -> None:
+    """M4-4 裁决侧落账（actor=main）：批/拒两路各有痕，任务锚走最近 task。
+
+    serve 只发生在主线程（AgentRunTool 收拢等待窗内），此刻最新 task 即
+    派单 task（与 board 的 task_resolver 同口径）；独立短连接直写文件库，
+    用完即关不占线程句柄。workerA 发起半边在 worker loop 落（actor 分层：
+    发起=workerA，裁决=main）。
+    """
+    conn = _open_db()
+    try:
+        ledger.audit(
+            conn,
+            ledger.latest_task(conn).id,
+            "main",
+            f"审批代理裁决（{via}，主线程代问）: {name} → {'批准' if approved else '拒绝'}",
+        )
+    finally:
+        conn.close()
+
+
+def _approval_broker() -> ApprovalBroker | None:
+    """M4-4 审批代理装配：prompt 档才有代理，未装（off/auto/缺段）= None。
+
+    off/auto 档 worker 维持 M3-5 fail-closed 现语义（任务书口径"未装代理
+    → fail-closed 保持现语义"）；prompt 档 delegate=CliApprover——裁决
+    署名透传真审批人（kind=human），代理不冒充人类也不冒充自动。
+    """
+    guard = load_guard_config(_profile_path())
+    if guard is None or guard.hitl_mode != "prompt":
+        return None
+    return ApprovalBroker(CliApprover(), on_decision=_broker_audit_sink)
+
+
+def _board(conn: sqlite3.Connection, *, broker: ApprovalBroker | None = None) -> MissionBoard:
     """领单任务板装配：默认 3 worker（SECPT_WORKERS 可调），锚点走最近 task。
 
     为什么锚点用 ledger.latest_task：agent_run 是主循环里的同步派单，此刻
@@ -293,7 +328,7 @@ def _board(conn: sqlite3.Connection) -> MissionBoard:
         raise SecptError("SECPT_WORKERS 必须为正整数", code="E_CONFIG", context={"got": size})
     return MissionBoard(
         conn,
-        _worker_builder(),
+        _worker_builder(broker),
         size=size,
         task_resolver=lambda c: ledger.latest_task(c).id,
     )
@@ -305,7 +340,10 @@ def _open_db():
 
 
 def _registry(
-    *, board: MissionBoard | None = None, runner: ArgvRunner | None = None
+    *,
+    board: MissionBoard | None = None,
+    runner: ArgvRunner | None = None,
+    broker: ApprovalBroker | None = None,
 ) -> ToolRegistry:
     """工具货架：nmap（外部适配器）+ agent_run / declare_finding（内嵌）；
     M3-1 起 Guard 从 profile.toml [guard] 段装配——缺段/缺文件为 no-op
@@ -314,7 +352,8 @@ def _registry(
     其余档（含缺省 auto）装配非交互审批人；off 档审批人闲置（闸内已拦死）。
     M3-3 起探针：probe=None = 不开窗（R6 关档零开销）；开档按
     SECPT_PROBE_BACKEND 装配事件源（默认 mock 伪事件源）。
-    M3-5 起双注入：runner=执行隔离（None=本机），board=领单板（None=占位）。"""
+    M3-5 起双注入：runner=执行隔离（None=本机），board=领单板（None=占位）；
+    M4-4 起 broker=审批代理注入 AgentRunTool（None=收拢原路守恒）。"""
     raw_dir = os.environ.get("SECPT_RAW_DIR", "raw")
     binary = os.environ.get("SECPT_NMAP_BIN", "/usr/bin/nmap")
     guard = load_guard_config(_profile_path())
@@ -325,7 +364,7 @@ def _registry(
     return ToolRegistry(
         [
             NmapTool(binary=binary, raw_dir=raw_dir, runner=runner),
-            AgentRunTool(board=board),
+            AgentRunTool(board=board, broker=broker),
             DeclareFindingTool(),
             *_mcp_adapters(),
         ],
@@ -389,6 +428,7 @@ def _assemble(
     *,
     board: MissionBoard | None = None,
     runner: ArgvRunner | None = None,
+    broker: ApprovalBroker | None = None,
 ) -> PentestLoop:
     """主循环装配：事件总线挂 CliView（对话面板），dispatcher 走 registry，
     出场三验由 ExitChecklist 实现依赖倒置口（core 不 import finalize）；
@@ -400,7 +440,7 @@ def _assemble(
     bus.subscribe(CliView())
     prof = load_profile(_profile_path())
     probe_cfg = load_probe_config(_profile_path())
-    reg = _registry(board=board, runner=runner)
+    reg = _registry(board=board, runner=runner, broker=broker)
     # M3-4 判票接线（拍板①注入式）：judge 只见 callable 与环境键，重放怎么跑
     # （只读门/Guard 同权）是 registry 的事；environment=None 才会票盒静默。
     return PentestLoop(
@@ -484,8 +524,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         provider = _main_provider(goal)  # 装配期校验在进场前（E_CONFIG 不留半场烂账）
         client = LlmClient(provider)  # main LLM 与蒸馏器共存同一条协议通道（W3-1）
-        board = _board(conn)
-        result = _assemble(conn, client, board=board, runner=_runner()).run(goal)
+        broker = _approval_broker()
+        board = _board(conn, broker=broker)
+        result = _assemble(conn, client, board=board, runner=_runner(), broker=broker).run(goal)
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:
@@ -505,10 +546,11 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     provider: LlmProvider | None = None
     try:
         provider = _main_provider("")
-        board = _board(conn)
-        result = _assemble(conn, client=LlmClient(provider), board=board, runner=_runner()).resume(
-            str(args.task_id)
-        )
+        broker = _approval_broker()
+        board = _board(conn, broker=broker)
+        result = _assemble(
+            conn, client=LlmClient(provider), board=board, runner=_runner(), broker=broker
+        ).resume(str(args.task_id))
         _print_result(result)
         _emit_report(conn, provider, result.task_id, half=False)
     except SecptError:
