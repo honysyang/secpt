@@ -1827,3 +1827,105 @@ M3-5 多 worker 各自装配时沿用同手式（注入式天然 worker 安全�
 "attention 层 claimed 线索投影"成为死代码路径（fetch_replay 已给不出 claimed
 行）——M5 前如无新增 claimed 消费者，考虑在 M5 连同判票语义一并清理。
 
+## 71. M3-5 施工结论：多 worker 领单 + Docker 隔离——agent_run 真器官、锚点不假写
+
+**四拍板（兑现蓝本 L551/§3.6/§7 安全表）**：①**agent_run 真接线 + 线程池**：
+主循环仍在 tool_calls 里同步派单，AgentRunTool 阻塞等 future——"主循环逐 call
+串行"语义零改动（不碰 engine 主循环，非破坏性）；并发发生在工具内部（板级
+size 个 worker 线程）。②**执行隔离入 profile.toml [execute] 段 + fail-closed**：
+isolation="shell"|"docker"，缺段/缺文件=shell（与 M1/M2 逐字节守恒）；docker
+bin/镜像缺失一律 E_TOOL_FAIL 回执，绝不静默退回本机——"宿主方案不可信 =
+拒绝比兜底诚实"。③**worker 落账口径 = 独立 conn 直写黑板**：sqlite 连接不跨
+线程共享，各线程自开 conn 写同一文件库；findings 仍只经 ledger 官门，audit
+actor 恒为 workerA（工具失败/降级不抛错，只回小票）。④**出厂脚本 + shim +
+真镜像冒烟三件套**：mock 离线可复跑，shim 钉宿主未被偷跑，真镜像验收真跑。
+
+**MissionBoard 五条契约**（tests/unit/test_mission_board.py 逐条钉）：
+①**原子认领**：queue.Queue 的 get 天然原子，不加锁；8 单=8 次处理（无重领无丢单）。
+②**future 一对一**：submit 返回该单专属 future，worker 异常原样 set_exception，
+板本体不死（异常承载≠板崩）。③**per-thread builder 一次构建**：线程启动时
+builder(index) 建一次、线程内逐单复用——Worker 内含 FakeLLM/registry 等非线程
+安全状态，绝不跨线程共享。④**shutdown 三步**：收板标志 + 恰 size 个哨兵入队 +
+join（幂等）；余单排空、迟到单 RuntimeError 当面拒、线程全部收点。
+⑤**锚点不假写**：mission 无 task_id 且无 resolver → 同步 ValueError（连 future
+都不造）；resolver 异常包成 ValueError 上抛——findings 必挂真 task 的红线在
+submit 口把死。
+
+**Worker 器官**（secpt/llms/worker.py）：步预算内 `structured(StepOutput)` 循环，
+工具回执逐个过 dispatcher；只有 declare_finding 且 exit_code==0 且 raw_ref 非空
+才经 ledger 落 claimed（受理小票=账；空白锚在工具口就拒收）。LLM 异常/超预算
+一律**诚实降级小票**（ok=False 或 finished=False，summary 带原因），audit 三段
+（领单/收单/降级）全走 workerA——worker 不许把失败说成成功，也不许静默吞错。
+
+**执行隔离的账本诚实性（含一处施工修正）**：ArgvRunner 契约除 `run` 外新增
+`command(argv)` 纯函数投影（LocalRunner 恒等 / DockerRunner 返包裹后 argv），
+raw 落盘写"真跑过的那串命令"。初版直接写工具侧 argv，真镜像冒烟时发现
+`docker run --rm <image>` 在封面上蒸发——单开一次 fix 提交补齐（shell 档
+command 恒等 → 旧账字节守恒）。这是"raw 必指真事"在隔离档的落地，不是新增语义。
+
+**§67 遗留②收口（非破坏性 loop 微改，风险已标注）**：失速计收数前跳过
+`receipt.denied` 行。语义依据：拒绝 = 闸门没放行、工具压根没执行，把它记成
+"工具连败"会误导救场器去换打法（真实病因是授权，不是手法）。风险面：仅在
+Guard/HITL 拒路产生 denied 回执时生效，而 M1/M2 无 Guard 时 denied 恒 False
+→ 老路径零影响（204 原班用例不跳红即证）。
+
+**main 装配三约束**：①board 生命周期归 CLI（try/finally 收板），`_assemble`
+只接注入；②worker registry **不含 agent_run**——套娃死锁从构造上不存在（
+worker 无从再派单），且每线程独立 conn/LLM/registry；③**Guard 同权但
+approver=None**：后台线程无人工通道，HIGH 级动作 fail-closed——worker 不得
+替人点头；[execute] 装配的 runner 同时注入主 registry 与 worker registry，
+"隔离"是整个进程的执行口径，不是主循环特权。
+
+**演示入口（mock 离线可复跑）**：`SECPT_DEMO_AGENT_RUN=1` 时出厂脚本插一步
+agent_run（未开时脚本逐字节不变）；`SECPT_WORKERS` 调板级并发（默认 3）；
+worker 出厂脚本只收工不伪造证据（mock 无网络，伪造 raw_ref 会破诚实锚，能力
+链路交给 e2e 测试用预置证据文件覆盖）。SECPT_DB 必须文件库（:memory: 下各线程
+连不到同一库，装配期 E_CONFIG 当面拒）。
+
+**施工期六处修正（记档防考古）**：①**测试口径自相矛盾**：板层"无锚点必抛"
+与六条队列语义用例"不带 task_id 也要能跑"打架——按"板不假写锚点"为纲，队列
+语义用例补显式 task_id（只验认领/回执，不掺 resolver），两处锚点用例原样保留；
+②`_StubWorker` 用普通 dict 直索引 mission_id → KeyError，改 setdefault（替身
+自身缺陷，非实现问题）；③sqlite3.Row 与元组不相等 → 断言侧 `(r[0], r[1])` 取值；
+④空壳 shim `echo 22/tcp open  ssh` 被 shell 分词吃掉双空格（锚点保真断言炸）
+→ shim 内加引号；⑤mission_board.py 漏 `from typing import Protocol`（收集期
+NameError，三文件全红一次）；⑥**蒸馏候选副作用**：agent_run 成功小票会进收尾
+蒸馏候选（experience.py 既有口径），演示脚本需多备一条空草案应答，否则
+FakeLLM 脚本耗尽 → 报告降级。这不是 bug，是"成功小票=经验候选"的既有语义显形。
+
+**变更清单**：
+- secpt/core/mission_board.py（新）：Mission/MissionResult + MissionBoard
+  （queue 认领/future 回执/builder 一次构建/shutdown 三步/锚点不假写）。
+- secpt/llms/worker.py（新）：Worker 器官（步预算/诚实降级/claim 落账/workerA audit）。
+- secpt/tools/executors.py（新）：ArgvRunner 契约（command+run）/LocalRunner/
+  DockerRunner/build_docker_argv/IsolationConfig/load_isolation_config 三态。
+- secpt/tools/adapters.py：NmapTool 增设 runner 注入（缺省 None=LocalRunner）
+  与 command 投影落 raw、失败文案带执行器身份；AgentRunTool 双态
+  （board=None 逐字节保留 M1 占位回执）。
+- secpt/core/loop.py：denied 回执跳过失速计（§67 遗留②）。
+- secpt/main.py：_worker_provider/_worker_builder/_runner/_board 装配、
+  _registry(board, runner) 双注入、_assemble 注入、run/resume 的 try/finally 收板、
+  SECPT_WORKERS/SECPT_DEMO_AGENT_RUN。
+- 测试：test_execute_isolation.py 11 例（docker argv 序两例/LocalRunner 现行为/
+  seam 守恒/docker 转发/fail-closed 宿主未跑/rc125 透传/raw 记实跑命令/配置三态）、
+  test_mission_board.py 12 例（票面锁形/回执一对一/三线程并行 Barrier/8 单不丢不重/
+  异常承载/锚点三态/shutdown 三段/占位守恒/denied 跳失速计/e2e 全链四证）、
+  test_worker.py 6 例（申报受理/预算诚实/未知工具不炸/LLM 降级/actor 恒 workerA/
+  空白锚不受理）。
+
+**验证**：pytest 300 例全绿（271 原班不跳红 + 29 净新增）；ruff format+check
+全绿。CLI 三演示人工核对：①mock 领单——agent_run 小票 `agent_run 收拢：worker-0
+领单完成…` exit=0，audit_log 有 workerA 领单/收单两行；②docker fail-closed——
+ghost docker 路径下回执 `E_TOOL_FAIL: 执行器 docker 找不到二进制 …`，宿主 shim
+marker 未生成；③真镜像冒烟——image=secpt-sandbox 下 nmap 真跑（exit=0，
+"Starting Nmap 7.93"），raw 首行 `$ argv(docker run --rm secpt-sandbox
+/usr/bin/nmap -Pn -sV -p 22,80 (demo))`。
+
+**遗留给 M4/M5**：①真实 provider 与 mitmproxy 后端仍为图纸位（本卡只动执行与
+派单层，未碰 LLM 器官协议）；②worker 内 HIGH 动作目前只能 fail-closed——若
+M4 要让 worker 也能申请人工批准，需设计"后台审批代理"通道（不能直接在
+worker 线程读 stdin），本卡不做；③worker finding 进 R1 票盒仍需票面证据源
+（worker 的 declare_finding 小票 raw_ref 已在账，R1 判同口径天然可用，但演示
+worker 不产 finding，端到端由 e2e 测试覆盖）；④Docker 资源限制（--network/
+--memory/--read-only）尚未收紧，蓝本 §7 安全表的最小权限还需在 M4 补
+build_docker_argv 的 flags 扩展点。
