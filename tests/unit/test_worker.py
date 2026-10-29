@@ -83,13 +83,13 @@ def test_happy_path_declares_finding(tmp_path: Path) -> None:
     assert (result.ok, result.finished, result.steps_taken) == (True, True, 2)
     assert result.findings_count == 1
     rows: list[tuple[object, ...]] = [
-        (r[0], r[1])
+        (r[0], r[1], r[2])
         for r in conn.execute(
-            "SELECT verify_state, title FROM findings WHERE task_id=?",
+            "SELECT verify_state, title, actor FROM findings WHERE task_id=?",
             (mission.task_id,),
         ).fetchall()
     ]
-    assert rows == [("claimed", "w 发现")]
+    assert rows == [("claimed", "w 发现", WORKER_ACTOR)]  # M5-11：申报者身份如实落账
 
 
 def test_budget_exhausted_honest_unfinished() -> None:

@@ -57,11 +57,19 @@ def _finding(
     title: str = "22/tcp open ssh",
     state: str | None = None,
     method: str | None = None,
+    actor: str = "main",
 ) -> str:
     if state is None:
-        return ledger.append_finding(conn, task_id, title, "detail", anchor).id
+        return ledger.append_finding(conn, task_id, title, "detail", anchor, actor=actor).id
     return ledger.append_finding(
-        conn, task_id, title, "detail", anchor, verify_state=state, method=method
+        conn,
+        task_id,
+        title,
+        "detail",
+        anchor,
+        verify_state=state,
+        method=method,
+        actor=actor,
     ).id
 
 
@@ -108,6 +116,25 @@ class TestR2:
 
         assert r2(conn, ledger.get_finding(conn, claim_id)) is None
         assert ledger.get_finding(conn, claim_id).verify_state == "claimed"
+
+    def test_different_worker_with_same_tool_is_independent(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """M5-11：同工具但不同 worker 的独立路径（设计文档 L73 的"不同 worker"）。"""
+        task_id = ledger.start_task(conn, "不同 worker 演示", goal="g").id
+        anchor_a = _evidence(tmp_path, "a.txt")
+        anchor_b = _evidence(tmp_path, "b.txt")
+        _ticket(conn, task_id, anchor_a, tool="nmap")
+        _ticket(conn, task_id, anchor_b, tool="nmap")
+        _finding(conn, task_id, anchor_a, state="verified", method="rerun", actor="workerA")
+        claim_id = _finding(conn, task_id, anchor_b, actor="workerB")
+
+        row = r2(conn, ledger.get_finding(conn, claim_id))
+        assert row is not None and row.method == "dual-path"
+        what = conn.execute(
+            "SELECT what FROM audit_log WHERE actor='judge' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()["what"]
+        assert "workerA/workerB" in what
 
     def test_unverified_sibling_does_not_corroborate(
         self, conn: sqlite3.Connection, tmp_path: Path

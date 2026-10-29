@@ -135,6 +135,7 @@ class FindingRow(BaseModel):
     confidence: float | None
     judged_at: int | None
     created_at: int
+    actor: str = "main"  # M5-11：谁申报（main / workerA / workerB）
 
 
 _VERIFY_STATES = frozenset({"claimed", "verified", "rejected"})
@@ -442,11 +443,14 @@ def append_finding(
     verify_state: str = "claimed",
     method: str | None = None,
     confidence: float | None = None,
+    actor: str = "main",
 ) -> FindingRow:
     """findings 唯一写入口（新增侧）：M1 供测试/预置与 M2 裁判接线用。
 
     verify_state/method 先在应用层校验（本校验消息可读），schema CHECK 兜底——
     越过官门直写的人只会从触发器/CHECK 拿到裸 IntegrityError。
+    ``actor``（M5-11）：申报者身份（main/workerA/workerB），R2 双路径判"是否
+    不同 worker"的原料——主循环与 worker 各按自己的 actor 落账。
     """
     if verify_state not in _VERIFY_STATES:
         raise LedgerError(
@@ -465,12 +469,13 @@ def append_finding(
         confidence=confidence,
         judged_at=_now() if verify_state != "claimed" else None,
         created_at=_now(),
+        actor=actor,
     )
     try:
         conn.execute(
             "INSERT INTO findings (id, task_id, title, detail, verify_state, method,"
-            " evidence_ref, confidence, judged_at, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " evidence_ref, confidence, judged_at, created_at, actor)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 finding.id,
                 finding.task_id,
@@ -482,6 +487,7 @@ def append_finding(
                 finding.confidence,
                 finding.judged_at,
                 finding.created_at,
+                finding.actor,
             ),
         )
         _maybe_commit(conn)

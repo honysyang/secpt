@@ -3,7 +3,9 @@
 为什么这两道要成对出现（蓝本 WF4，设计文档 L73-76）：
 - R1 重放只对只读操作成立——"永不 rerun 写操作"是铁律，于是写操作 claim 在
   M3-4 之后一律悬置。R2/R3 就是给这批悬案的出口：
-  - **R2 双路径**：同一结论被第二条独立路径（不同工具 + 不同证据锚）也验证过；
+  - **R2 双路径**：同一结论被第二条独立路径也验证过——独立性 = 不同证据锚，
+    且"不同工具 或 不同 worker"（M5-11 起 findings 记 actor，两条路径可来自
+    同一工具的两个工人）；
   - **R3 反证**：动作发生时取证（observations 流量真相），"证明没发生"失败
     → 最强证实（设计文档 L76：写操作不可复跑的悬案由"动作发生时取证"消解）。
 
@@ -73,8 +75,12 @@ def r2(conn: sqlite3.Connection, finding: FindingRow) -> FindingRow | None:
         if not sibling.evidence_ref.strip() or sibling.evidence_ref == finding.evidence_ref:
             continue
         sibling_tool = _anchor_tool(conn, sibling)
-        if sibling_tool is None or sibling_tool == this_tool:
-            continue  # 同工具 = 同一条路，不构成独立路径
+        if sibling_tool is None:
+            continue  # 无票面路径的锚（流量/手铺）不构成"另一条执行路径"
+        # 独立性口径（设计文档 L73）：不同工具 **或** 不同 worker 都算独立路径。
+        # 同工具同 worker 的重申 = 同一条路，不构成双路径。
+        if sibling_tool == this_tool and sibling.actor == finding.actor:
+            continue
         if not r0(conn, sibling):
             continue
         row = ledger.set_finding_state(conn, finding.id, "verified", method="dual-path")
@@ -83,7 +89,8 @@ def r2(conn: sqlite3.Connection, finding: FindingRow) -> FindingRow | None:
             finding.task_id,
             "judge",
             f"裁决 {finding.id[:8]}: verified(dual-path)"
-            f"（独立路径 {sibling.id[:8]} 已 verified，工具 {sibling_tool}≠{this_tool}）",
+            f"（独立路径 {sibling.id[:8]} 已 verified，"
+            f"工具 {sibling_tool}/{this_tool}，worker {sibling.actor}/{finding.actor}）",
         )
         return row
     return None

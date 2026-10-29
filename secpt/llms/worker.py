@@ -201,7 +201,9 @@ class Worker:
             return 0
         title = (receipt.args.get("title") or "").strip()
         detail = (receipt.args.get("detail") or "").strip()
-        ledger.append_finding(self._conn, task_id, title or "(无题)", detail, receipt.raw_ref)
+        ledger.append_finding(
+            self._conn, task_id, title or "(无题)", detail, receipt.raw_ref, actor=self._actor
+        )
         return 1
 
     def _degrade(

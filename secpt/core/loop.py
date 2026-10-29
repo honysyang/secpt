@@ -475,6 +475,7 @@ class PentestLoop:
                         receipt.args.get("title", ""),
                         receipt.args.get("detail", ""),
                         receipt.raw_ref,
+                        actor="main",
                     )
             # M3-3 流量真相落账（黑板写入口只经 store/*）：观测窗交割的事件在
             # 此入 observations——LLM 小票之外的客观事件流，task/run 锚点由

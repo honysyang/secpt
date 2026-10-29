@@ -22,6 +22,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (2, "0002_graph_tables.sql"),
     (3, "0003_experience_table.sql"),
     (4, "0004_observations_table.sql"),
+    (5, "0005_findings_actor.sql"),
 )
 
 _STORE_DIR = "store"

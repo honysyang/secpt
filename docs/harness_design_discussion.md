@@ -2364,3 +2364,33 @@ worker 的包是工单纵深（goal/persona/skills/step_budget），知识属于
 后续若要做"哪些方法论真有用"需要新的观测位；② 分族目录固定为
 ``prompts/skills/roles/knowledge``，未做多根合并优先级之外的命名空间；
 ③ 文档提到的"MCP resource 读方向"未接（当前知识只从文件资产来）。
+
+## §82 M5-11 findings.actor 与 R2 worker 维度（置信度字段的显式不填）
+
+§78 遗留②收口：R2 的"不同 worker"此前只能用"不同工具"近似。
+
+**迁移 0005**：`findings` 增 `actor TEXT NOT NULL DEFAULT 'main'`——语义是"谁
+申报了这条 claim"（main = 主循环收口，workerA/workerB = 派单工人）。默认值兼容
+旧行（M5 之前所有 finding 都由主循环落账）。写口 `ledger.append_finding(actor=...)`
+默认 main；主循环显式传 main，worker 传自己的 audit_actor。
+
+**R2 独立性口径（更新）**：不同证据锚 +（不同工具 **或** 不同 worker）。
+同工具同 worker 的重申不构成双路径；裁决 audit 里把"工具 A/B、worker X/Y"
+一并记账，独立性来源可复算。注意：不同 worker 只是"另一条执行路径"，证据仍
+必须各自 R0 过关、对侧已 verified——不为"人多"降低证据门槛。
+
+**置信度字段（拍板：继续留 NULL，不填假数）**。设计文档 L78 的五字段里
+`confidence` 至今为空，本卡明确这是**有意为之**而不是遗漏：现有四道裁判都是
+确定性判据（oracle 命中 / 重放一致 / 双路径对标 / 流量取证），"确定性"没有
+0.7 与 0.9 之分；拍脑袋给数字违反"无量化依据不编数"的账本纪律。若将来要填，
+先定义可复算的量（如重放次数、独立路径条数、观测覆盖度）再落列。
+
+**测试面（+2 例，翻新 2 处，全库 489 例）**：test_r23 新增"同工具不同 worker
+= 独立路径"（audit 断言双署名）+ test_ledger 新增 actor 缺省/显式两例；翻新
+test_worker（finding 行断言带 workerA）与 test_store_migrate（版本 4→5）。
+ruff 全绿。
+
+**遗留**：① `confidence` 仍无定义，见上；② worker 的 actor 是构造期标签
+（workerA/workerB 同 implement 类），真正按线程编号区分需要 builder 传 index
+进 audit_actor，留待多 worker 并发批量派单时再做；③ R2 不要求两条路径的
+"工具参数"不同——同工具同参数但两个 worker 分别跑，仍算独立执行（成本换独立性）。

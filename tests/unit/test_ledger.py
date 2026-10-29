@@ -242,3 +242,17 @@ def test_append_only_blocks_findings_update_to_illegal_state(
     ledger.append_finding(c, task_id, "甲", "d", "r")
     with pytest.raises(sqlite3.IntegrityError, match="verify_state IN"):
         c.execute("UPDATE findings SET verify_state = 'foo'")
+
+
+def test_append_finding_records_actor(
+    conn: Callable[[], sqlite3.Connection],
+) -> None:
+    """M5-11：findings 记申报者；缺省 main（旧装配语义），worker 显式署名。"""
+    c = conn()
+    task = ledger.start_task(c, input_text="actor 演示", goal="g")
+    default_row = ledger.append_finding(c, task.id, "默认", "d", "raw/a.txt")
+    worker_row = ledger.append_finding(c, task.id, "工人报的", "d", "raw/b.txt", actor="workerA")
+    assert default_row.actor == "main"
+    assert worker_row.actor == "workerA"
+    fetched = ledger.get_finding(c, worker_row.id)
+    assert fetched.actor == "workerA"
