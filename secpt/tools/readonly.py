@@ -182,12 +182,17 @@ class _RootedTool:
         if not text:
             raise ValueError("path 为空")
         given = Path(text)
-        if given.is_absolute():
-            raise ValueError("只接受相对路径（写 xxx.txt 或 raw/xxx.txt 均可）")
         kind = "目录" if want_dir else "文件"
         for root in self._roots:
             base = root.resolve()
-            for candidate in ((base / given).resolve(), (Path.cwd() / given).resolve()):
+            # M5-33 三种写法都收：裸名 / raw 前缀 / 绝对路径——成功摘要回显的是
+            # 绝对路径（"/home/…/raw：100 项"），模型照抄回来曾被"只接受相对路径"
+            # 拒掉（实测一轮 4 次失败）；绝对路径只要落在白名单根内就放行，
+            # 安全边界不变。
+            candidates = [(base / given).resolve(), (Path.cwd() / given).resolve()]
+            if given.is_absolute():
+                candidates.append(given.resolve())
+            for candidate in candidates:
                 if not candidate.is_relative_to(base):
                     continue
                 if want_dir and candidate.is_dir():

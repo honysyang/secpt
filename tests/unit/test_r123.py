@@ -20,7 +20,7 @@ import pytest
 
 from secpt.errors import LedgerError
 from secpt.judge import GroundTruth, JudgeProfile
-from secpt.judge.r123 import r1
+from secpt.judge.r123 import r1, stable_lines
 from secpt.judge.sweep import sweep
 from secpt.store import experience, ledger
 from secpt.store import migrate as migrate_store
@@ -658,3 +658,22 @@ class TestR1StableCompare:
             "\n"
         )
         assert lines == ["22/tcp open ssh"]
+
+
+# ---- M5-33 RFC1123 日期头：真实 http 证据的 R1 重放不再恒不匹配 --------------------
+
+
+def test_stable_lines_ignore_http_date_header() -> None:
+    """同 URL 两次抓取的唯一差异是 Date 头（RFC 1123 格式）——稳定行必须相等。
+    实测第三轮 run 4 条合法 claim 全部因这行悬置到 E_WALL。"""
+    a = (
+        "$ http_get https://x\n\n--- status ---\n200\n--- headers ---\n"
+        'Server: nginx/1.18.0\nDate: Thu, 29 Oct 2026 16:14:20 GMT\nETag: "abc"\n'
+        "--- body ---\nhello"
+    )
+    b = (
+        "$ http_get https://x\n\n--- status ---\n200\n--- headers ---\n"
+        'Server: nginx/1.18.0\nDate: Thu, 29 Oct 2026 16:15:25 GMT\nETag: "abc"\n'
+        "--- body ---\nhello"
+    )
+    assert stable_lines(a) == stable_lines(b)

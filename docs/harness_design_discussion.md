@@ -3104,3 +3104,45 @@ list_dir 新→旧）；test_plan 2（"· step N" 包装 / 裸 [id=…] 包装�
 **遗留**：① read_file 内容上限 1200 字符对 73 行 JSON 仍会分段（但 offset 提示
 在，两段读完）；② raw 目录跨 run 累积本身未治理（list_dir 排序只缓解发现面）；
 ③ plan_review 仍按节拍触发；④ run_command program 白名单（安全默认值）仍欠。
+
+## §104 M5-33 第三轮复盘修复（RFC1123 日期头 / worker 保尾 / nmap 锚路径）+ 一步多单派发写进话术
+
+第三轮真实 run（task 49a2c965，8m57s / 31 步 / **首次 3 条 verified** / E_WALL）
+验证 §102/§103 修复全部生效（R1 真执行、sweep 上限、write+run 协作、内容通道、
+时长分解、救场产生增量），同时用两份真实证据文件直接跑 ``stable_lines()`` 钉死
+了 E_WALL 的唯一根因。本卡补焊 + 把"一步多单"写进话术。
+
+**① RFC1123 日期头击穿 R1 稳定行比对（本轮 E_WALL 唯一根因）。**
+同 URL 两次抓取（间隔 1 分钟）稳定行唯一差异是 ``date: thu, 29 oct …gmt``——
+``_VOLATILE`` 只覆盖 ISO 时间戳。后果链：R1 重放恒不匹配 → 4 条合法 claim（含
+两条重报）悬置 → 出场第 2 验三连败。修：正则补 RFC 1123 模式。冒烟：同 URL 双抓
+只差 Date 头 → verified(rerun) + normal 出场。
+
+**② worker 回执摘要保头保尾（三轮 run worker 申报 0 条的根因）。**
+``[:80]`` 一刀切恰好切掉尾部的 "→ raw/http_xxx.txt"——worker 自己说"现有回执里
+路径都被截断，不能凭猜申报"，只能烧步数 list_dir 反查文件名。修：``_compact``
+保头 110 + 保尾 72，"结果 + 锚点"同屏。
+
+**③ nmap 摘要补证据锚路径（与 http_get 同式）。** 注意力包只有 summary 一条
+通道，nmap 摘要缺路径时模型看不见证据文件名——实测一轮 13 次 list_dir（其中
+4 次因绝对路径被拒）+ 5 步反查空转。修：``summary = f"{digest} → {raw_path}"``。
+
+**④ 只读工具收 roots 内绝对路径。** list_dir 成功摘要回显绝对路径，报错却只收
+相对路径（自相矛盾）——模型照抄回显 4 次被拒。修：``_RootedTool`` 三种写法都收
+（裸名 / raw 前缀 / 绝对路径），绝对路径必须落在白名单根内才放行，安全边界不变。
+
+**⑤ "一步多单"写进话术（机械能力早已在，模型不知道等于没有）。** 三个真实 run
+主循环每步最多派 1 张 agent_run；M5-12 的并发批派单 + 板级多 worker 测试都在，
+唯独主提示词没告诉模型"可以这么干"。修三处：main.system.md 增"并行能力"节
+（同一步多 tool_calls 并发 / agent_run 一步多单、不同攻击面各一单 / 有写依赖的
+调用分两步）；agent_run manifest 描述带"可一步多单并发"；注意力包角色清单节
+标题带同款提示。冒烟：一步两张 agent_run → Barrier 证明两个 worker 真并发。
+
+**测试面（+4 例、翻新 2 处，全库 616 例）**：test_r123 +1（RFC1123 稳定行相等）；
+test_worker +1（保尾路径进回执记忆）；test_assets +1（主话术含并行能力三句）；
+test_readonly_tools 翻新（根外绝对路径仍拒、根内放行）；test_execute_isolation
+翻新（nmap 摘要锚点形态守恒）。ruff 全绿；两场景冒烟全过。
+
+**遗留**：① raw 目录跨 run 累积未治理；② run_command program 白名单（安全默认
+值）仍欠；③ plan_review 仍按节拍触发；④ worker 领单后的子域枚举打法仍偏保守
+（本轮 host 串行解析 45s 超时）。

@@ -84,7 +84,7 @@ class AttentionPack(BaseModel):
             )
         if self.role_catalog:
             lines.append(
-                "## 可派角色（agent_run 的 persona 取 id）\n"
+                "## 可派角色（agent_run 的 persona 取 id；可一步派多单并发）\n"
                 + "\n".join(f"- {item}" for item in self.role_catalog)
             )
         if self.evidence_digest:

@@ -47,6 +47,19 @@ _RECENT_NOTES = 3
 _HISTORY_NOTES = 8
 
 
+def _compact(text: str, *, head: int = 110, tail: int = 72) -> str:
+    """回执摘要压缩（M5-33）：保头保尾，不再把证据路径切掉。
+
+    为什么不能一刀切 ``[:80]``：http_get/nmap 摘要的证据锚路径在**尾部**
+    （"…→ raw/http_xxx.txt"），实测 worker 三轮 run 申报 0 条——它看得见结果
+    却拿不到 evidence_ref 该填什么，只能烧步数 list_dir 反查文件名。保头保尾
+    后"结果 + 锚点"同屏。
+    """
+    if len(text) <= head + tail + 1:
+        return text
+    return f"{text[:head]}…{text[-tail:]}"
+
+
 class Worker:
     """领单工人：工单驱动步循环 → 申报直写黑板 → 诚实收拢小票。"""
 
@@ -180,7 +193,7 @@ class Worker:
                 )
                 # M5-27 收拢摘要带小票事实：主循环只看得到 summary，worker 的自述
                 # thought 无法核实；带上真实回执，主 LLM 才判断得出这单跑成了什么。
-                note = f"{call.name} exit={receipt.exit_code}: {receipt.summary[:80]}"
+                note = f"{call.name} exit={receipt.exit_code}: {_compact(receipt.summary)}"
                 notes.append(note)
                 del notes[:-_RECENT_NOTES]
                 # M5-31 回执记忆：本步回执进 history，下一步的 user 消息带上。

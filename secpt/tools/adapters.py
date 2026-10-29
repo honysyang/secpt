@@ -117,11 +117,15 @@ class NmapTool:
 
         raw_path = self._write_raw(active.command(argv), proc.stdout, proc.stderr)
         exit_code = proc.returncode or 0
-        summary = (
+        digest = (
             _port_digest(proc.stdout)
             or _single_line(proc.stdout.strip() if proc.stdout.strip() else proc.stderr.strip())
             or f"exit={exit_code}"
         )
+        # M5-33 摘要带证据锚路径（与 http_get 同式）：注意力包只有 summary 一条
+        # 通道，nmap 摘要缺路径时模型看不见证据文件名——实测一轮 13 次 list_dir、
+        # 5 步空转都在反查"nmap 证据到底叫什么"。
+        summary = f"{digest} → {raw_path}"
         return ToolOutput(
             tool_name=self.manifest.name,
             args=dict(args),
@@ -157,7 +161,8 @@ class AgentRunTool:
     manifest = ToolManifest(
         name="agent_run",
         kind="in-process",
-        description="Sub-agent 领单（任务板派单，worker 执行器；未装配板时回占位小票）",
+        # M5-33 描述写明"可一步多单并发"——机械能力早就在，模型不知道等于没有。
+        description="Sub-agent 领单（任务板派单；可一步多单并发，未装配板回占位小票）",
         params={
             "mission": "str",
             "persona": "str",

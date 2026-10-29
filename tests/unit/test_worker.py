@@ -28,7 +28,7 @@ from secpt.llms.worker import Worker
 from secpt.store import ledger
 from secpt.store import migrate as migrate_store
 from secpt.tools.adapters import DeclareFindingTool
-from secpt.tools.registry import ToolRegistry
+from secpt.tools.registry import ToolOutput, ToolRegistry
 
 WORKER_ACTOR: Final[str] = "workerA"
 
@@ -393,3 +393,37 @@ def test_worker_parallel_batch_dispatch(tmp_path: Path) -> None:
     result = worker.run(mission)
     assert result.ok and result.finished
     assert len(ran_on) == 2 and len(set(ran_on)) == 2  # 两个不同线程 = 真并发
+
+
+def test_worker_note_keeps_evidence_path_tail(tmp_path: Path) -> None:
+    """M5-33 保头保尾：长摘要的证据锚路径（尾部）不再被 [:80] 切掉——worker 三轮
+    run 申报 0 条的根因就是看不见 evidence_ref 该填什么。"""
+    evidence = tmp_path / "ev.txt"
+    evidence.write_text("证据\n", encoding="utf-8")
+    long_summary = (
+        "HTTP 200 http://aimohu.com/robots.txt（96 bytes）；Server: nginx/1.18.0 (Ubuntu)；"
+        "Content-Type: text/plain；Content-Length: 96"
+        f"→ {evidence}"
+    )
+    script = [
+        _step("看长摘要", calls=[{"name": "echo_tool", "args": {"x": "1"}}]),
+        _step("收工", done=True),
+    ]
+    worker, mission, fake, _conn = _assemble(script, {"step_budget": 2})
+
+    class _EchoDispatcher:
+        def dispatch(self, name, args):
+            return ToolOutput(
+                tool_name=name,
+                args=dict(args),
+                exit_code=0,
+                summary=long_summary,
+                raw_ref=str(evidence),
+            )
+
+    object.__setattr__(worker, "_dispatcher", _EchoDispatcher())
+    result = worker.run(mission)
+    assert result.ok and result.finished
+    # 第二步的 user 消息（回执记忆）必须保留尾部证据路径
+    second_msg = fake.calls[1][1].content
+    assert f"→ {evidence}" in second_msg

@@ -31,7 +31,10 @@ from secpt.store.ledger import FindingRow
 # nmap 的 raw 里有启动时间、耗时、延迟、argv 封面——两次运行必然不同；
 # 直接全文相等会让 R1 在真实场景恒失败（单测用确定性假工具，暴露不出来）。
 _VOLATILE = re.compile(
-    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"  # 任何日期时间
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"  # 任何 ISO 日期时间
+    r"|\d{2} [a-z]{3} \d{4} \d{2}:\d{2}:\d{2}"  # RFC 1123（M5-33：HTTP Date 头
+    #   "Thu, 29 Oct 2026 16:14:20 GMT"——实测同 URL 两次抓取只差这一行，缺它
+    #   R1 在真实 http 证据上恒不匹配，4 条合法 claim 全部悬置到 E_WALL）
     r"|starting nmap .* at "  # nmap 启动行
     r"|nmap done at "
     r"|scanned in [\d.]+ seconds"

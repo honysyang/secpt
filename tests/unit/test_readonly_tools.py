@@ -64,8 +64,12 @@ def test_read_file_bounded_to_roots(tmp_path: Path) -> None:
     escape = tool.run({"path": "../etc/passwd"})
     assert escape.exit_code is None and "只读根" in escape.summary
 
-    absolute = tool.run({"path": "/etc/passwd"})
-    assert absolute.exit_code is None and "相对路径" in absolute.summary
+    # M5-33：绝对路径在根外仍拒（安全边界不变），在根内放行（成功摘要回显的
+    # 就是绝对路径，模型照抄不该被拒——实测一轮 4 次失败全由此来）。
+    outside = tool.run({"path": "/etc/passwd"})
+    assert outside.exit_code is None and "只读根" in outside.summary
+    inside = tool.run({"path": str(raw / "scan.txt")})
+    assert inside.exit_code == 0 and "22/tcp open ssh" in inside.summary
 
 
 def test_read_file_accepts_cwd_relative_raw_prefix(tmp_path: Path, monkeypatch) -> None:

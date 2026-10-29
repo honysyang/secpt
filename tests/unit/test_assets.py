@@ -341,3 +341,12 @@ def test_agent_run_parses_comma_separated_skills(
     assert out.exit_code == 0
     assert seen[0].skills == ("port-recon", "web-surface")
     assert seen[0].coach_after_failures == 2  # M5-13：教练接入门槛随工单进板
+
+
+def test_main_system_prompt_encourages_parallel_dispatch() -> None:
+    """M5-33：主智能体的并行能力必须写在话术里——三个真实 run 主循环每步最多派
+    1 张 agent_run，机械能力（并发批派单）早就在，模型不知道等于没有。"""
+    text = prompt_text("main.system")
+    assert "并发执行" in text
+    assert "多单" in text  # 一步多张 agent_run
+    assert "先 write_file 脚本再 run_command 执行" in text  # 依赖动作分步的边界也写清

@@ -129,7 +129,12 @@ def test_nmap_none_runner_equals_local_runner(tmp_path: Path) -> None:
         {"target": "t1"}
     )
     assert plain.exit_code == injected.exit_code == 0
-    assert plain.summary == injected.summary == "22/tcp open  ssh"
+    # M5-33 起摘要尾部带各自 raw 路径（不同 raw_dir → 路径不同）：端口主体与
+    # 锚点形态分别守恒即可。
+    assert plain.summary.startswith("22/tcp open  ssh")
+    assert injected.summary.startswith("22/tcp open  ssh")
+    assert plain.summary.endswith(" → " + plain.raw_ref)
+    assert injected.summary.endswith(" → " + injected.raw_ref)
     for ref in (plain.raw_ref, injected.raw_ref):
         assert ref
         assert Path(ref).is_file()

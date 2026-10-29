@@ -142,7 +142,7 @@ def test_loop_pack_carries_role_catalog() -> None:
     loop.run("整理材料")
 
     pack = fake.calls[1][1].content
-    assert "## 可派角色（agent_run 的 persona 取 id）" in pack
+    assert "## 可派角色（agent_run 的 persona 取 id；可一步派多单并发）" in pack
     assert "recon（侦察员）" in pack
 
 
